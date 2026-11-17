@@ -25,3 +25,13 @@ def studio(demo):
     except Exception as exc:  # no OpenGL / OSMesa on this machine
         pytest.skip(f"3D rendering is not available here: {exc}")
     return st
+
+
+@pytest.fixture(scope="session", autouse=True)
+def private_settings(tmp_path_factory):
+    """Window settings (theme, folders) go to a temporary place, never to the user's own settings."""
+    try:
+        from PySide6 import QtCore
+    except ImportError:
+        return
+    QtCore.QSettings.setPath(QtCore.QSettings.NativeFormat, QtCore.QSettings.UserScope, str(tmp_path_factory.mktemp("settings")))

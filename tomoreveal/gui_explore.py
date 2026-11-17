@@ -8,7 +8,7 @@ from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 from .explore import readout, slice_image
 from .storyboard import build_timeline, clip_box, default_opacity
 
-DIM = "color:#80868f"
+from .gui_theme import DIM
 CUTS = (("structures above the slice", "above"), ("all structures", "all"), ("no structures", "none"))
 OVERLAYS = (("filled", "filled"), ("outlines", "outlines"), ("off", "off"))
 

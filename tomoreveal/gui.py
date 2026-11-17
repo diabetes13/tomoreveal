@@ -42,7 +42,7 @@ def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
     from .gui_data import DataPanel, clear_layout
     from .gui_explore import ExplorePanel
-    DIM = "color:#80868f"
+    from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
 
@@ -76,7 +76,7 @@ def build_gui(args):
         def __init__(self):
             super().__init__(); self.setAlignment(QtC.Qt.AlignCenter); self.setWordWrap(True)
             self.setMinimumSize(320, 180); self.setSizePolicy(QtW.QSizePolicy.Ignored, QtW.QSizePolicy.Ignored)
-            self.setStyleSheet("background:#000; color:#9aa3af; border-radius:8px; padding:6px")
+            self.setStyleSheet("background: palette(base); color: palette(placeholder-text); border-radius:8px; padding:6px")
             self._img = None; self._press = None; self._moved = False
 
         def set_image(self, qimg):
@@ -178,7 +178,7 @@ def build_gui(args):
             self.marks, self.total = marks, max(1, total); self.update()
 
         def paintEvent(self, e):
-            p = QtG.QPainter(self); p.setPen(QtG.QColor("#8b919a")); f = p.font(); f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85)); p.setFont(f)
+            p = QtG.QPainter(self); p.setPen(self.palette().color(QtG.QPalette.PlaceholderText)); f = p.font(); f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85)); p.setFont(f)
             w = self.width() - 14
             for m in self.marks:
                 x = int(7 + w * m["frame"] / max(1, self.total - 1)); p.drawLine(x, 1, x, 16); p.drawText(x + 3, 13, m["label"])
@@ -197,7 +197,11 @@ def build_gui(args):
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
             self.thr_timer.timeout.connect(self.apply_thresholds)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
-            self._build(); self.show_empty()
+            self._build(); self._menus(); self.show_empty()
+            self._sync_theme()
+            hints = QtW.QApplication.instance().styleHints()
+            if hasattr(hints, "colorSchemeChanged"):  # follow the desktop while "System" is chosen
+                hints.colorSchemeChanged.connect(lambda *_: self.theme == "system" and self.set_theme("system"))
 
         # ---------- layout ----------
         def _group(self, title, parent):
@@ -225,6 +229,32 @@ def build_gui(args):
             s.blockSignals(False)
             if hasattr(s, "_val"):
                 s._val.setText(s._fmt(int(round(v))))
+
+        def _menus(self):
+            view = self.menuBar().addMenu("View"); tm = view.addMenu("Theme")
+            self.theme_group = QtG.QActionGroup(self); self.theme_group.setExclusive(True); self.theme_acts = {}
+            for t, d in THEMES:
+                a = QtG.QAction(t, self, checkable=True); a.triggered.connect(lambda _=False, d=d: self.set_theme(d))
+                self.theme_group.addAction(a); tm.addAction(a); self.theme_acts[d] = a
+
+        @property
+        def theme(self):
+            t = self.settings.value("theme", "system")
+            return t if t in ("system", "light", "dark") else "system"
+
+        def _sync_theme(self):
+            self.theme_acts[self.theme].setChecked(True)
+            self.theme_cb.setCurrentIndex(max(0, self.theme_cb.findData(self.theme)))
+
+        def set_theme(self, choice):
+            """Change the window theme now and remember it (QSettings key "theme")."""
+            self.settings.setValue("theme", choice)
+            apply_theme(QtW.QApplication.instance(), choice); self._sync_theme()
+            self.say(*getattr(self, "_msg", ("", None)))
+            if self.spec is not None and self.info is not None:
+                self.build_controls()  # colour swatches and grey notes
+            for w in (self.marks, *self.clip_s.values()):
+                w.update()
 
         def _tab(self, name):
             """A scrollable page of the tab widget; returns its layout."""
@@ -326,6 +356,13 @@ def build_gui(args):
             self.title_le = QtW.QLineEdit(); self.title_le.setPlaceholderText("optional text, bottom left")
             self.title_le.textChanged.connect(lambda t: self._style_set("title", t))
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("Title", self.title_le); ll.addLayout(form)
+            wg, wl = self._group("Window", lay)
+            row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
+            for t, d in THEMES:
+                self.theme_cb.addItem(t, d)
+            self.theme_cb.activated.connect(lambda j: self.set_theme(self.theme_cb.itemData(j))); row.addWidget(self.theme_cb); row.addStretch(1)
+            wl.addLayout(row)
+            self._note("Light or dark window. This does not change the movie: its background is set above.", wl)
             lay.addStretch(1)
             # preview side
             self.right = QtW.QStackedWidget()
@@ -364,8 +401,8 @@ def build_gui(args):
 
         # ---------- messages and state ----------
         def say(self, text, kind=None):
-            col = {"err": "#e5534b", "ok": "#3fb950"}.get(kind, "#80868f")
-            self.msg_lbl.setStyleSheet(f"color:{col}"); self.msg_lbl.setText(text or "")
+            self._msg = (text, kind); col = message_color(kind)
+            self.msg_lbl.setStyleSheet(f"color:{col}" if col else DIM); self.msg_lbl.setText(text or "")
             if text:
                 self.statusBar().showMessage(text, 10000)
 
@@ -586,7 +623,7 @@ def build_gui(args):
                 self._note("None yet. Use a Zoom button in the Structures tab, or click a structure in the preview.", lay)
 
         def _paint(self, b, hexc):
-            b.setStyleSheet(f"background:{hexc}; border:1px solid #555; border-radius:3px")
+            b.setStyleSheet(f"background:{hexc}; border:1px solid palette(mid); border-radius:3px")
 
         def pick_color(self, k, b):
             c = QtW.QColorDialog.getColor(QtG.QColor(self.spec["classes"][k]["color"]), self, "Colour")
@@ -919,6 +956,7 @@ def build_gui(args):
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])
     app.setApplicationName("TomoReveal"); app.setOrganizationName("TomoReveal")
     app.setWindowIcon(QtG.QIcon(QtG.QPixmap.fromImage(to_qimage(np.asarray(make_icon(256))))))
+    apply_theme(app, QtC.QSettings("TomoReveal", "TomoReveal").value("theme", "system"))  # before the window is made
     win = Main(); win.show()
     if getattr(args, "files", None):
         QtC.QTimer.singleShot(300, lambda: win.load(paths=args.files))

@@ -3,7 +3,7 @@ import os
 
 from PySide6 import QtCore as QtC, QtWidgets as QtW
 
-DIM = "color:#80868f"
+from .gui_theme import DIM
 VOLUMES = ("Volumes (*.mrc *.MRC *.rec *.map *.mrcs *.st *.tif *.tiff *.TIF *.TIFF);;All files (*)")
 SEGMENTATIONS = ("Segmentations (*.ORSSession *.orssession *.mrc *.MRC *.rec *.map *.mrcs *.tif *.tiff *.TIF *.TIFF);;"
                  "All files (*)")

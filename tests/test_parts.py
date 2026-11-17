@@ -177,5 +177,5 @@ def test_names(st):
     assert [sb.part_name(p) for p in d["shots"]] == ["Slide up through the slices", "Slide back, revealing the segmentation",
                                                        "Overview (rock)"]
     f = tr.focus_shot({"class": st.ds.key_of(2), "component": 1}, "x")
-    assert sb.part_name(f, d, st.ds) == "Close-up: one vesicles"
+    assert sb.part_name(f, d, st.ds) == "Close-up: one object of vesicles"
     assert sb.part_name(sb.new_part("slide", **{"from": 3, "to": "last"}, structures="above")) == "Slide: slice 4 → last (structures above)"

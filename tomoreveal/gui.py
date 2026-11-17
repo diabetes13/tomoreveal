@@ -817,7 +817,7 @@ def build_gui(args):
             self.prev.set_image(to_qimage(img))
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
                 self.selected_part = None
-            self.timeline.set_plan(plan, self.spec); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+            self.timeline.set_plan(plan, self.spec, self.st.ds); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
             vp = self.view_part()
             self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
             empty = not any(p.get("on", True) for p in self.spec["shots"])

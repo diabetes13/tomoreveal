@@ -27,7 +27,7 @@ class TimelineCanvas(QtW.QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(ROW_TOP + ROW_H + 6); self.setFocusPolicy(QtC.Qt.StrongFocus); self.setMouseTracking(True)
-        self.plan = None; self.spec = None; self.frame = 0; self.selected = None
+        self.plan = None; self.spec = None; self.ds = None; self.frame = 0; self.selected = None
         self.ppf = 1.0; self.offset = 0.0; self.fit = True; self._drag = None
         self.parts = {}  # id -> dict(index, part, start, end, main=(start, count))
 
@@ -36,8 +36,10 @@ class TimelineCanvas(QtW.QWidget):
     def total(self):
         return len(self.plan.frames) if self.plan else 0
 
-    def set_plan(self, plan, spec):
+    def set_plan(self, plan, spec, ds=None):
         self.plan, self.spec = plan, spec; self.parts = {}
+        if ds is not None:
+            self.ds = ds  # for the names of close-ups
         idx = {p["id"]: i for i, p in enumerate(spec.get("shots", []))}
         for sg in plan.segments:
             pid = sg["part"]
@@ -138,7 +140,7 @@ class TimelineCanvas(QtW.QWidget):
                 continue
             x0, x1 = self.x_of(d["main"][0]), self.x_of(d["main"][0] + d["main"][1])
             part = self.part(pid)
-            label = f"{d['index'] + 1}  {part_name(part) if part else ''}"
+            label = f"{d['index'] + 1}  {part_name(part, self.spec, self.ds) if part else ''}"
             r = QtC.QRectF(x0 + 4, ROW_TOP, max(0.0, x1 - x0 - 8), ROW_H)
             if r.width() > 10:
                 p.drawText(r, QtC.Qt.AlignVCenter | QtC.Qt.AlignLeft, p.fontMetrics().elidedText(label, QtC.Qt.ElideRight, int(r.width())))
@@ -315,7 +317,7 @@ class TimelineCanvas(QtW.QWidget):
             part = self.part(pid) if pid else None
             if part:
                 d = self.parts[pid]; fps = self.plan.fps
-                lines = [f"{d['index'] + 1}. {part_name(part)}", f"{(d['main'][1] if d['main'] else 0) / fps:.1f} s"
+                lines = [f"{d['index'] + 1}. {part_name(part, self.spec, self.ds)}", f"{(d['main'][1] if d['main'] else 0) / fps:.1f} s"
                          + (f" (with transitions and pauses {(d['end'] - d['start']) / fps:.1f} s)" if d["end"] - d["start"] != (d["main"] or (0, 0))[1] else "")]
                 if part["type"] == "slide" and d["main"]:
                     a = self.plan.frames[d["main"][0]]["k"]; b = self.plan.frames[d["main"][0] + d["main"][1] - 1]["k"]
@@ -352,8 +354,8 @@ class Timeline(QtW.QWidget):
             setattr(self, name, getattr(c, name))
         self.scroll.valueChanged.connect(self._scrolled)
 
-    def set_plan(self, plan, spec):
-        self.canvas.set_plan(plan, spec); self._sync_scroll(); self._text()
+    def set_plan(self, plan, spec, ds=None):
+        self.canvas.set_plan(plan, spec, ds); self._sync_scroll(); self._text()
 
     def set_frame(self, i):
         self.canvas.frame = int(min(max(0, self.canvas.total - 1), max(0, i))); self.canvas.ensure_visible(); self.canvas.update(); self._text()
@@ -386,5 +388,5 @@ class Timeline(QtW.QWidget):
             if sg["start"] <= f < sg["start"] + sg["count"]:
                 pid = sg["part"]; break
         part = c.part(pid) if pid else None
-        where = f" · part {c.parts[pid]['index'] + 1}: {part_name(part)}" if part and pid in c.parts else ""
+        where = f" · part {c.parts[pid]['index'] + 1}: {part_name(part, c.spec, c.ds)}" if part and pid in c.parts else ""
         self.info.setText(f"{f / fps:.1f} s of {c.total / fps:.1f} s{where}")

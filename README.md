@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.2.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.3.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -184,7 +184,7 @@ Three buttons pass what you found to the movie: **Start the slice sweep here**, 
 
 ### 4. Set the view
 
-In the **Movie** tab, click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. You can also drag in the preview to rotate, and scroll to zoom.
+In the **Movie** tab, set the **main view**: click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. You can also drag in the preview to rotate, and scroll to zoom.
 
 ### 5. Clip the tomogram
 
@@ -194,35 +194,88 @@ Use **Clip** to keep only a part of the tomogram, as with the clip box in Dragon
 
 **Fit the view to the kept part** moves the camera closer. Remove the tick to keep the camera where it is. **Reset** shows the full tomogram again.
 
-### 6. Add close-ups
+### 6. Build the movie on the timeline
 
-- Click **Zoom** next to a structure to add a close-up of all of that structure.
-- Click **+ Click a structure in the preview**, then click one object (one vesicle, one filament) to add a close-up of that object only.
+The strip under the preview is the **timeline**. Each part of the movie is a coloured block, in the order in which it plays; its width is its duration. Hatched stretches are the automatic camera flights and pauses between parts. The orange line is the **playhead**: the preview shows the frame under it.
 
-For each close-up you can set a caption, the duration, the zoom, the camera movement (orbit, rock or still), what happens to the other structures (grey, hidden or unchanged), and the tomogram (see the next step).
+![The timeline with five parts](docs/images/09-timeline.png)
 
-![A close-up of one object](docs/images/04-closeup.png)
+The default movie has three parts: **Slide up through the slices**, **Slide back, revealing the segmentation**, and **Overview**. You can change all of it:
 
-Drag the bar below the preview to look through the full movie before you make it.
+- **Add a part** with **+ Add part** under the timeline, or with the small **+** on the playhead. The new part goes directly after the part under the playhead. Choose from: Slide up through the slices, Slide back revealing the segmentation, Overview, View from here, **Close-up of** a structure (or of "an object I click in the preview"), and Hold (a pause).
+- **Remove a part** with **Delete** (or the Delete key). Any part can be removed, also the default ones. **Undo** brings it back. **Reset to the default movie** (Movie tab) starts again from the three default parts.
+- **Make a part longer or shorter**: drag the right edge of its block.
+- **Move a part**: drag its block to another place.
+- **Split** cuts a slide or a hold in two at the playhead. Then **+ Add part** puts something between the halves, for example a hold to stop the slice in the middle, or a close-up.
+- Untick a part in the Movie tab to leave it out without removing it.
+- Right-click a block for the same actions.
+
+![Adding a part at the playhead](docs/images/10-add-part.png)
+
+| On the timeline | Does |
+|---|---|
+| Click or drag on the time scale | Moves the playhead; the preview follows |
+| Click a block | Selects the part and opens its settings in the Movie tab |
+| Double-click a block | Opens its settings and shows the Movie tab |
+| Drag the right edge of a block | Changes its duration (0.1 s steps; with Shift 0.5 s) |
+| Drag a block sideways | Moves it; Esc cancels |
+| Right-click a block | Add part after, Duplicate, Split here, Move left, Move right, Switch off, Delete |
+| Ctrl + mouse wheel | Zooms in time; **Fit** shows the whole movie again |
+| Left / Right arrow | One frame back / forward (with Shift: one second) |
+| Up / Down arrow | Previous / next part |
+| Home / End | Start / end of the movie |
+| Space | Play / stop |
+| Delete | Removes the selected part |
+| Ctrl+D | Duplicates it |
+| S | Splits the part under the playhead |
+| Ctrl+Z, Ctrl+Shift+Z (or Ctrl+Y) | Undo, redo |
+
+The keys work while the timeline has the focus (click on it first), so they never change the movie while you type a caption.
+
+**Play** plays the movie in the preview from the playhead, in real time. When drawing is slow (large tomograms, software rendering), it skips frames to keep time; the movie file always has every frame.
+
+#### The parts in the Movie tab
+
+The **Movie** tab lists the same parts, one line each. Click a line to open its settings; the other lines close, and the part is selected on the timeline. Every part has a **Duration**, a **Caption** (text at the bottom while it plays), a **Tomogram** choice (see the next step) and **Transition in** (the seconds of camera flight into it; **automatic**, or 0 to cut straight to it).
+
+| Part | Settings |
+|---|---|
+| Slide | From (first slice, last slice, where the slice is, a slice number), To, Structures (hidden, above the slice, all, leave as they are), Pause before, Pause after |
+| Overview | Camera movement (rock, full spin, still), Rock angle, View (main view or own view) |
+| Close-up | Structure (a list of the loaded structures with their colours), Object (whole structure, the object you picked, or "pick an object in the preview..."), Other structures (grey, hidden, unchanged), Camera movement (orbit, rock, still), Zoom, Tilt |
+| Hold | only the common settings |
+
+![A close-up open in the Movie tab](docs/images/04-closeup.png)
+
+#### Close-ups
+
+- Click **Zoom** next to a structure in the Structures tab, or use **+ Add part > Close-up of**, to add a close-up of all of that structure.
+- Click **+ Click a structure in the preview** (or choose "an object I click in the preview"), then click one object (one vesicle, one filament) to add a close-up of that object only.
+- To change what a close-up shows, open it and choose another **Structure** or **Object** from the lists. The caption follows the structure unless you typed your own.
+- A close-up of a structure that you switched off in the Data tab stays in the list, marked "structure not loaded", and is left out of the movie until the structure is back.
+
+#### View from here
+
+**+ Add part > View from here** adds a still view with its own camera position, taken from the main view. While that part is selected and the playhead is inside it, dragging and scrolling in the preview change the view of this part only (the preview says "Changing the view of part 4"); its line in the Movie tab also has Tilt, Rotate and Zoom bars. Two of these parts in a row make the camera fly from one position to the other.
 
 ### 7. Show, fade or hide the tomogram
 
 In the **Look** tab, **Tomogram slice** sets the default for the whole movie: **Show the tomogram slice**, and its **Opacity** from 0 to 100 %.
 
-In the **Movie** tab, each shot (slide up, reveal, overview and each close-up) has its own **Tomogram** choice:
+In the **Movie** tab, each part of the movie has its own **Tomogram** choice:
 
 - **as default**: as set in the Look tab.
 - **shown**: fully visible.
-- **faded**: see-through, with the opacity that you set for this shot.
+- **faded**: see-through, with the opacity that you set for this part.
 - **hidden**: not shown, so only the structures are visible.
 
-The change happens at the start of the shot, over the **fade** time (0.5 s unless you change it). For example, set the overview to **hidden** to let the tomogram fade out after the reveal. If you hide the tomogram during the slide-up, a grey line warns you that this shot then shows nothing.
+The change happens at the start of the part, over the **fade** time (0.5 s unless you change it). For example, set the overview to **hidden** to let the tomogram fade out after the reveal. If you hide the tomogram during a slide up, a grey line warns you that this part then shows nothing.
 
-![The tomogram choice for each shot](docs/images/07-tomogram.png)
+![The tomogram choice for each part](docs/images/07-tomogram.png)
 
 ### 8. Make the movie
 
-At the end of the **Movie** tab, select the quality, the name and the folder. Click **Make movie**. A bar shows the progress and the time that remains. When the movie is complete, click **Play movie** to open it in your video player, or **Show folder**.
+At the end of the **Movie** tab, select the quality, the name and the folder. Click **Make movie**. The movie is exactly what the timeline shows. A bar shows the progress and the time that remains. When the movie is complete, click **Play movie** to open it in your video player, or **Show folder**.
 
 ![The movie is saved](docs/images/05-movie-saved.png)
 
@@ -364,13 +417,15 @@ The source code is in the `tomoreveal` folder:
 | `dragonfly.py` | Reader for `.ORSSession` files |
 | `volumes.py` | Reading volumes, recognising file types, surfaces |
 | `matching.py` | Lining up a tomogram file with Dragonfly's copy |
-| `storyboard.py` | Camera, clip box, and the frame-by-frame plan of the movie |
+| `storyboard.py` | Camera, clip box, the parts of the movie, editing them, undo, and the frame-by-frame plan |
 | `render.py` | Drawing one frame and writing the movie |
 | `studio.py` | Program state that the window and the commands share |
 | `gui.py` | The desktop window |
 | `gui_data.py` | The Data tab |
 | `gui_explore.py`, `explore.py` | The Explore tab and its slice drawing |
 | `gui_theme.py` | Light and dark themes |
+| `gui_timeline.py` | The timeline under the preview |
+| `gui_movie.py` | Editing the movie (add, delete, split, undo) and the parts list of the Movie tab |
 | `cli.py`, `webapp.py`, `demo.py` | Commands, browser interface, demo data |
 
 To run the tests:

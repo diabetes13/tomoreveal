@@ -241,8 +241,9 @@ def part_name(p, spec=None, ds=None):
             k = ds.id_of(tgt["class"])
             if k is not None:
                 name = class_spec(spec, ds, k).get("name", ds.classes[k]["name"])
-        name = name or p.get("caption") or "structure"
-        return f"Close-up: one {name}" if tgt.get("component") is not None else f"Close-up: {name}"
+        if name is None:
+            return f"Close-up: {p.get('caption') or 'structure'}"
+        return f"Close-up: one object of {name}" if tgt.get("component") is not None else f"Close-up: {name}"
     if t == "hold":
         return "Hold"
     return str(t)

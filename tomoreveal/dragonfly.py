@@ -142,25 +142,82 @@ class OrsSession:
         return lab, self._multiroi_classes(el, int(l.max()) if len(l) else 0)
 
     def _multiroi_classes(self, el, nlab):
-        names, colors = {}, {}
-        isc = el.find("InternalScalars")
+        return self.class_table(el, nlab)[0]
+
+    def class_table(self, el, nlab):
+        """Names, colours and Dragonfly's visible flag of labels 1..nlab -> ({label: dict(name, color, visible, named)}, rules).
+
+        Slots are identified by their type in DataTypesScalarValues (9 text, 8 on/off, 4 whole number, 5 decimal), numbered
+        from 0 as ScalarValues_0, _1, ... (Dragonfly 2022.2). rules says, in plain words, which slot gave what."""
+        isc = el.find("InternalScalars"); rules = {}
+        types, _ = _scalar_types(self, isc)
+        slots = {}
+        for c in (isc if isc is not None else []):
+            num = _slot_number(c.tag)
+            if c.tag.startswith("ScalarValues_") and num is not None and c.findtext("RecordOffset") is not None:
+                guid = c.attrib.get("GUID", "")
+                by_guid = next((k for suf, k in _GUID_KINDS if guid.endswith(suf)), None)
+                by_type = SLOT_TYPES.get(types[num]) if types and num < len(types) else None
+                slots[num] = dict(el=c, kind=by_type or by_guid, typed=by_type is not None and (by_guid in (None, by_type)))
+        typed = bool(slots) and all(v["typed"] for v in slots.values())
+        standard = typed and types == OBSERVED_TYPES
+        rules["layout"] = (f"slot types {types} (as in Dragonfly 2022.2)" if standard
+                           else f"slot types {types} (another layout; guessing)" if typed else "slot types unknown or not matching; guessing")
+
+        def read(num):
+            c = slots[num]["el"]; kind = slots[num]["kind"]
+            return _decode_slot(self, c, kind)
+
+        names = {}
+        for num in sorted(n for n, v in slots.items() if v["kind"] == "string"):
+            try:
+                cand = {int(k): v for k, v in read(num).items()}
+            except Exception as exc:
+                print(f"  note: could not read text slot {num} ({exc})"); continue
+            if cand and min(cand) >= 1 and max(cand) <= max(nlab, len(cand)):
+                names = cand
+                rules["names"] = f"text slot ScalarValues_{num}" + ("" if typed else " (guessed: first text slot)"); break
+        if not names:
+            rules["names"] = "no names found in the session"
+        colors = {}
+
+        def as_colours(vals):
+            return {k: bgr_hex(int(x, 16)) for k, x in enumerate(vals) if k > 0}
+
+        whole = sorted(n for n, v in slots.items() if v["kind"] == "uint32")
+
+        def colour_like(v):  # 24-bit values, not all zero, and not simply the label numbers 1, 2, 3, ...
+            return len(v) > 1 and max(v[1:]) < 1 << 24 and v[1:] != list(range(1, len(v))) and len(set(v[1:]) - {0}) > 0
+
         try:
-            best = 0
-            for c in (isc if isc is not None else []):
-                if not c.tag.startswith("ScalarValues_") or c.findtext("RecordOffset") is None:
-                    continue
-                off, kind = int(c.findtext("RecordOffset")), c.attrib.get("GUID", "")
-                if kind.endswith("CxvArrayString") and not names:
-                    names = parse_strings(self._read(off))
-                elif kind.endswith("CxvArrayUnsignedLong"):
-                    v = self._array(off, int(c.findtext("size")))
-                    if len(set(v[1:].tolist()) - {0}) > best:  # the colour slot has the most distinct values
-                        best = len(set(v[1:].tolist()) - {0})
-                        colors = {k: bgr_hex(x) for k, x in enumerate(v.tolist()) if k > 0}  # stored as 0x00BBGGRR
-        except Exception as exc:  # names/colours are cosmetic: fall back rather than fail
-            print(f"  note: could not read class names/colours from the session ({exc}); using defaults")
-        return {k: dict(name=names.get(k) or f"class {k}", color=colors.get(k) or PALETTE[(k - 1) % len(PALETTE)])
-                for k in range(1, nlab + 1)}
+            if standard and 1 in whole and colour_like([int(x, 16) for x in read(1)]):
+                colors = as_colours(read(1)); rules["colours"] = "slot ScalarValues_1 (whole numbers, as in Dragonfly 2022.2)"
+            else:
+                for num in whole:
+                    if colour_like([int(x, 16) for x in read(num)]):
+                        colors = as_colours(read(num)); rules["colours"] = f"slot ScalarValues_{num} (guessed: values look like colours)"; break
+        except Exception as exc:
+            print(f"  note: could not read colours from the session ({exc})")
+        if not colors:
+            rules["colours"] = "no colours found in the session; using TomoReveal's own"
+        visible = {}
+        bools = sorted(n for n, v in slots.items() if v["kind"] == "bool")
+        if len(bools) == 1:
+            try:
+                visible = {k: bool(x) for k, x in enumerate(read(bools[0])) if k > 0}
+                rules["visible"] = f"on/off slot ScalarValues_{bools[0]} (taken as Dragonfly's 'visible' flag)"
+            except Exception as exc:
+                print(f"  note: could not read the visible flags ({exc})")
+        if not visible:
+            rules["visible"] = "no visible flags found"
+        out = {}
+        for k in range(1, nlab + 1):
+            nm = (names.get(k) or "").strip()
+            if not nm and names:
+                print(f"  note: label {k} has no name in the session")
+            out[k] = dict(name=nm or f"label {k} (no name in the session)", named=bool(nm),
+                          color=colors.get(k) or PALETTE[(k - 1) % len(PALETTE)], visible=visible.get(k))
+        return out, rules
 
     def preview_classes(self, obj):
         """Names and colours of an object's structures without decoding its voxels (for listing it before use)."""
@@ -247,6 +304,7 @@ def bgr_hex(x):
 
 # DataTypesScalarValues codes seen in Dragonfly 2022.2, and the GUID suffix of each slot kind
 SLOT_TYPES = {9: "string", 8: "bool", 4: "uint32", 5: "double"}
+OBSERVED_TYPES = [4, 4, 9, 5, 5, 8, 4]  # slot 1 colours, slot 2 names, slot 5 visible flag
 _GUID_KINDS = (("CxvArrayString", "string"), ("CxvArrayUnsignedLong", "uint32"), ("CxvArrayDouble", "double"),
                ("CxvArrayBool", "bool"), ("CxvArrayBoolean", "bool"))
 
@@ -340,11 +398,9 @@ def describe_session(path):
             b, e, l = ses._runs(o)
             nlab = int(l.max()) if len(l) else 0
             counts = np.bincount(l, weights=(e - b + 1), minlength=nlab + 1).astype(np.int64)
-            classes = ses._multiroi_classes(o["el"], nlab)
-            bools = [s["values"] for s in slots if s["decoded_as"] == "bool" and isinstance(s.get("values"), list)]
-            vis = bools[0] if len(bools) == 1 else None
+            classes, d["rules"] = ses.class_table(o["el"], nlab)
             d["table"] = [dict(label=k, voxels=int(counts[k]), name=c["name"], colour=c["color"],
-                               visible=(vis[k] if vis is not None and k < len(vis) else None))
+                               visible=(None if c["visible"] is None else int(c["visible"])))
                           for k, c in classes.items()]
             d["decoded_voxels"] = int(counts.sum())
         except UserError as exc:

@@ -517,20 +517,25 @@ def build_gui(args):
                 k = c["key"]; sc = sp["classes"][k]
                 if several and c["source"] != src:
                     src = c["source"]; head = QtW.QLabel(f"<b>{c['source_title']}</b>"); grid.addWidget(head, r, 0, 1, 5); r += 1
-                if c["background"]:
-                    lab = QtW.QLabel(f"{sc['name']} (background, not drawn)"); lab.setStyleSheet(DIM); grid.addWidget(lab, r, 2)
-                    v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); grid.addWidget(v, r, 3); r += 1
-                    continue
-                cb = QtW.QCheckBox(); cb.setChecked(bool(sc["show"])); cb.toggled.connect(lambda v, k=k: self._class_set(k, "show", v))
+                cb = QtW.QCheckBox(); cb.setChecked(bool(sc["show"])); cb.toggled.connect(lambda v, c=c: self._show_set(c, v))
                 colb = QtW.QPushButton(); colb.setFixedSize(30, 22); self._paint(colb, sc["color"])
                 colb.clicked.connect(lambda _=False, k=k, b=colb: self.pick_color(k, b))
                 ne = QtW.QLineEdit(sc["name"]); ne.setMinimumWidth(70); ne.textChanged.connect(lambda t, k=k: self._class_set(k, "name", t))
                 v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); v.setAlignment(QtC.Qt.AlignRight | QtC.Qt.AlignVCenter); self.vox_lbl[c["id"]] = v
                 zb = QtW.QPushButton("Zoom"); zb.setToolTip("Add a close-up of this structure to the movie")
                 zb.clicked.connect(lambda _=False, k=k: self.add_focus({"class": k}, self.spec["classes"][k]["name"]))
+                zb.setEnabled(bool(c["mesh"]))
+                why = ("background" if c["background"] else "hidden in Dragonfly" if c["hidden"] else
+                       "no name in the session" if not c["named"] else "")
+                if why:  # listed in grey, switched off at first; tick it to show it anyway
+                    ne.setStyleSheet(DIM); ne.setToolTip(f"{why}; tick the box to show it anyway")
+                    cb.setToolTip(f"{why}; tick to show it anyway")
                 for col, w in enumerate((cb, colb, ne, v, zb)):
                     grid.addWidget(w, r, col)
                 r += 1
+                if why and why != "no name in the session":
+                    lab = QtW.QLabel(f"{why}, so not drawn at first" if not sc["show"] else why); lab.setStyleSheet(DIM)
+                    grid.addWidget(lab, r, 2, 1, 3); r += 1
                 if c["kind"] == "score":
                     row = QtW.QHBoxLayout(); lab = QtW.QLabel("threshold"); lab.setStyleSheet(DIM)
                     s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(1, 19); s.setValue(int(round((c["threshold"] or 0.5) * 20)))
@@ -594,6 +599,12 @@ def build_gui(args):
             c = QtW.QColorDialog.getColor(QtG.QColor(self.spec["classes"][k]["color"]), self, "Colour")
             if c.isValid():
                 self.spec["classes"][k]["color"] = c.name(); self._paint(b, c.name()); self.schedule()
+
+        def _show_set(self, c, v):
+            self._class_set(c["key"], "show", v)
+            if v and not c["mesh"]:  # e.g. a background structure: its surface is built only when asked for
+                self.run_job(lambda log: self.st.build_structure(c["key"], log=log, make_renderer=False),
+                             f"Building the surface of {self.spec['classes'][c['key']]['name']} ...")
 
         def _class_set(self, k, key, v):
             self.spec["classes"][k][key] = v; self.schedule()

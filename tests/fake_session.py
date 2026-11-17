@@ -15,7 +15,7 @@ def _record(buf, data):
 def write_session(path, dims=(6, 5, 4), runs=((0, 9, 1), (20, 29, 2), (60, 61, 3)),
                   names=("ER", "Membrane", "background"), colors=(0x0000FF, 0x00FF00, 0xFF0000),
                   visible=(1, 1, 0), title="Segmentation SegWiz test", data_types=(4, 4, 9, 5, 5, 8, 4), image=None, labels=None,
-                  extra_title=None):
+                  extra_title=None, slot0=None, slots_override=None):
     """image: optional float32 (nz, ny, nx) array stored as the session's image.
     labels: optional int (nz, ny, nx) array; its runs replace `runs`. extra_title: also store a copy titled this."""
     buf = bytearray(b"ORSZ" + b"\0" * 8)
@@ -31,21 +31,25 @@ def write_session(path, dims=(6, 5, 4), runs=((0, 9, 1), (20, 29, 2), (60, 61, 3
     n = len(names) + 1
     strings = b"".join(struct.pack("<Q", k) + nm.encode("utf-16-be") + b"\0\0" for k, nm in enumerate(names, 1))
     # numbered from 0 as in Dragonfly 2022.2: _1 colours, _2 names, _5 visible flag
-    slots = [("CxvArrayUnsignedLong", np.zeros(n, "<u4").tobytes(), n),
+    slots = [("CxvArrayUnsignedLong", (np.zeros(n, "<u4") if slot0 is None else np.asarray(slot0, "<u4")).tobytes(), n),
              ("CxvArrayUnsignedLong", np.array([0, *colors], "<u4").tobytes(), n),
              ("CxvArrayString", strings, len(names)),
              ("CxvArrayDouble", np.zeros(n, "<f8").tobytes(), n),
              ("CxvArrayDouble", np.ones(n, "<f8").tobytes(), n),
              ("CxvArrayBool", np.array([0, *visible], "u1").tobytes(), n),
              ("CxvArrayUnsignedLong", np.zeros(n, "<u4").tobytes(), n)]
+    if slots_override is not None:  # list of (GUID suffix, bytes, size) replacing the standard layout
+        slots = slots_override
     slot_xml = "".join(f'<ScalarValues_{i} GUID="ORS.{g}"><RecordOffset>{_record(buf, d)}</RecordOffset><size>{s}</size></ScalarValues_{i}>'
                        for i, (g, d, s) in enumerate(slots))
+    types_off = _record(buf, np.array(data_types, "<u2").tobytes())  # stored like Dragonfly 2022.2: 2 bytes per entry
     total = sum(e - b + 1 for b, e, _ in runs)
     box = "".join(f' direction{i}Size="{d * 1e-9}" direction{i}Spacing="1e-9"' for i, d in enumerate(dims))
     ld = "".join(f"<{k}><RecordOffset>{o}</RecordOffset><size>{len(lab)}</size></{k}>" for k, o in offs.items())
     mroi = (f'<CxvLabeledMultiROI TotalLabelSize="{{total}}"><title>{{title}}</title>'
             f'<orientationBox{box}/><LabelData>{ld}<TreeData ElementCount="{len(lab)}" IntervalCount="{len(runs)}"/></LabelData>'
-            f'<InternalScalars><DataTypesScalarValues>{" ".join(map(str, data_types))}</DataTypesScalarValues>{slot_xml}</InternalScalars>'
+            f'<InternalScalars><DataTypesScalarValues><RecordOffset>{types_off}</RecordOffset><size>{len(data_types)}</size>'
+            f'</DataTypesScalarValues>{slot_xml}</InternalScalars>'
             f'</CxvLabeledMultiROI>')
     body = mroi.format(total=total, title=title) + (mroi.format(total=total, title=extra_title) if extra_title else "")
     if image is not None:

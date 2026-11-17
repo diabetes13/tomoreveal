@@ -343,6 +343,20 @@ class Studio:
             self.ensure_renderer()
         return self.info()
 
+    def build_structure(self, key, log=print, make_renderer=True):
+        """Build the surface of a structure that has none yet (a background structure the user switched on)."""
+        k = self.ds.id_of(key)
+        if k is None:
+            raise UserError("that structure is no longer loaded")
+        if k not in self.ds.meshes:
+            log(f"building the surface of {self.ds.classes[k]['name']} ...")
+            self.ds._mesh(k, force=True); self._stale = True
+            if k not in self.ds.meshes:
+                raise UserError(f"{self.ds.classes[k]['name']} has no surface to draw")
+        if make_renderer:
+            self.ensure_renderer()
+        return self.info()
+
     def ensure_renderer(self):
         """Create or rebuild the 3D renderer; must run on the thread that draws."""
         if not self.can_show:
@@ -395,6 +409,7 @@ class Studio:
         if self.can_show:
             d.update(spec=default_spec(self.ds),
                      structures=[dict(id=k, key=c["key"], name=c["name"], color=c["color"], voxels=c["voxels"], background=c["background"],
+                                      hidden=c.get("hidden", False), named=c.get("named", True), label=c.get("label"),
                                       mesh=k in self.ds.meshes, kind=c["kind"], threshold=c.get("threshold"), source=c["source"],
                                       source_title=c["source_title"]) for k, c in self.ds.classes.items()])
         elif self.seg_sources:

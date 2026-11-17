@@ -68,7 +68,7 @@ def class_spec(spec, ds, k):
 
 def default_spec(ds):
     return dict(
-        classes={c["key"]: dict(name=c["name"], color=c["color"], show=not c["background"]) for c in ds.classes.values()},
+        classes={c["key"]: dict(name=c["name"], color=c["color"], show=not (c["background"] or c.get("hidden"))) for c in ds.classes.values()},
         view=dict(tilt=42, az=0, zoom=1.0),
         style=dict(bg="#000000", legend=True, slice_label=True, title="", contrast=[1, 99], invert=False, ortho=False, fov=30),
         shots=[dict(type="sweep", on=True, seconds=7), dict(type="reveal", on=True, seconds=7),

@@ -63,7 +63,6 @@ def cli_spec(st, args):
         return any(s == str(ds.classes[k]["label"]) or s.lower() == ds.classes[k]["name"].lower() for s in spec_list)
     only = [s.strip() for s in (args.only or "").split(",") if s.strip()]
     excl = [s.strip() for s in (args.exclude or "").split(",") if s.strip()]
-    spec["classes"] = {c["key"]: dict(name=c["name"], color=c["color"], show=not c["background"]) for c in ds.classes.values()}
     for k in ds.classes:
         c = spec["classes"][ds.key_of(k)]
         if only:
@@ -221,6 +220,8 @@ def print_description(d):
                 print(f"      " + (sl["error"] if "error" in sl else _fmt_values(sl["values"])))
         if "error" in o:
             print(f"    PROBLEM: {o['error']}")
+        for what, rule in (o.get("rules") or {}).items():
+            print(f"    {what}: {rule}")
         if o.get("table"):
             if "decoded_voxels" in o:
                 ok = "matches" if o["decoded_voxels"] == o["total_label_size"] else "DOES NOT MATCH"

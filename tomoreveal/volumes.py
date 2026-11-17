@@ -170,7 +170,7 @@ class Dataset:
             if src["kind"] == "scores":
                 k += 1; self.scores[k] = src
                 self.classes[k] = dict(key=f"{src['key']}#1", name=src["name"], color=src.get("color") or PALETTE[(k - 1) % len(PALETTE)],
-                                       kind="score", threshold=float(src["thr"]), background=False, voxels=0, label=1,
+                                       kind="score", threshold=float(src["thr"]), background=False, hidden=False, named=True, voxels=0, label=1,
                                        source=src["key"], source_title=src.get("title", ""))
                 self._rescore(k)
                 continue
@@ -188,6 +188,8 @@ class Dataset:
                 c.update(key=f"{src['key']}#{v}", voxels=int(counts[v]), kind="label", label=v, source=src["key"],
                          source_title=src.get("title", ""))
                 c["background"] = bool((not keep_background) and (c["name"].lower() in ("background", "bg") or counts[v] > 0.5 * lab.size))
+                c["hidden"] = c.get("visible") is False and not c["background"]  # switched off in Dragonfly
+                c["named"] = c.get("named", True)
                 self.classes[k] = c; self.bbox[k] = boxes[v - 1]; self._labels[k] = (lab, v)
         for k, c in self.classes.items():  # surfaces made earlier for the same structure are reused
             m = self._mesh_cache.get((c["key"], c.get("threshold")))
@@ -206,9 +208,10 @@ class Dataset:
         self.scores[k]["thr"] = thr; self.classes[k]["threshold"] = thr
         self._rescore(k); self._mesh(k)
 
-    def _mesh(self, k):
+    def _mesh(self, k, force=False):
+        """Build the surface of structure k; background structures only when asked for (force)."""
         sl = self.bbox.get(k)
-        if sl is None or self.classes[k]["background"]:
+        if sl is None or (self.classes[k]["background"] and not force):
             return
         m = surface(self.mask(k, sl), [s.start for s in sl], self.smooth, self.step)
         if m is not None:

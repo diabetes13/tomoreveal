@@ -12,7 +12,7 @@ import numpy as np
 from .common import UserError, VIEWS
 from .demo import make_demo
 from .render import movie_frames
-from .storyboard import focus_shot
+from .storyboard import focus_shot, merge_settings
 from .studio import Studio
 from .webapp import cmd_app
 
@@ -247,19 +247,21 @@ def build_gui(args):
             gl.addLayout(row)
             self.msg_lbl = QtW.QLabel(""); self.msg_lbl.setWordWrap(True); gl.addWidget(self.msg_lbl)
             self.files_lbl = self._note("No files loaded.", gl)
-            form = QtW.QFormLayout(); self.image_cb = QtW.QComboBox(); self.roi_cb = QtW.QComboBox()
-            for cb in (self.image_cb, self.roi_cb):
-                cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(14)
-            self.image_cb.activated.connect(lambda i: self.load(image=self.image_cb.itemData(i)))
-            self.roi_cb.activated.connect(lambda i: self.load(roi=self.roi_cb.itemData(i)))
-            form.addRow("Image", self.image_cb); form.addRow("Segmentation", self.roi_cb); gl.addLayout(form)
-            self.image_lab, self.roi_lab = form.labelForField(self.image_cb), form.labelForField(self.roi_cb)
+            form = QtW.QFormLayout(); self.image_cb = QtW.QComboBox()
+            self.image_cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); self.image_cb.setMinimumContentsLength(14)
+            self.image_cb.activated.connect(lambda i: self.set_tomogram(self.image_cb.itemData(i)))
+            form.addRow("Tomogram", self.image_cb); gl.addLayout(form)
+            self.image_lab = form.labelForField(self.image_cb)
+            self.seg_head = QtW.QLabel("<b>Segmentation</b>"); gl.addWidget(self.seg_head)
+            self.seg_w = QtW.QWidget(); self.seg_lay = QtW.QVBoxLayout(self.seg_w); self.seg_lay.setContentsMargins(0, 0, 0, 0)
+            gl.addWidget(self.seg_w)
             self.dims_lbl = self._note("", gl)
             self.match_lbl = self._note("", gl); self.match_lbl.setVisible(False)
             # structures
             self.struct_group, sl = self._group("Structures", lay)
             self.struct_box = QtW.QWidget(); self.struct_grid = QtW.QGridLayout(self.struct_box); self.struct_grid.setContentsMargins(0, 0, 0, 0)
             self.struct_grid.setColumnStretch(2, 1); sl.addWidget(self.struct_box)
+            self.struct_note = QtW.QLabel("No segmentation loaded. Add one with Open files, or switch one on above."); sl.addWidget(self.struct_note)
             self._note("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures have a threshold: "
                        "the surface is drawn where the network's score is above it.", sl)
             # view
@@ -363,10 +365,10 @@ def build_gui(args):
             for g in (self.struct_group, self.view_group, self.clip_group, self.movie_group, self.look_group):
                 g.setVisible(False)
             self.scrub.setVisible(False); self.marks.set([], 1); self.frame_lbl.setText(""); self.go_btn.setEnabled(False)
-            self.prev.clear_image("The preview appears here once a tomogram and a segmentation are loaded.\n\nDrop files onto this window to begin.")
+            self.prev.clear_image("The preview appears here once a tomogram or a segmentation is loaded.\n\nDrop files onto this window to begin.")
 
         def set_busy(self, flag, msg=None):
-            self.busy = flag; self.panel.setEnabled(not flag); self.go_btn.setEnabled(not flag and self.st.ready())
+            self.busy = flag; self.panel.setEnabled(not flag); self.go_btn.setEnabled(not flag and self.st.can_show)
             if flag:
                 QtW.QApplication.setOverrideCursor(QtC.Qt.BusyCursor); self.say(msg)
             else:
@@ -389,14 +391,28 @@ def build_gui(args):
             if paths:
                 e.acceptProposedAction(); self.load(paths=paths)
 
-        def load(self, paths=(), roi=None, image=None, features=()):
+        def run_job(self, fn, msg="Reading the files and building 3D surfaces. This can take a minute for large tomograms ..."):
+            """Run a Studio call that returns info() in the Worker thread; the renderer is made afterwards on this thread."""
             if self.busy or self.gen is not None:
                 return
-            self.set_busy(True, "Reading the files and building 3D surfaces. This can take a minute for large tomograms ...")
-            st, paths, features = self.st, list(paths), list(features)
-            self.worker = Worker(lambda log: st.load(paths, roi=roi, image=image, log=log, as_features=features, make_renderer=False))
+            self.set_busy(True, msg)
+            self.worker = Worker(fn)
             self.worker.log.connect(lambda m: self.say(m)); self.worker.done.connect(self._loaded); self.worker.failed.connect(self._load_failed)
             self.worker.start()
+
+        def load(self, paths=(), roi=None, image=None, features=()):
+            st, paths, features = self.st, list(paths), list(features)
+            self.run_job(lambda log: st.load(paths, roi=roi, image=image, log=log, as_features=features, make_renderer=False))
+
+        def set_tomogram(self, key):
+            self.run_job(lambda log: self.st.set_tomogram_source(key or None, log=log, make_renderer=False), "Changing the tomogram ...")
+
+        def set_segmentation(self, key, on):
+            self.run_job(lambda log: self.st.set_segmentation_enabled(key, on, log=log, make_renderer=False),
+                         "Reading the segmentation and building 3D surfaces ..." if on else "Updating ...")
+
+        def remove_source(self, key):
+            self.run_job(lambda log: self.st.remove_source(key, log=log, make_renderer=False), "Updating ...")
 
         def _loaded(self, info):
             try:
@@ -420,41 +436,55 @@ def build_gui(args):
             self.st.reset(); self.info = self.spec = None; self._fill_files(self.st.info()); self.show_empty(); self.say("")
 
         def _fill_files(self, info):
-            f = info.get("files", {}); parts = []
-            if f.get("tomogram"):
-                parts.append("Tomogram: " + f["tomogram"])
-            if f.get("segmentation"):
-                parts.append("Segmentation: " + f["segmentation"])
-            if f.get("features"):
-                parts.append("easymode / Ais: " + ", ".join(f["features"]))
-            self.files_lbl.setText("\n".join(parts) or "No files loaded.")
-            for cb, items, cur, lab in ((self.image_cb, info.get("images", []), info.get("image"), self.image_lab),
-                                        (self.roi_cb, info.get("rois", []), info.get("roi"), self.roi_lab)):
-                cb.blockSignals(True); cb.clear()
-                for o in items:
-                    cb.addItem(o["label"], o["id"])
-                cb.setCurrentIndex(max(0, cb.findData(cur))); cb.blockSignals(False)
-                cb.setVisible(bool(items)); lab.setVisible(bool(items))
+            choices = info.get("tomogram_choices", []); sources = info.get("segmentation_sources", [])
+            loaded = len(choices) > 1 or bool(sources)
+            self.files_lbl.setVisible(not loaded); self.files_lbl.setText("No files loaded.")
+            cb = self.image_cb; cb.blockSignals(True); cb.clear()
+            for o in choices:
+                cb.addItem(o["label"], o["key"] or "")
+            cb.setCurrentIndex(max(0, cb.findData(info.get("tomogram") or ""))); cb.blockSignals(False)
+            cb.setVisible(loaded); self.image_lab.setVisible(loaded)
+            lay = self.seg_lay
+            while lay.count():  # store each widget before setParent(None): afterwards item.widget() is None
+                w = lay.takeAt(0).widget()
+                if w:
+                    w.setParent(None); w.deleteLater()
+            self.seg_head.setVisible(bool(sources)); group = None
+            hidden = {h["key"][8:]: h for h in info.get("sessions", [])}
+            for s in sources:
+                if s["group"] != group:
+                    group = s["group"]; lab = QtW.QLabel(group); lab.setStyleSheet(DIM); lay.addWidget(lab)
+                names = ", ".join(s["names"][:6]) + (", ..." if len(s["names"]) > 6 else "")
+                n = s["count"]
+                tick = QtW.QCheckBox(f"{s['label']} ({n} structure{'s' if n != 1 else ''})" if s["kind"] != "scores" else s["label"])
+                tick.setChecked(bool(s["enabled"])); tick.setEnabled(bool(s["usable"]))
+                tick.setToolTip(s["reason"] or names)
+                tick.toggled.connect(lambda v, key=s["key"]: self.set_segmentation(key, v)); lay.addWidget(tick)
+                note = QtW.QLabel(("    " + s["reason"]) if not s["usable"] else ("    " + names if s["kind"] != "scores" else ""))
+                note.setStyleSheet(DIM); note.setWordWrap(True)
+                if note.text().strip():
+                    lay.addWidget(note)
+                if s["session"] and s is [x for x in sources if x["session"] == s["session"]][-1]:
+                    h = hidden.get(s["session"][8:], {})
+                    if h.get("previews"):
+                        lab = QtW.QLabel(f"    {h['previews']} single-slice previews from the Segmentation Wizard hidden"); lab.setStyleSheet(DIM)
+                        lay.addWidget(lab)
             dims = info.get("dims")
             self.match_lbl.setText(info.get("match_note") or ""); self.match_lbl.setVisible(bool(info.get("match_note")))
             self.dims_lbl.setText((" x ".join(map(str, dims)) + " voxels" + (f" \u00b7 {info['voxel'] / 10:.2f} nm per voxel" if info.get("voxel") else "")) if dims else "")
 
         def apply_info(self, info, keep_message=False):
             prev = self.info
-            same = bool(prev and prev.get("ready") and info.get("ready") and self.spec and prev.get("base_key") == info.get("base_key"))
+            same = bool(prev and prev.get("can_show") and info.get("can_show") and self.spec)
             self.info = info; self._fill_files(info)
-            if not info.get("ready"):
+            if not info.get("can_show"):
                 if not keep_message:
                     self.say(info.get("message", ""))
                 self.spec = None; self.show_empty(); return
             if not same:
                 self.spec = info["spec"]; self.req = self._main_req()
-            else:  # same base segmentation: keep the user's settings, add or drop the structures that changed
-                old = {c["id"]: c["key"] for c in prev["classes"]}; new = {c["id"]: c["key"] for c in info["classes"]}
-                self.spec["classes"] = {str(c["id"]): (self.spec["classes"][str(c["id"])] if old.get(c["id"]) == c["key"] and str(c["id"]) in self.spec["classes"]
-                                                         else info["spec"]["classes"][str(c["id"])]) for c in info["classes"]}
-                self.spec["shots"] = [s for s in self.spec["shots"] if s["type"] != "focus"
-                                      or (s["target"]["class"] in new and old.get(s["target"]["class"]) == new[s["target"]["class"]])]
+            else:  # keep the user's settings of every structure that is still there
+                merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
             for g in (self.struct_group, self.view_group, self.clip_group, self.movie_group, self.look_group):
@@ -480,8 +510,13 @@ def build_gui(args):
                         if w:
                             w.setParent(None); w.deleteLater()
             self.vox_lbl = {}; r = 0
-            for c in self.info["classes"]:
-                k = str(c["id"]); sc = sp["classes"][k]
+            structs = self.info.get("structures", [])
+            self.struct_note.setVisible(not structs); self.pick_btn.setEnabled(bool(structs))
+            several = len({c["source"] for c in structs}) > 1; src = None
+            for c in structs:
+                k = c["key"]; sc = sp["classes"][k]
+                if several and c["source"] != src:
+                    src = c["source"]; head = QtW.QLabel(f"<b>{c['source_title']}</b>"); grid.addWidget(head, r, 0, 1, 5); r += 1
                 if c["background"]:
                     lab = QtW.QLabel(f"{sc['name']} (background, not drawn)"); lab.setStyleSheet(DIM); grid.addWidget(lab, r, 2)
                     v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); grid.addWidget(v, r, 3); r += 1
@@ -492,7 +527,7 @@ def build_gui(args):
                 ne = QtW.QLineEdit(sc["name"]); ne.setMinimumWidth(70); ne.textChanged.connect(lambda t, k=k: self._class_set(k, "name", t))
                 v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); v.setAlignment(QtC.Qt.AlignRight | QtC.Qt.AlignVCenter); self.vox_lbl[c["id"]] = v
                 zb = QtW.QPushButton("Zoom"); zb.setToolTip("Add a close-up of this structure to the movie")
-                zb.clicked.connect(lambda _=False, cid=c["id"], k=k: self.add_focus({"class": cid}, self.spec["classes"][k]["name"]))
+                zb.clicked.connect(lambda _=False, k=k: self.add_focus({"class": k}, self.spec["classes"][k]["name"]))
                 for col, w in enumerate((cb, colb, ne, v, zb)):
                     grid.addWidget(w, r, col)
                 r += 1
@@ -636,13 +671,14 @@ def build_gui(args):
             try:
                 for cid, v in pend.items():
                     r = self.st.set_threshold(cid, v)
-                    for c in self.info["classes"]:
+                    key = None
+                    for c in self.info["structures"]:
                         if c["id"] == cid:
-                            c.update(threshold=r["threshold"], voxels=r["voxels"], mesh=r["mesh"])
+                            c.update(threshold=r["threshold"], voxels=r["voxels"], mesh=r["mesh"]); key = c["key"]
                     if cid in self.vox_lbl:
                         self.vox_lbl[cid].setText(f"{r['voxels']:,}")
                     self.spec["shots"] = [s for s in self.spec["shots"]
-                                          if not (s["type"] == "focus" and s["target"]["class"] == cid and s["target"].get("component") is not None)]
+                                          if not (s["type"] == "focus" and s["target"]["class"] == key and s["target"].get("component") is not None)]
                 self.say("Threshold updated.", "ok")
             except UserError as exc:
                 self.say(str(exc), "err")
@@ -688,7 +724,7 @@ def build_gui(args):
             return sp
 
         def do_preview(self, quick=False):
-            if self.spec is None or self.busy or self.gen is not None or not self.st.ready() or self.st.ren is None:
+            if self.spec is None or self.busy or self.gen is not None or not self.st.can_show or self.st.ren is None:
                 return
             spec = self.spec_for(); req = self.req or {"t": self.frame / max(1, self.total - 1)}; self.req = None
             frames, marks, i = self.st._frame(spec, req)
@@ -718,7 +754,7 @@ def build_gui(args):
                 self.say("Click the structure you want a close-up of.")
 
         def on_click(self, fx, fy):
-            if not self.pick_mode or not self.st.ready() or self.gen is not None:
+            if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:
                 return
             try:
                 p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy})
@@ -753,7 +789,7 @@ def build_gui(args):
                 self.folder_le.setText(d)
 
         def make_movie(self):
-            if not self.st.ready() or self.gen is not None or self.busy:
+            if not self.st.can_show or self.gen is not None or self.busy:
                 return
             folder = os.path.abspath(os.path.expanduser(self.folder_le.text().strip() or self.st.outdir))
             name = re.sub(r"[^\w\-. ]+", "_", self.name_le.text().strip()).strip() or "tomogram_reveal"

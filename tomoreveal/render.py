@@ -4,7 +4,7 @@ import os
 import numpy as np
 
 from .common import hex2rgb
-from .storyboard import Framer, build_timeline, clip_box, state_key
+from .storyboard import Framer, build_timeline, class_spec, clip_box, state_key
 
 
 def get_font(px):
@@ -33,7 +33,7 @@ class Renderer:
         self.pv, self.vtk, self.ds = pv, vtk, ds
         self.size, self.aa, self.bg, self.shown = (960, 540), False, None, False
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
-        nz, ny, nx = ds.tomo.shape
+        self.shape = ds.shape; nz, ny, nx = self.shape
         self.img = pv.ImageData(dimensions=(nx, ny, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
         self.img.point_data["I"] = np.zeros(nx * ny, np.uint8); self._slice_key = None
         self.slice_actor = self.pl.add_mesh(self.img, scalars="I", cmap="gray", clim=(0, 255), lighting=False,
@@ -87,26 +87,27 @@ class Renderer:
         # tomogram slice
         con = style.get("contrast", [1, 99]); inv = bool(style.get("invert", False)); k = int(s["k"])
         key = (k, tuple(con), inv, id(ds.tomo))
-        if key != self._slice_key:
+        if ds.tomo is not None and key != self._slice_key:
             lo, hi = ds.levels(con[0], con[1])
             g = np.clip((ds.tomo[k] - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
             self.img.point_data["I"] = (255 - g if inv else g).ravel(); self._slice_key = key
         self.img.origin = (0, 0, float(k))
-        self.slice_actor.SetVisibility(s["slice"] > 0.01); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
-        self.plane.SetOrigin(0, 0, (k + 0.5) if s["reveal"] else ds.tomo.shape[0] + 10)
-        cb = clip_box(spec, ds.tomo.shape); far = 1e9
+        show_slice = ds.tomo is not None and s["slice"] > 0.01
+        self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
+        self.plane.SetOrigin(0, 0, (k + 0.5) if s["reveal"] else self.shape[0] + 10)
+        cb = clip_box(spec, self.shape); far = 1e9
         (x0, y0, _), (x1, y1, z1) = cb if cb else ((-far, -far, 0), (far, far, far))
         for p, o in zip(self.cplanes, ((x0 - 0.5, 0, 0), (x1 + 0.5, 0, 0), (0, y0 - 0.5, 0), (0, y1 + 0.5, 0), (0, 0, z1 + 0.5))):
             p.SetOrigin(*o)
         # structures
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
-        cls = spec.get("classes", {})
+        tid = ds.id_of(tgt["class"]) if tgt is not None and tgt.get("class") is not None else None
         for kk, act in self.actors.items():
-            c = cls.get(str(kk), {})
+            c = class_spec(spec, ds, kk)
             if not c.get("show", True):
                 act.SetVisibility(False); continue
             col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
-            is_t = tgt is not None and int(tgt.get("class", -1)) == kk and tgt.get("component") is None
+            is_t = tgt is not None and tid == kk and tgt.get("component") is None
             if e <= 0 or tgt is None or mode == "keep" or is_t:
                 act.SetVisibility(True)
             else:
@@ -117,13 +118,13 @@ class Renderer:
         for act in self.comp_actors.values():
             if act is not None:
                 act.SetVisibility(False)
-        if tgt is not None and tgt.get("component") is not None and e > 0 and mode != "keep":
-            kk = int(tgt["class"]); act = self._comp_actor(kk, int(tgt["component"]))
+        if tid is not None and tgt.get("component") is not None and e > 0 and mode != "keep":
+            act = self._comp_actor(tid, int(tgt["component"]))
             if act is not None:
                 act.SetVisibility(True)
-                act.GetProperty().SetColor(*hex2rgb(cls.get(str(kk), {}).get("color", ds.classes[kk]["color"])))
+                act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
         # camera
-        p = s["pose"]; fr = Framer(ds.tomo.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
+        p = s["pose"]; fr = Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
         d, up = fr.axes(p["tilt"], p["az"]); cam = self.pl.camera
         cam.focal_point = tuple(p["c"]); cam.position = tuple(p["c"] + p["dist"] * d); cam.up = tuple(up)
         if fr.ortho:
@@ -141,8 +142,8 @@ class Renderer:
         im = Image.fromarray(fr_img).convert("RGBA"); ov = Image.new("RGBA", im.size, (0, 0, 0, 0)); d2 = ImageDraw.Draw(ov)
         px = max(10, round(size[1] * 0.024)); font = self._font(px)
         dark = sum(bgc) < 1.5; fg = (255, 255, 255, 255) if dark else (0, 0, 0, 255); back = (0, 0, 0, 120) if dark else (255, 255, 255, 150)
-        if style.get("slice_label", True) and s["slice"] > 0.5:
-            d2.text((round(px * 1.5), round(px * 1.1)), f"slice {k + 1}/{ds.tomo.shape[0]}", fill=fg, font=font)
+        if style.get("slice_label", True) and show_slice and s["slice"] > 0.5:
+            d2.text((round(px * 1.5), round(px * 1.1)), f"slice {k + 1}/{self.shape[0]}", fill=fg, font=font)
         if style.get("title"):
             d2.text((round(px * 1.5), size[1] - round(px * 2.4)), str(style["title"]), fill=fg, font=font)
         if s["caption"]:
@@ -151,9 +152,9 @@ class Renderer:
             d2.rounded_rectangle([x - px, y - px * 0.4, x + wt + px, y + px * 2.0], radius=px * 0.5, fill=back)
             d2.text((x, y), s["caption"], fill=fg, font=big)
         if style.get("legend", True) and s["reveal"]:
-            rows = [(cls.get(str(kk), {}).get("name", ds.classes[kk]["name"]), cls.get(str(kk), {}).get("color", ds.classes[kk]["color"]))
-                    for kk in sorted(self.actors) if cls.get(str(kk), {}).get("show", True)
-                    and not (tgt is not None and e > 0.5 and mode != "keep" and int(tgt.get("class", -1)) != kk)]
+            rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
+                    for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
+                    and not (tgt is not None and e > 0.5 and mode != "keep" and tid != kk)]
             if rows:
                 wtxt = max(d2.textlength(n, font=font) for n, _ in rows)
                 x, y = size[0] - round(wtxt + px * 3.4), round(px * 1.1)

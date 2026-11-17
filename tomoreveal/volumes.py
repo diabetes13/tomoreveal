@@ -99,51 +99,100 @@ def surface(mask, off_zyx, smooth, step):
 
 
 class Dataset:
-    """Tomogram plus structures. A structure is either one value of a label volume or a thresholded score volume."""
+    """Optional tomogram plus structures from any number of segmentation sources.
+
+    A structure is one label of one source (a label volume, or one thresholded score volume). Each has an internal
+    integer id (k, used by the renderer) and a stable key "<source key>#<label>" that the settings use."""
     def __init__(self, smooth=15, step=1):
-        self.tomo = self.lab = None; self.vox = None
+        self.tomo = None; self.vox = None; self._shape = None
         self.tomo_name = self.seg_name = ""
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
+        self._labels = {}      # structure id -> (label array of its source, label value)
+        self._mesh_cache = {}  # (structure key, threshold) -> surface, kept while sources are switched on and off
         self.smooth, self.step = smooth, step
 
+    @property
+    def shape(self):
+        """Grid (nz, ny, nx) of everything shown: the tomogram's, or else the segmentation's."""
+        return tuple(self.tomo.shape) if self.tomo is not None else self._shape
+
     def set_tomogram(self, arr, vox, name):
+        if arr is None:
+            self.tomo = None; self._lev = {}; self.tomo_name = ""
+            return
         self.tomo = np.ascontiguousarray(arr, dtype=np.float32); self._lev = {}; self.tomo_name = name
         self.vox = vox or self.vox
 
     def has_seg(self):
         return bool(self.classes)
 
+    def id_of(self, ref):
+        """Structure id from an id, a number given as text, or a stable key; None if there is no such structure."""
+        if isinstance(ref, (int, np.integer)):
+            return int(ref) if int(ref) in self.classes else None
+        if isinstance(ref, str):
+            if ref.isdigit():
+                return int(ref) if int(ref) in self.classes else None
+            for k, c in self.classes.items():
+                if c["key"] == ref:
+                    return k
+        return None
+
+    def key_of(self, k):
+        return self.classes[k]["key"]
+
     def mask(self, k, sl=None):
         if k in self.scores:
             f = self.scores[k]; a = f["arr"] if sl is None else f["arr"][sl]
             return a >= f["thr"] * f["scale"]
-        a = self.lab if sl is None else self.lab[sl]
-        return a == k
+        lab, v = self._labels[k]
+        return (lab if sl is None else lab[sl]) == v
 
-    def set_segmentation(self, lab, classes, vox, name, feats=(), keep_background=False):
+    @staticmethod
+    def label_stats(lab):
+        """(voxel count per label, bounding box per label) of a label volume."""
         from scipy import ndimage
-        self._comp, self.meshes, self.classes, self.bbox, self.scores = {}, {}, {}, {}, {}
-        self.seg_name = name; self.vox = self.vox or vox; mx = 0
-        if lab is not None and not np.issubdtype(lab.dtype, np.integer):
-            lab = np.rint(lab).astype(np.int16)
-        self.lab = lab
-        if lab is not None:
-            mx = int(lab.max()) if lab.size else 0
-            counts = np.bincount(lab.ravel().astype(np.int64), minlength=mx + 1)
-            boxes = ndimage.find_objects(lab.astype(np.int32), max_label=max(mx, 1))
-            for k in range(1, mx + 1):
-                if counts[k] == 0:
+        mx = int(lab.max()) if lab.size else 0
+        counts = np.bincount(lab.ravel().astype(np.int64), minlength=mx + 1)
+        boxes = ndimage.find_objects(lab.astype(np.int32), max_label=max(mx, 1))
+        return counts, boxes
+
+    def set_segmentation(self, sources, vox=None, keep_background=False, shape=None):
+        """sources: list of dicts in display order, each either
+             dict(kind="labels", key, title, arr (int label volume on the grid), classes {label: {name, color}}), or
+             dict(kind="scores", key, title, arr, scale, thr, name, color) for one easymode / Ais score volume.
+        A label source may carry "_stats" = label_stats(arr); it is computed and stored there when missing."""
+        self._comp, self.meshes, self.classes, self.bbox, self.scores, self._labels = {}, {}, {}, {}, {}, {}
+        self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
+        self.seg_name = ", ".join(s.get("title", "") for s in sources); self.vox = self.vox or vox
+        k = 0
+        for src in sources:
+            if src["kind"] == "scores":
+                k += 1; self.scores[k] = src
+                self.classes[k] = dict(key=f"{src['key']}#1", name=src["name"], color=src.get("color") or PALETTE[(k - 1) % len(PALETTE)],
+                                       kind="score", threshold=float(src["thr"]), background=False, voxels=0, label=1,
+                                       source=src["key"], source_title=src.get("title", ""))
+                self._rescore(k)
+                continue
+            lab = src["arr"]
+            if not np.issubdtype(lab.dtype, np.integer):
+                lab = src["arr"] = np.rint(lab).astype(np.int16)
+            if src.get("_stats") is None:
+                src["_stats"] = self.label_stats(lab)
+            counts, boxes = src["_stats"]; classes = src.get("classes") or {}
+            for v in range(1, len(counts)):
+                if counts[v] == 0:
                     continue
-                c = dict(dict(name=f"class {k}", color=PALETTE[(k - 1) % len(PALETTE)]), **(classes.get(k) or {}))
-                c["voxels"] = int(counts[k]); c["kind"] = "label"
-                c["background"] = bool((not keep_background) and (c["name"].lower() in ("background", "bg") or counts[k] > 0.5 * lab.size))
-                self.classes[k] = c; self.bbox[k] = boxes[k - 1]
-        for i, f in enumerate(feats):  # score volumes become extra structures after the label classes
-            k = mx + 1 + i
-            self.scores[k] = f
-            self.classes[k] = dict(name=f["name"], color=f.get("color") or PALETTE[(k - 1) % len(PALETTE)], kind="score",
-                                   threshold=float(f["thr"]), background=False, voxels=0)
-            self._rescore(k)
+                k += 1
+                c = dict(dict(name=f"class {v}", color=PALETTE[(v - 1) % len(PALETTE)]), **(classes.get(v) or {}))
+                c.update(key=f"{src['key']}#{v}", voxels=int(counts[v]), kind="label", label=v, source=src["key"],
+                         source_title=src.get("title", ""))
+                c["background"] = bool((not keep_background) and (c["name"].lower() in ("background", "bg") or counts[v] > 0.5 * lab.size))
+                self.classes[k] = c; self.bbox[k] = boxes[v - 1]; self._labels[k] = (lab, v)
+        for k, c in self.classes.items():  # surfaces made earlier for the same structure are reused
+            m = self._mesh_cache.get((c["key"], c.get("threshold")))
+            if m is not None:
+                self.meshes[k] = m
 
     def _rescore(self, k):
         from scipy import ndimage
@@ -163,7 +212,7 @@ class Dataset:
             return
         m = surface(self.mask(k, sl), [s.start for s in sl], self.smooth, self.step)
         if m is not None:
-            self.meshes[k] = m
+            self.meshes[k] = m; self._mesh_cache[(self.classes[k]["key"], self.classes[k].get("threshold"))] = m
 
     def build_meshes(self, log=print):
         for k in self.classes:
@@ -171,7 +220,14 @@ class Dataset:
                 self._mesh(k)
         log(f"built {len(self.meshes)} surfaces")
 
+    def forget(self, source_key):
+        """Drop cached surfaces of a source that was removed."""
+        for ck in [ck for ck in self._mesh_cache if ck[0].rsplit("#", 1)[0] == source_key]:
+            del self._mesh_cache[ck]
+
     def levels(self, p_lo, p_hi):
+        if self.tomo is None:
+            return 0.0, 1.0
         key = (float(p_lo), float(p_hi))
         if key not in self._lev:
             sub = self.tomo[::max(1, self.tomo.shape[0] // 32), ::4, ::4]
@@ -211,10 +267,12 @@ class Dataset:
 
     def target_box(self, tgt):
         """Padded (lo, hi) box in (x,y,z) voxels around a structure or one of its connected objects."""
-        k = int(tgt["class"])
+        k = self.id_of(tgt["class"])
+        if k is None:
+            raise KeyError(tgt["class"])
         sl = self._comp_slices(k, int(tgt["component"])) if tgt.get("component") is not None else self.bbox[k]
         lo = np.array([sl[2].start, sl[1].start, sl[0].start], float); hi = np.array([sl[2].stop, sl[1].stop, sl[0].stop], float) - 1
         c = (lo + hi) / 2
         half = np.maximum((hi - lo) / 2 * (1.35 if tgt.get("component") is not None else 1.05), 8.0)
-        half[:2] = np.maximum(half[:2], 0.03 * max(self.tomo.shape))  # keep some context around very small objects
+        half[:2] = np.maximum(half[:2], 0.03 * max(self.shape))  # keep some context around very small objects
         return c - half, c + half

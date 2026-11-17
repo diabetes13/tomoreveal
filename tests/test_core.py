@@ -83,9 +83,9 @@ def loaded(demo):
 
 def test_loading_names_and_surfaces(loaded):
     st, info = loaded
-    assert info["ready"] and info["dims"] == [256, 320, 48]
-    assert [c["name"] for c in info["classes"]] == ["membrane", "vesicles", "filaments", "particles"]
-    assert all(c["mesh"] for c in info["classes"])
+    assert info["can_show"] and info["has_tomogram"] and info["dims"] == [256, 320, 48]
+    assert [c["name"] for c in info["structures"]] == ["membrane", "vesicles", "filaments", "particles"]
+    assert all(c["mesh"] for c in info["structures"])
 
 
 def test_default_movie_plan(loaded):

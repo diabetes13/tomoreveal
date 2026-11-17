@@ -17,7 +17,7 @@ from .common import UserError, VIEWS, __version__
 from .dragonfly import OrsSession, guess_roi
 from .matching import apply_match, match_volume
 from .render import Renderer, render_movie
-from .storyboard import build_timeline, default_spec
+from .storyboard import build_timeline, class_spec, default_spec
 from .volumes import Dataset, load_volume, looks_like_labels, looks_like_scores, regrid, score_scale, sidecar_classes
 
 
@@ -25,172 +25,331 @@ class Studio:
     def __init__(self, headless=False, outdir="tomoreveal_output", smooth=15, step=1, keep_background=False):
         self.headless, self.outdir = headless, os.path.abspath(outdir)
         self.smooth, self.step, self.keep_background = smooth, step, keep_background
-        self.ds = Dataset(smooth, step); self.ren = None
-        self.files = dict(tomogram=None, segmentation=None); self.ses = None
-        self.sel = dict(image=None, roi=None); self.opts = dict(images=[], rois=[])
-        self._tomo_src = self._seg_src = self._base_src = None; self._lab_file = None; self._base = None
-        self.feats = {}; self.default_thr = 0.5  # score volumes by structure name, in the order they were added
-        self._stale = False  # the renderer no longer matches the loaded structures
-        self._file_vol = None  # (array, voxel size, path) of the tomogram file as it is on disk
-        self._match = None     # result of matching that file to the image stored in the Dragonfly session
-        self.match_note = ""
+        self.ren = None; self.default_thr = 0.5
+        self._init_sources()
         self.q = queue.Queue(); self.job = dict(state="idle"); self._cancel = False; self.thumb = None
         self.work = tempfile.mkdtemp(prefix="tomoreveal_"); atexit.register(shutil.rmtree, self.work, True)
 
     # ---- loading ----
-    def load(self, paths=(), roi=None, image=None, log=print, as_features=(), make_renderer=True):
-        norm = lambda p: os.path.abspath(os.path.expanduser(str(p).strip().strip('"')))
-        paths = [norm(p) for p in paths if p]; as_features = {norm(p) for p in as_features if p}
+    # Tomogram source: None, "file:<path>" or "session:<path>:<image index>".
+    # Segmentation sources (self.seg_sources, in order): "dragonfly:<path>:<object title>", "labels:<path>", "scores:<path>".
+    @staticmethod
+    def _norm(p):
+        return os.path.abspath(os.path.expanduser(str(p).strip().strip('"')))
+
+    @property
+    def has_tomogram(self):
+        return self.ds.tomo is not None
+
+    @property
+    def has_segmentation(self):
+        return self.ds.has_seg()
+
+    @property
+    def can_show(self):
+        return self.has_tomogram or self.has_segmentation
+
+    def ready(self):  # kept for older callers
+        return self.can_show
+
+    def _source(self, key):
+        for s in self.seg_sources:
+            if s["key"] == key:
+                return s
+        return None
+
+    def _add_session(self, p, log):
+        if p in self.sessions:
+            log(f"{os.path.basename(p)} is already loaded")
+            return
+        ses = OrsSession(p); self.sessions[p] = ses
+        objs = ses.objects(); usable = [o for o in objs if o["dims"][2] > 1]
+        self.hidden[p] = dict(previews=len(objs) - len(usable), undo=len(ses.objects(include_undo=True)) - len(objs))
+        guess = guess_roi(usable)
+        for o in usable:
+            on = guess == o["title"] or (guess == "__all_rois__" and o["kind"] == "ROI")
+            nx, ny, nz = o["dims"]
+            self.seg_sources.append(dict(key=f"dragonfly:{p}:{o['title']}", kind="dragonfly", label=o["title"], title=o["title"],
+                                         path=p, group=os.path.basename(p), obj=o, roi=o["kind"] == "ROI", enabled=on,
+                                         native=(nz, ny, nx), vox=o["voxel"], preview=ses.preview_classes(o)))
+
+    def _add_volume(self, p, as_features, as_segmentation, as_tomogram, nvol):
+        a, vox = load_volume(p); stem = os.path.splitext(os.path.basename(p))[0]
+        scores, labels = looks_like_scores(a), looks_like_labels(a)
+        have_tomo = bool(self.tomo_files) or any(s.images() for s in self.sessions.values())
+        if p in as_tomogram:
+            kind = "tomogram"
+        elif p in as_features or (scores and "__" in stem) or (scores and not labels and (have_tomo or nvol > 1)):
+            kind = "scores"
+        elif labels:
+            kind = "labels"
+        elif p in as_segmentation:
+            kind = "scores" if scores else "labels"
+        else:
+            kind = "tomogram"
+        for other in ("file:", "labels:", "scores:"):  # the same file dropped again, perhaps as something else
+            self._drop(other + p)
+        if kind == "tomogram":
+            self.tomo_files[p] = dict(arr=a, vox=vox)
+            if self._tomo_auto:
+                self.tomo_source = "file:" + p
+            return
+        src = dict(key=f"{kind}:{p}", kind=kind, path=p, group=os.path.basename(p), enabled=True, native=tuple(a.shape), vox=vox, raw=a)
+        if kind == "labels":
+            src.update(label=os.path.basename(p), title=os.path.basename(p), classes=sidecar_classes(p))
+            src["preview"] = {int(v): dict(dict(name=f"class {v}"), **src["classes"].get(int(v), {}))
+                              for v in np.unique(a[::max(1, a.shape[0] // 16), ::4, ::4]) if v > 0} if not src["classes"] else src["classes"]
+        else:
+            name = stem.split("__")[-1] if "__" in stem else stem  # easymode / Ais: <tomogram>__<feature>.mrc
+            src.update(label=f"{os.path.basename(p)} (easymode)", title=name, name=name, scale=score_scale(a), thr=self.default_thr,
+                       preview={1: dict(name=name)})
+        self.seg_sources.append(src)
+
+    def _drop(self, key):
+        if key.startswith("file:"):
+            if self.tomo_files.pop(key[5:], None) is not None and self.tomo_source == key:
+                self.tomo_source = None; self._tomo_auto = True
+            return
+        s = self._source(key)
+        if s is not None:
+            self.seg_sources.remove(s); self.ds.forget(key)
+
+    def _register(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), log=print):
+        paths = [self._norm(p) for p in paths if p]
+        as_features, as_segmentation, as_tomogram = ({self._norm(p) for p in x if p} for x in (as_features, as_segmentation, as_tomogram))
         for p in paths:
             if not os.path.isfile(p):
                 raise UserError(f"file not found: {p}")
         nvol = sum(not p.lower().endswith(".orssession") for p in paths)
         for p in paths:
             if p.lower().endswith(".orssession"):
-                self.files["segmentation"] = p; self.ses = OrsSession(p); self._lab_file = None
-                self.sel["roi"] = None
-                if self.files["tomogram"] is None:
-                    self.sel["image"] = None
-                continue
-            a, vox = load_volume(p); stem = os.path.splitext(os.path.basename(p))[0]
-            scores, labels = looks_like_scores(a), looks_like_labels(a)
-            if p in as_features or (scores and "__" in stem) or (scores and not labels and (self.ds.tomo is not None or nvol > 1)):
-                name = stem.split("__")[-1] if "__" in stem else stem  # easymode / Ais: <tomogram>__<feature>.mrc
-                self.feats[name] = dict(name=name, raw=a, arr=a, key=None, scale=score_scale(a), thr=self.default_thr,
-                                        src=os.path.basename(p), vox=vox)
-                self._seg_src = None
-            elif labels:
-                self.files["segmentation"] = p; self.ses = None; self._lab_file = (a, vox, sidecar_classes(p)); self.sel["roi"] = None
+                self._add_session(p, log)
             else:
-                self.files["tomogram"] = p; self._file_vol = (a, vox, p); self._tomo_src = None
-                self.sel["image"] = "file"
-        # image options
-        imgs = self.ses.images() if self.ses else []
-        self.opts["images"] = ([dict(id="file", label="your file: " + os.path.basename(self.files["tomogram"]))] if self.files["tomogram"] else []) + \
-            [dict(id=f"s{i}", label=f"Dragonfly's copy: {im['title']}") for i, im in enumerate(imgs)]
-        if not self.opts["images"] and self.ds.tomo is not None:  # image kept from a session that was since replaced
-            self.opts["images"] = [dict(id="kept", label=self.ds.tomo_name)]
+                self._add_volume(p, as_features, as_segmentation, as_tomogram, nvol)
+
+    def add_files(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), log=print, make_renderer=True):
+        """Add files to what is loaded. Sessions and segmentation files add segmentation sources; tomograms add tomogram choices."""
+        self._register(paths, as_features, as_segmentation, as_tomogram, log)
+        return self._update(log, make_renderer)
+
+    def set_tomogram_source(self, key, log=print, make_renderer=True):
+        key = key or None
+        if key not in [c["key"] for c in self._tomogram_choices()]:
+            raise UserError("that tomogram is no longer loaded")
+        self.tomo_source = key; self._tomo_auto = False
+        return self._update(log, make_renderer)
+
+    def set_segmentation_enabled(self, key, on, log=print, make_renderer=True):
+        s = self._source(key)
+        if s is None:
+            raise UserError("that segmentation is no longer loaded")
+        s["enabled"] = bool(on)
+        return self._update(log, make_renderer)
+
+    def remove_source(self, key, log=print, make_renderer=True):
+        """Remove a tomogram file ("file:..."), a whole session ("session:<path>") or one segmentation source."""
+        if key.startswith("session:") and key[8:] in self.sessions:
+            p = key[8:]
+            self.sessions.pop(p, None); self.hidden.pop(p, None)
+            for s in [s for s in self.seg_sources if s["kind"] == "dragonfly" and s["path"] == p]:
+                self._drop(s["key"])
+            if (self.tomo_source or "").startswith(f"session:{p}:"):
+                self.tomo_source = None; self._tomo_auto = True
+            self._matches = {k: v for k, v in self._matches.items() if k[1] != p}
+        else:
+            self._drop(key)
+        return self._update(log, make_renderer)
+
+    def load(self, paths=(), roi=None, image=None, log=print, as_features=(), make_renderer=True):
+        """Older interface (command line, browser version): add files, then optionally choose a segmentation and an image.
+        roi: a multi-ROI / ROI title (or a unique part of it) or "__all_rois__", in the session loaded last.
+        image: "file", "s<N>" (image N of that session), "none", or a tomogram source key."""
+        self._register(paths, as_features, log=log)
+        if self.sessions and roi:
+            p = list(self.sessions)[-1]; ses = self.sessions[p]
+            mine = [s for s in self.seg_sources if s["kind"] == "dragonfly" and s["path"] == p]
+            if roi == "__all_rois__":
+                pick = {s["key"] for s in mine if s["roi"]}
+            else:
+                title = roi if any(s["title"] == roi for s in mine) else ses.find(roi)["title"]
+                pick = {f"dragonfly:{p}:{title}"}
+                if not any(s["key"] in pick for s in mine):
+                    raise UserError(f"'{title}' is a single-slice preview or an undo copy and cannot be shown")
+            for s in mine:
+                s["enabled"] = s["key"] in pick
         if image:
-            self.sel["image"] = image
-        if self.sel["image"] not in [o["id"] for o in self.opts["images"]]:
-            self.sel["image"] = self.opts["images"][0]["id"] if self.opts["images"] else None
-        # the tomogram file as imported into Dragonfly may differ from Dragonfly's copy (flipped, binned or cropped at import):
-        # work out how the two correspond, once per file + session pair
-        fpath = self.files["tomogram"]
-        mkey = (fpath, self.ses.path) if (fpath and self.ses and imgs) else None
-        if mkey is None:
-            self._match = None
-        elif self._match is None or self._match["key"] != mkey:
-            if self._file_vol is None or self._file_vol[2] != fpath:
-                self._file_vol = load_volume(fpath) + (fpath,)
-            log("comparing your tomogram file with the image stored in the Dragonfly session ...")
-            try:
-                v, notes, r, tf = match_volume(self._file_vol[0], self._file_vol[1], self.ses.read_image(imgs[0]), imgs[0]["voxel"], log)
-                self._match = dict(key=mkey, v=v, notes=notes, r=r, tf=tf, error=None)
-            except UserError as exc:
-                self._match = dict(key=mkey, v=None, notes=[], r=0.0, tf=None, error=str(exc))
-        if self.sel["image"] == "file" and self._match is not None and self._match["error"]:
-            self.sel["image"] = "s0"  # cannot be laid over this session: show Dragonfly's copy and say why
-        self.match_note = ""
-        if self._match is not None:
-            m = self._match
-            if m["error"]:
-                self.match_note = f"Your tomogram file is not used: {m['error']}. Showing Dragonfly's own copy instead."
-            elif m["notes"]:
-                self.match_note = (f"Your tomogram file was lined up with Dragonfly's copy: {'; '.join(m['notes'])} "
-                                   f"(similarity {m['r']:.2f}). Choose which one to show under Image.")
-            else:
-                self.match_note = "Your tomogram file and Dragonfly's copy are on the same grid. Choose which one to show under Image."
-        if self.sel["image"] and self.sel["image"].startswith("s") and self.ses:
-            src = ("session", self.ses.path, self.sel["image"])
-            if src != self._tomo_src:
-                im = imgs[int(self.sel["image"][1:])]
-                log(f"reading image '{im['title']}' from the session ...")
-                self.ds.set_tomogram(self.ses.read_image(im), im["voxel"], im["title"]); self._tomo_src = src
-        elif self.sel["image"] == "file":
-            src = ("file", fpath, mkey)
-            if src != self._tomo_src:
-                if self._file_vol is None or self._file_vol[2] != fpath:
-                    self._file_vol = load_volume(fpath) + (fpath,)
-                a, vox, _ = self._file_vol
-                if self._match is not None:
-                    changed = not self._match["tf"]["identity"]
-                    self.ds.set_tomogram(self._match["v"], imgs[0]["voxel"] if changed else (vox or imgs[0]["voxel"]), os.path.basename(fpath))
-                else:
-                    self.ds.set_tomogram(a, vox, os.path.basename(fpath))
-                self._tomo_src = src
-        # base segmentation: a Dragonfly multi-ROI / ROIs, or a label volume, or nothing
-        base_src = None; self.opts["rois"] = []
-        if self.ses:
-            objs = self.ses.objects()
-            nroi = sum(o["kind"] == "ROI" for o in objs)
-            self.opts["rois"] = [dict(id=o["title"], label=f"{o['title']}  ({o['kind']})") for o in objs] + \
-                ([dict(id="__all_rois__", label=f"all {nroi} plain ROIs combined, one class each")] if nroi > 1 else [])
-            if roi:
-                self.sel["roi"] = roi if roi in [o["id"] for o in self.opts["rois"]] else self.ses.find(roi)["title"]
-            if self.sel["roi"] is None:
-                self.sel["roi"] = guess_roi(objs)
-            if self.sel["roi"]:
-                base_src = ("session", self.ses.path, self.sel["roi"])
-        elif self._lab_file is not None:
-            base_src = ("file", self.files["segmentation"])
-        if base_src != self._base_src:
-            if base_src and base_src[0] == "session":
-                pick = [o for o in objs if o["kind"] == "ROI"] if self.sel["roi"] == "__all_rois__" else [self.ses.find(self.sel["roi"])]
-                log(f"reading segmentation '{self.sel['roi']}' ...")
-                lab, classes = self.ses.read_selection(pick)
-                self._base = (lab, classes, pick[0]["voxel"], self.sel["roi"])
-            elif base_src:
-                self._base = (self._lab_file[0], self._lab_file[2], self._lab_file[1], os.path.basename(self.files["segmentation"]))
-            else:
-                self._base = None
-            self._base_src = base_src
-        shape = self.ds.tomo.shape if self.ds.tomo is not None else (self._base[0].shape if self._base else None)
-        tf = self._match["tf"] if (self._match and self._match["tf"] and not self._match["tf"]["identity"]) else None
-        tfkey = (tf["s"], tf["flip"], tf["off"]) if tf else None
-        src = (base_src, tuple((n, f["src"]) for n, f in self.feats.items()), shape, tfkey)
-        if src != self._seg_src and (self._base or self.feats):
-            lab, classes, vox, name = self._base or (None, {}, None, "added structures")
-            for n in list(self.feats):  # bring score volumes onto the tomogram grid, or refuse them
-                f = self.feats[n]; key = (tuple(shape) if shape is not None else None, tfkey)
-                if f["key"] == key:
-                    continue
-                raw = f["raw"]
+            if image == "file" and self.tomo_files:
+                image = "file:" + list(self.tomo_files)[-1]
+            elif re.fullmatch(r"s\d+", image) and self.sessions:
+                image = f"session:{list(self.sessions)[-1]}:{image[1:]}"
+            elif image == "none":
+                image = None
+            if image not in [c["key"] for c in self._tomogram_choices()]:
+                raise UserError(f"no such image: {image}")
+            self.tomo_source = image; self._tomo_auto = False
+        return self._update(log, make_renderer)
+
+    # -- working out what is shown --
+    def _tomogram_choices(self):
+        out = [dict(key=None, label="None", grid=None)]
+        for p, f in self.tomo_files.items():
+            nz, ny, nx = f["arr"].shape
+            out.append(dict(key="file:" + p, label="your file: " + os.path.basename(p), grid=[nx, ny, nz], group=os.path.basename(p)))
+        for p, ses in self.sessions.items():
+            for i, im in enumerate(ses.images()):
+                out.append(dict(key=f"session:{p}:{i}", label=f"from Dragonfly session {os.path.splitext(os.path.basename(p))[0]}: {im['title']}",
+                                grid=list(im["dims"]), group=os.path.basename(p)))
+        return out
+
+    def _default_tomogram(self):
+        if self.tomo_files:
+            return "file:" + list(self.tomo_files)[-1]
+        for p, ses in self.sessions.items():
+            if ses.images():
+                return f"session:{p}:0"
+        return None
+
+    def _match(self, fpath, log):
+        """Line up a tomogram file with the image of a loaded session; first session that fits wins."""
+        res = None
+        for p, ses in self.sessions.items():
+            imgs = ses.images()
+            if not imgs:
+                continue
+            mkey = (fpath, p)
+            if mkey not in self._matches:
+                f = self.tomo_files[fpath]
+                log(f"comparing your tomogram file with the image stored in {os.path.basename(p)} ...")
                 try:
-                    if shape is None:
-                        f["arr"] = raw
-                    elif tf and raw.shape == tuple(tf["src_shape"]):
-                        # made from the original tomogram file: apply the same flip / binning / crop as for that file
-                        log(f"{f['src']}: lined up with the Dragonfly grid in the same way as your tomogram file")
-                        f["arr"] = np.ascontiguousarray(apply_match(raw, tf, shape))
-                    elif raw.shape != tuple(shape):
-                        f["arr"] = regrid(raw, shape, f["src"], log)
-                    else:
-                        f["arr"] = raw
-                    f["key"] = key
-                except UserError:
-                    del self.feats[n]
-                    raise
-            self.ds.set_segmentation(lab, classes, vox, name, list(self.feats.values()), self.keep_background)
-            self._seg_src = src; self._stale = True
-        if self.ready():
-            if self.ds.lab is not None and tuple(self.ds.lab.shape) != tuple(self.ds.tomo.shape):
-                t, l = self.ds.tomo.shape[::-1], self.ds.lab.shape[::-1]
-                raise UserError(f"grid mismatch: the tomogram is {t[0]} x {t[1]} x {t[2]} voxels but the segmentation is "
-                                f"{l[0]} x {l[1]} x {l[2]}. They must be the same volume (same binning and crop).")
-            if any(k not in self.ds.meshes and self.ds.bbox.get(k) is not None and not c["background"] for k, c in self.ds.classes.items()):
-                log("building surfaces ...")
-                self.ds.build_meshes(log)
-            if make_renderer:
-                self.ensure_renderer()
+                    v, notes, r, tf = match_volume(f["arr"], f["vox"], ses.read_image(imgs[0]), imgs[0]["voxel"], log)
+                    self._matches[mkey] = dict(session=p, v=v, notes=notes, r=r, tf=tf, error=None, vox=imgs[0]["voxel"])
+                except UserError as exc:
+                    self._matches[mkey] = dict(session=p, v=None, notes=[], r=0.0, tf=None, error=str(exc))
+            m = self._matches[mkey]
+            if m["error"] is None:
+                return m
+            res = res or m
+        return res
+
+    def _load_tomogram(self, log):
+        """Put the chosen tomogram into the dataset; returns the transform used for files made from the original file."""
+        if self._tomo_auto:
+            self.tomo_source = self._default_tomogram()
+        src, tf, self.match_note = self.tomo_source, None, ""
+        if src and src.startswith("file:"):
+            fpath = src[5:]; m = self._match(fpath, log) if self.sessions else None
+            if m is not None and m["error"] and self._tomo_auto and self._default_session_image():
+                self.match_note = f"Your tomogram file is not used: {m['error']}. Showing Dragonfly's own copy instead."
+                src = self.tomo_source = self._default_session_image()
+            elif m is not None and m["error"]:
+                self.match_note = f"Your tomogram file does not line up with the Dragonfly session: {m['error']}"
+            elif m is not None:
+                tf = m["tf"] if not m["tf"]["identity"] else None
+                self.match_note = (f"Your tomogram file was lined up with Dragonfly's copy: {'; '.join(m['notes'])} (similarity {m['r']:.2f})."
+                                   if m["notes"] else "Your tomogram file and Dragonfly's copy are on the same grid.")
+        if src != self._tomo_loaded:
+            if src is None:
+                self.ds.set_tomogram(None, None, "")
+            elif src.startswith("file:"):
+                fpath = src[5:]; f = self.tomo_files[fpath]; m = self._match(fpath, lambda *a: None) if self.sessions else None
+                if m is not None and m["error"] is None:
+                    self.ds.set_tomogram(m["v"], m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"]), os.path.basename(fpath))
+                else:
+                    self.ds.set_tomogram(f["arr"], f["vox"], os.path.basename(fpath))
+            else:
+                p, i = src[8:].rsplit(":", 1); im = self.sessions[p].images()[int(i)]
+                log(f"reading image '{im['title']}' from the session ...")
+                self.ds.set_tomogram(self.sessions[p].read_image(im), im["voxel"], im["title"])
+            self._tomo_loaded = src
+        return tf
+
+    def _default_session_image(self):
+        for p, ses in self.sessions.items():
+            if ses.images():
+                return f"session:{p}:0"
+        return None
+
+    @staticmethod
+    def _grid_text(shape):
+        nz, ny, nx = shape
+        return f"{nx} × {ny} × {nz}"
+
+    def _place(self, s, ref, ref_name, tf, log):
+        """Bring one source onto the reference grid (nz, ny, nx); sets s["arr"], s["usable"] and s["reason"]."""
+        s["usable"], s["reason"] = True, ""
+        if ref is None:
+            ref = s["native"]
+        if s["kind"] == "dragonfly":
+            if s["native"] != ref:
+                s["usable"] = False
+                s["reason"] = f"{self._grid_text(s['native'])} voxels, but {ref_name} is {self._grid_text(ref)}"
+                return
+            if s.get("arr") is None and s["enabled"]:
+                log(f"reading segmentation '{s['title']}' ...")
+                lab, classes = self.sessions[s["path"]].read_selection([s["obj"]])
+                s.update(arr=lab, classes=classes, _stats=None)
+            return
+        raw = s["raw"]; key = (tuple(ref), (tf["s"], tf["flip"], tf["off"]) if tf else None)
+        if s.get("placed") == key:
+            return
+        if raw.shape == tuple(ref):
+            arr = raw
+        elif s["kind"] == "scores" and tf and raw.shape == tuple(tf["src_shape"]):
+            # made from the original tomogram file: apply the same flip / binning / crop as for that file
+            log(f"{s['group']}: lined up with the Dragonfly grid in the same way as your tomogram file")
+            arr = np.ascontiguousarray(apply_match(raw, tf, ref))
+        elif s["kind"] == "scores":
+            try:
+                arr = regrid(raw, ref, s["group"], log)
+            except UserError:
+                s["usable"] = False
+                s["reason"] = f"{self._grid_text(raw.shape)} voxels, but {ref_name} is {self._grid_text(ref)}, and the proportions differ"
+                return
+        else:
+            s["usable"] = False
+            s["reason"] = f"{self._grid_text(raw.shape)} voxels, but {ref_name} is {self._grid_text(ref)}"
+            return
+        s.update(arr=arr, placed=key, _stats=None)
+
+    def _update(self, log=print, make_renderer=True):
+        tf = self._load_tomogram(log)
+        ref, ref_name = (self.ds.tomo.shape, "the tomogram") if self.ds.tomo is not None else (None, "")
+        if ref is None:  # no tomogram: the first switched-on segmentation sets the grid
+            first = next((s for s in self.seg_sources if s["enabled"]), None)
+            if first is not None:
+                ref, ref_name = first["native"], f"'{first['label']}'"
+        for s in self.seg_sources:
+            self._place(s, ref, ref_name, tf, log)
+        use = [s for s in self.seg_sources if s["enabled"] and s["usable"]]
+        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background)
+        if sig != self._seg_loaded:
+            parts = []
+            for s in use:
+                if s["kind"] == "scores":
+                    parts.append(s)  # the source itself carries arr, scale and thr, so a threshold change persists
+                else:
+                    parts.append(s if s["kind"] == "labels" else dict(s, kind="labels"))
+            self.ds.set_segmentation(parts, vox=next((s["vox"] for s in use if s.get("vox")), None),
+                                     keep_background=self.keep_background, shape=ref)
+            for s, part in zip(use, parts):  # keep label statistics for the next rebuild
+                if part is not s:
+                    s["_stats"] = part.get("_stats")
+            self._seg_loaded = sig; self._stale = True
+        if self.has_segmentation and any(k not in self.ds.meshes and self.ds.bbox.get(k) is not None and not c["background"]
+                                         for k, c in self.ds.classes.items()):
+            log("building surfaces ...")
+            self.ds.build_meshes(log)
+        if make_renderer:
+            self.ensure_renderer()
         return self.info()
 
     def ensure_renderer(self):
         """Create or rebuild the 3D renderer; must run on the thread that draws."""
-        if not self.ready():
+        if not self.can_show:
+            self._drop_renderer()
             return None
-        nz, ny, nx = self.ds.tomo.shape
-        if self.ren is None or self._stale or self.ren.img.dimensions[:2] != (nx, ny):
+        nz, ny, nx = self.ds.shape
+        if self.ren is None or self._stale or self.ren.img.dimensions[:2] != (nx, ny) or self.ren.shape != self.ds.shape:
             self._drop_renderer(); self.ren = Renderer(self.ds, self.headless); self._stale = False
         self.ren._slice_key = None
         return self.ren
@@ -199,20 +358,18 @@ class Studio:
         if self.ren is not None:
             self.ren.close(); self.ren = None
 
-    def ready(self):
-        return self.ds.tomo is not None and self.ds.has_seg()
+    def _init_sources(self):
+        self.ds = Dataset(self.smooth, self.step)
+        self.sessions = {}; self.tomo_files = {}; self.seg_sources = []; self.hidden = {}
+        self.tomo_source = None; self._tomo_auto = True; self._tomo_loaded = None; self._seg_loaded = None
+        self._matches = {}; self._stale = False; self.match_note = ""
 
     def reset(self):
-        self._drop_renderer()
-        self.ds = Dataset(self.smooth, self.step)
-        self.files = dict(tomogram=None, segmentation=None); self.ses = None
-        self.sel = dict(image=None, roi=None); self.opts = dict(images=[], rois=[])
-        self._tomo_src = self._seg_src = self._base_src = None; self._lab_file = None; self._base = None; self.feats = {}
-        self._stale = False; self._file_vol = None; self._match = None; self.match_note = ""
+        self._drop_renderer(); self._init_sources()
         return self.info()
 
     def set_threshold(self, k, value):
-        k = int(k)
+        k = self.ds.id_of(k)
         if k not in self.ds.scores:
             raise UserError("only structures loaded from score volumes have a threshold")
         self.ds.set_threshold(k, value)
@@ -221,21 +378,29 @@ class Studio:
         return dict(voxels=self.ds.classes[k]["voxels"], mesh=k in self.ds.meshes, threshold=self.ds.classes[k]["threshold"])
 
     def info(self):
-        d = dict(ready=self.ready(), files=dict({k: (os.path.basename(v) if v else None) for k, v in self.files.items()},
-                                                features=list(self.feats)),
-                 images=self.opts["images"], image=self.sel["image"], rois=self.opts["rois"], roi=self.sel["roi"],
-                 outdir=self.outdir, views=VIEWS, version=__version__, base_key=str(self._base_src), match_note=self.match_note)
-        if self.ds.tomo is not None:
-            nz, ny, nx = self.ds.tomo.shape
-            d.update(dims=[nx, ny, nz], voxel=self.ds.vox, tomo_name=self.ds.tomo_name)
-        if self.ready():
-            d.update(spec=default_spec(self.ds), seg_key=f"{self._seg_src}",
-                     classes=[dict(id=k, key=("F:" + c["name"]) if c["kind"] == "score" else f"L:{k}", name=c["name"], color=c["color"],
-                                   voxels=c["voxels"], background=c["background"], mesh=k in self.ds.meshes, kind=c["kind"],
-                                   threshold=c.get("threshold")) for k, c in self.ds.classes.items()])
+        d = dict(can_show=self.can_show, has_tomogram=self.has_tomogram, has_segmentation=self.has_segmentation,
+                 outdir=self.outdir, views=VIEWS, version=__version__, match_note=self.match_note,
+                 tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(),
+                 sessions=[dict(key=f"session:{p}", label=os.path.basename(p), **self.hidden.get(p, {})) for p in self.sessions],
+                 segmentation_sources=[dict(key=s["key"], kind=s["kind"], label=s["label"], group=s["group"],
+                                            session=(f"session:{s['path']}" if s["kind"] == "dragonfly" else None),
+                                            enabled=s["enabled"], usable=s.get("usable", True), reason=s.get("reason", ""),
+                                            grid=list(s["native"][::-1]), count=len(s.get("preview") or {}),
+                                            names=[c["name"] for _, c in sorted((s.get("preview") or {}).items())])
+                                       for s in self.seg_sources])
+        if self.ds.shape is not None and self.can_show:
+            nz, ny, nx = self.ds.shape
+            d.update(dims=[nx, ny, nz], voxel=self.ds.vox,
+                     tomo_name=self.ds.tomo_name or next((s["title"] for s in self.seg_sources if s["enabled"] and s.get("usable")), "segmentation"))
+        if self.can_show:
+            d.update(spec=default_spec(self.ds),
+                     structures=[dict(id=k, key=c["key"], name=c["name"], color=c["color"], voxels=c["voxels"], background=c["background"],
+                                      mesh=k in self.ds.meshes, kind=c["kind"], threshold=c.get("threshold"), source=c["source"],
+                                      source_title=c["source_title"]) for k, c in self.ds.classes.items()])
+        elif self.seg_sources:
+            d["message"] = "None of the loaded segmentations is switched on, and there is no tomogram. Switch one on, or add a tomogram."
         else:
-            d["message"] = ("Now drop the segmentation: a Dragonfly .ORSSession, a label volume, or easymode files." if self.ds.tomo is not None
-                            else "Now drop the tomogram." if (self.ds.has_seg() or self.feats or self.ses) else "Drop a tomogram and a segmentation to begin.")
+            d["message"] = "Drop a tomogram, a segmentation, or both to begin."
         return d
 
     # ---- preview / pick ----
@@ -256,8 +421,8 @@ class Studio:
 
     def preview(self, spec, req):
         from PIL import Image
-        if not self.ready():
-            raise UserError("load a tomogram and a segmentation first")
+        if not self.can_show:
+            raise UserError("load a tomogram or a segmentation first")
         frames, marks, i = self._frame(spec, req)
         img = self.ren.draw(frames[i], spec, self._psize(spec), aa=False)
         buf = io.BytesIO(); Image.fromarray(img[..., :3]).save(buf, "JPEG", quality=88)
@@ -273,15 +438,16 @@ class Studio:
             return dict(found=False)
         k, pos = hit
         cid = self.ds.pick_component(k, pos)
-        name = spec.get("classes", {}).get(str(k), {}).get("name", self.ds.classes[k]["name"])
+        key = self.ds.key_of(k)
+        name = class_spec(spec, self.ds, k).get("name", self.ds.classes[k]["name"])
         if cid is None:
-            return dict(found=True, **{"class": k}, component=None, name=name, voxels=self.ds.classes[k]["voxels"])
-        return dict(found=True, **{"class": k}, component=cid, name=name, voxels=int(self.ds.components(k)[2][cid]))
+            return dict(found=True, **{"class": key}, id=k, component=None, name=name, voxels=self.ds.classes[k]["voxels"])
+        return dict(found=True, **{"class": key}, id=k, component=cid, name=name, voxels=int(self.ds.components(k)[2][cid]))
 
     # ---- rendering job (runs on the main thread, like every other VTK call) ----
     def start_render(self, spec, name):
-        if not self.ready():
-            raise UserError("load a tomogram and a segmentation first")
+        if not self.can_show:
+            raise UserError("load a tomogram or a segmentation first")
         if self.job.get("state") == "rendering":
             raise UserError("a movie is already being rendered")
         name = re.sub(r"[^\w\-. ]+", "_", os.path.basename(name or "tomogram_reveal")).strip() or "tomogram_reveal"

@@ -60,15 +60,32 @@ def smooth01(u):
     return u * u * (3 - 2 * u)
 
 
+def class_spec(spec, ds, k):
+    """Settings of structure k: keyed by its stable key (3.2), or by its number in older settings."""
+    cls = spec.get("classes", {}); c = ds.classes.get(k, {})
+    return cls.get(c.get("key")) or cls.get(str(k)) or {}
+
+
 def default_spec(ds):
     return dict(
-        classes={str(k): dict(name=c["name"], color=c["color"], show=not c["background"]) for k, c in ds.classes.items()},
+        classes={c["key"]: dict(name=c["name"], color=c["color"], show=not c["background"]) for c in ds.classes.values()},
         view=dict(tilt=42, az=0, zoom=1.0),
         style=dict(bg="#000000", legend=True, slice_label=True, title="", contrast=[1, 99], invert=False, ortho=False, fov=30),
         shots=[dict(type="sweep", on=True, seconds=7), dict(type="reveal", on=True, seconds=7),
                dict(type="overview", on=True, motion="rock", seconds=6, angle=25)],
         return_to_overview=True, z_range=None, clip=None,
         output=dict(size=[1920, 1080], fps=30, crf=20, aa=True))
+
+
+def merge_settings(spec, new, same_grid=True):
+    """Keep the user's settings (spec) when what is loaded changes; new is default_spec() of the new data.
+    Every structure that is still there keeps its name, colour and visibility (they are keyed by its stable key);
+    new structures get their defaults; close-ups of structures that are gone are dropped."""
+    spec["classes"] = {k: spec["classes"].get(k) or v for k, v in new["classes"].items()}
+    spec["shots"] = [s for s in spec["shots"] if s["type"] != "focus" or (s.get("target") or {}).get("class") in new["classes"]]
+    if not same_grid:  # the slice range and the clip box belonged to the old grid
+        spec["clip"] = None; spec["z_range"] = None
+    return spec
 
 
 def focus_shot(target, caption, **kw):
@@ -82,14 +99,16 @@ def build_timeline(spec, ds):
     """Storyboard -> list of per-frame states, plus (frame, label) marks for the scrubber."""
     out = spec.get("output", {}); fps = int(out.get("fps", 30)); w, h = out.get("size", [1920, 1080])
     style, v = spec.get("style", {}), spec.get("view", {})
-    nz, ny, nx = ds.tomo.shape
+    shape = ds.shape; nz, ny, nx = shape
+    has_tomo, has_seg = ds.tomo is not None, ds.has_seg()
+    base = 1.0 if has_tomo else 0.0  # tomogram slice opacity when nothing else asks for it
     zr = spec.get("z_range") or [0, nz - 1]
     z0, z1 = max(0, int(zr[0])), min(nz - 1, int(zr[1]))
     if z1 < z0:
         z0, z1 = 0, nz - 1
-    fr = Framer(ds.tomo.shape, w / h, float(style.get("fov", 30)), bool(style.get("ortho", False)))
+    fr = Framer(shape, w / h, float(style.get("fov", 30)), bool(style.get("ortho", False)))
     lo, hi = np.zeros(3), np.array([nx - 1, ny - 1, nz - 1], float)
-    cb = clip_box(spec, ds.tomo.shape)
+    cb = clip_box(spec, shape)
     if cb:  # sweep only the kept slices and, unless switched off, frame the kept region
         z0, z1 = max(z0, cb[0][2]), min(z1, cb[1][2])
         if z1 < z0:
@@ -106,7 +125,7 @@ def build_timeline(spec, ds):
         return zoomed(fr.fit(lo, hi, tilt, az + d, 1.07), zoom)
 
     frames, marks = [], []
-    st = dict(k=z0, reveal=False, slice=1.0, e=0.0, target=None, others="grey", caption="")
+    st = dict(k=z0, reveal=False, slice=base, e=0.0, target=None, others="grey", caption="")
     pose = [ov()]
     half = max(1, round(fps * 0.5))
 
@@ -129,7 +148,7 @@ def build_timeline(spec, ds):
     def fly_back(si):
         p0, e0, s0 = pose[0], st["e"], st["slice"]
         emit(round(fps * 1.3), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u)), e=e0 * (1 - smooth01(u)),
-                                              slice=s0 + (1 - s0) * smooth01(u), caption=""), si, "fly")
+                                              slice=s0 + (base - s0) * smooth01(u), caption=""), si, "fly")
         st.update(target=None, e=0.0); pose[0] = ov()
 
     shots = spec.get("shots", [])
@@ -138,11 +157,15 @@ def build_timeline(spec, ds):
             continue
         typ = shot.get("type"); n = max(1, round(fps * max(0.1, float(shot.get("seconds", 5)))))
         if typ == "sweep":
+            if not has_tomo:  # nothing to slide through without a tomogram
+                continue
             st.update(reveal=False, k=z0)
             emit(half, lambda u: {}, si, "hold", "Slices")
             emit(n, lambda u: dict(k=z0 + int(round(u * (z1 - z0)))), si, "main")
             emit(max(1, half // 2), lambda u: {}, si, "hold")
         elif typ == "reveal":
+            if not has_seg:  # nothing to reveal
+                continue
             st.update(k=z1)
             emit(n, lambda u: dict(k=z1 - int(round(u * (z1 - z0))), reveal=True), si, "main", "Reveal")
             emit(half, lambda u: {}, si, "hold")
@@ -166,7 +189,7 @@ def build_timeline(spec, ds):
                 return zoomed(fr.fit(blo, bhi, ft, az + d, 1.0), fz)
 
             p0, p1, e0, old, oldmode, s0 = pose[0], fp(), st["e"], st["target"], st["others"], st["slice"]
-            s1 = 0.0 if shot.get("slice") == "hide" else 1.0
+            s1 = 0.0 if shot.get("slice") == "hide" else base
             mode, cap = shot.get("others", "grey"), shot.get("caption", "")
 
             def fly(u):

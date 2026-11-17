@@ -47,29 +47,31 @@ def cli_studio(args):
             raise UserError("give one --roi (use the app or 'all plain ROIs' via --roi __all_rois__ to combine ROIs)")
         roi = args.roi[0]
     info = st.load(paths, roi=roi, as_features=args.features)
-    if not st.ready():
-        raise UserError("give a segmentation: --session, --labels and/or --features")
-    if args.classes:
+    if not st.can_show:
+        raise UserError("nothing to show: give a tomogram and/or a segmentation (--session, --labels, --features)")
+    if args.classes:  # keyed by label number
         for k, v in json.load(open(args.classes)).items():
-            if int(k) in st.ds.classes:
-                st.ds.classes[int(k)].update({kk: vv for kk, vv in v.items() if kk in ("name", "color")})
+            for c in st.ds.classes.values():
+                if c["kind"] == "label" and str(c["label"]) == str(k):
+                    c.update({kk: vv for kk, vv in v.items() if kk in ("name", "color")})
     return st, info
 
 
 def cli_spec(st, args):
     spec = default_spec(st.ds); ds = st.ds
     def match(spec_list, k):
-        return any(s == str(k) or s.lower() == ds.classes[k]["name"].lower() for s in spec_list)
+        return any(s == str(ds.classes[k]["label"]) or s.lower() == ds.classes[k]["name"].lower() for s in spec_list)
     only = [s.strip() for s in (args.only or "").split(",") if s.strip()]
     excl = [s.strip() for s in (args.exclude or "").split(",") if s.strip()]
+    spec["classes"] = {c["key"]: dict(name=c["name"], color=c["color"], show=not c["background"]) for c in ds.classes.values()}
     for k in ds.classes:
-        c = spec["classes"][str(k)]
+        c = spec["classes"][ds.key_of(k)]
         if only:
             c["show"] = match(only, k)
         if match(excl, k):
             c["show"] = False
         if getattr(args, "classes", None):
-            ov = json.load(open(args.classes)).get(str(k), {})
+            ov = json.load(open(args.classes)).get(str(ds.classes[k]["label"]), {})
             if "show" in ov:
                 c["show"] = bool(ov["show"])
         if k not in ds.meshes:
@@ -84,7 +86,7 @@ def cli_spec(st, args):
         print("  " + st.match_note)
     spec["output"].update(size=list(args.size), aa=not args.no_aa)
     for k in sorted(ds.classes):
-        c = spec["classes"][str(k)]
+        c = spec["classes"][ds.key_of(k)]
         if c["show"]:
             print(f"  class {k:>3}  {c['color']}  {ds.classes[k]['voxels']:>12,} voxels  {c['name']}")
     return spec
@@ -112,10 +114,10 @@ def cmd_movie(args):
     spec["shots"][0]["seconds"] = spec["shots"][1]["seconds"] = args.sweep_seconds
     spec["shots"][2].update(on=args.end != "none", motion=args.end, seconds=args.end_seconds, angle=args.rock_angle)
     for name in args.focus or []:
-        hits = [k for k, c in ds.classes.items() if name == str(k) or name.lower() == c["name"].lower()]
+        hits = [k for k, c in ds.classes.items() if name == str(c["label"]) or name.lower() == c["name"].lower()]
         if not hits or hits[0] not in ds.meshes:
             raise UserError(f"--focus '{name}': no such structure. Available: {', '.join(c['name'] for k, c in ds.classes.items() if k in ds.meshes)}")
-        spec["shots"].append(focus_shot({"class": hits[0]}, ds.classes[hits[0]]["name"], seconds=args.focus_seconds))
+        spec["shots"].append(focus_shot({"class": ds.key_of(hits[0])}, ds.classes[hits[0]]["name"], seconds=args.focus_seconds))
     views = parse_views(args.view); base, ext = os.path.splitext(args.out)
     for name, tilt, az in views:
         out = args.out if len(views) == 1 else f"{base}_{name}{ext or '.mp4'}"
@@ -142,7 +144,7 @@ def cmd_preview(args):
     for i, (name, tilt, az) in enumerate(views):
         spec["view"].update(tilt=tilt, az=az)
         frames, _ = build_timeline(spec, st.ds)
-        idx = [j for j, s in enumerate(frames) if s["reveal"] and s["shot"] == 1 and s["phase"] == "main"]
+        idx = [j for j, s in enumerate(frames) if s["reveal"] and s["shot"] == 1 and s["phase"] == "main"] or list(range(len(frames)))
         s = dict(frames[idx[len(idx) // 2]])
         if args.z is not None:
             s["k"] = args.z

@@ -103,6 +103,13 @@ def make_handler(studio):
                 if busy:
                     return self._send(409, dict(error="busy rendering"))
                 return self._guard(lambda: studio.call(studio.load, body.get("paths") or [], body.get("roi"), body.get("image")))
+            if u.path in ("/api/tomogram", "/api/segmentation", "/api/remove"):
+                if busy:
+                    return self._send(409, dict(error="busy rendering"))
+                fn = {"/api/tomogram": lambda: studio.set_tomogram_source(body.get("key") or None),
+                      "/api/segmentation": lambda: studio.set_segmentation_enabled(body["key"], bool(body.get("on"))),
+                      "/api/remove": lambda: studio.remove_source(body["key"])}[u.path]
+                return self._guard(lambda: studio.call(fn))
             if u.path == "/api/preview":
                 if busy:
                     return self._send(409, dict(error="busy rendering"))
@@ -210,14 +217,15 @@ details summary{cursor:pointer;color:var(--dim)}
  </details>
  <div id="msg"></div>
  <div class="card hidden" id="datacard"><h3>Data</h3>
-  <div class="row"><label>Image</label><select id="image" class="grow"></select></div>
-  <div class="row" id="roirow"><label>Segmentation</label><select id="roi" class="grow"></select></div>
+  <div class="row"><label>Tomogram</label><select id="image" class="grow"></select></div>
+  <div id="segs"></div>
   <div id="dims" style="color:var(--dim);font-size:12px"></div>
   <div id="filesline" style="color:var(--dim);font-size:12px"></div>
   <div class="row"><button id="startover" title="Unload everything">Start over</button></div>
  </div>
  <div class="card hidden" id="classcard"><h3>Structures</h3>
   <table id="classes"></table>
+  <div id="noseg" class="hidden" style="color:var(--dim)">No segmentation loaded. Drop one, or switch one on under Data.</div>
   <div style="color:var(--dim);font-size:12px;margin-top:6px">Untick to hide. <b>Zoom</b> adds a close-up of that structure to the movie.</div>
  </div>
  <div class="card hidden" id="viewcard"><h3>Main view</h3>
@@ -276,35 +284,46 @@ async function load(body){
   say('Reading the files and building 3D surfaces. This can take a minute for large tomograms ...');
   try{const info=await api('/api/load',body);applyInfo(info);}catch(e){say(e.message,'err');}}
 function applyInfo(info){
-  const prev=S.info;const sameSeg=prev&&prev.ready&&info.ready&&S.spec&&prev.base_key===info.base_key;
+  const prev=S.info;const sameSeg=prev&&prev.can_show&&info.can_show&&S.spec;
   S.info=info;
-  const f=info.files||{};
-  if(!info.ready){say((f.tomogram?'Tomogram: '+f.tomogram+'. ':'')+(f.segmentation?'Segmentation: '+f.segmentation+'. ':'')+((f.features||[]).length?'Added structure files: '+f.features.length+'. ':'')+(info.message||''));return;}
+  if(!info.can_show){fillData(info);$('#datacard').classList.toggle('hidden',!(info.segmentation_sources||[]).length);say(info.message||'');return;}
   if(!sameSeg){S.spec=info.spec;S.req={at:{shot:2,u:0}};}
-  else{ // same base segmentation: keep the user's settings, add or drop the structures that changed
-    const oldKey={},newKey={};for(const c of prev.classes)oldKey[c.id]=c.key;for(const c of info.classes)newKey[c.id]=c.key;
-    const merged={};for(const c of info.classes){const k=String(c.id);merged[k]=(S.spec.classes[k]&&oldKey[c.id]===c.key)?S.spec.classes[k]:info.spec.classes[k];}
-    S.spec.classes=merged;S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||(newKey[s.target.class]&&oldKey[s.target.class]===newKey[s.target.class]));}
+  else{ // keep the user's settings of every structure that is still there (keyed by its stable key)
+    if(String(prev.dims)!==String(info.dims)){S.spec.clip=null;S.spec.z_range=null;}
+    const keys=new Set(info.structures.map(c=>c.key));const merged={};
+    for(const [k,v] of Object.entries(info.spec.classes))merged[k]=S.spec.classes[k]||v;
+    S.spec.classes=merged;S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||keys.has(s.target.class));}
   say('Loaded. Adjust anything on the left; the preview updates as you go.','ok');
   for(const id of ['datacard','classcard','viewcard','storycard','lookcard','rendercard','scrubwrap'])$('#'+id).classList.remove('hidden');
   $('#hint').classList.add('hidden');
   if(!$('#name').value||!sameSeg)$('#name').value=(info.tomo_name||'tomogram').replace(/\.[^.]+$/,'').slice(0,60)+'_reveal';
   buildUI();preview();}
 function opt(sel,list,val){sel.innerHTML='';for(const o of list){const e=document.createElement('option');e.value=o.id;e.textContent=o.label;sel.appendChild(e);}sel.value=val;}
+function fillData(info){
+  const im=$('#image');im.innerHTML='';for(const o of info.tomogram_choices){const e=document.createElement('option');e.value=o.key||'';e.textContent=o.label;im.appendChild(e);}
+  im.value=info.tomogram||'';
+  const box=$('#segs');box.innerHTML='';let group=null;
+  for(const s of info.segmentation_sources){
+    if(s.group!==group){group=s.group;const h=el('div',{});h.style.color='var(--dim)';h.style.marginTop='6px';h.textContent=group;box.appendChild(h);}
+    const row=el('label',{});row.style.display='block';const cb=el('input',{type:'checkbox'});cb.checked=s.enabled;cb.disabled=!s.usable;
+    cb.onchange=async()=>{try{say('Updating ...');applyInfo(await api('/api/segmentation',{key:s.key,on:cb.checked}));}catch(e){say(e.message,'err');}};
+    row.append(cb,document.createTextNode(' '+s.label+(s.kind!=='scores'?' ('+s.count+' structures)':'')));row.title=s.reason||s.names.join(', ');box.appendChild(row);
+    const n=el('div',{});n.style.color='var(--dim)';n.style.fontSize='12px';n.style.marginLeft='22px';
+    n.textContent=s.usable?(s.kind!=='scores'?s.names.slice(0,6).join(', ')+(s.names.length>6?', ...':''):''):s.reason;if(n.textContent)box.appendChild(n);}}
 function changed(){clearTimeout(S.timer);S.timer=setTimeout(preview,120);}
 function buildUI(){
   const info=S.info,sp=S.spec;
-  opt($('#image'),info.images,info.image);opt($('#roi'),info.rois,info.roi);$('#roirow').classList.toggle('hidden',!info.rois.length);
+  fillData(info);
   $('#dims').textContent=info.dims.join(' x ')+' voxels'+(info.voxel?' · '+(info.voxel/10).toFixed(2)+' nm per voxel':'');
-  const ff=info.files||{};$('#filesline').textContent=((ff.features||[]).length?'Added from score files: '+ff.features.join(', '):'');
-  const tb=$('#classes');tb.innerHTML='';
-  for(const c of info.classes){const k=String(c.id),sc=sp.classes[k];const tr=document.createElement('tr');
+  $('#filesline').textContent=info.match_note||'';
+  const tb=$('#classes');tb.innerHTML='';$('#noseg').classList.toggle('hidden',info.structures.length>0);
+  for(const c of info.structures){const k=c.key,sc=sp.classes[k];const tr=document.createElement('tr');
     if(c.background){tr.innerHTML='<td></td><td></td><td style="color:var(--dim)">'+esc(c.name)+' (background, not drawn)</td><td class="n">'+c.voxels.toLocaleString()+'</td><td></td>';tb.appendChild(tr);continue;}
     tr.className=sc.show?'':'off';
     const cb=el('input',{type:'checkbox'});cb.checked=sc.show;cb.onchange=()=>{sc.show=cb.checked;tr.className=sc.show?'':'off';changed();};
     const col=el('input',{type:'color',value:sc.color});col.oninput=()=>{sc.color=col.value;changed();};
     const nm=el('input',{type:'text',value:sc.name});nm.oninput=()=>{sc.name=nm.value;changed();};
-    const zb=el('button',{});zb.textContent='Zoom';zb.title='Add a close-up of this structure';zb.onclick=()=>addFocus({class:c.id},sc.name);
+    const zb=el('button',{});zb.textContent='Zoom';zb.title='Add a close-up of this structure';zb.onclick=()=>addFocus({class:c.key},sc.name);
     for(const x of [cb,col,nm]){const td=document.createElement('td');td.appendChild(x);tr.appendChild(td);}
     const tn=document.createElement('td');tn.className='n';tn.textContent=c.voxels.toLocaleString();tr.appendChild(tn);
     const tz=document.createElement('td');tz.appendChild(zb);tr.appendChild(tz);tb.appendChild(tr);
@@ -317,7 +336,7 @@ function buildUI(){
       thr.oninput=()=>show(thr.value,true);
       thr.onchange=async()=>{try{say('Rebuilding '+sc.name+' ...');const r=await api('/api/threshold',{class:c.id,value:+thr.value});
         c.threshold=r.threshold;c.voxels=r.voxels;c.mesh=r.mesh;tn.textContent=r.voxels.toLocaleString();show(r.threshold,r.mesh);
-        S.spec.shots=S.spec.shots.filter(s=>!(s.type==='focus'&&s.target.class===c.id&&s.target.component!=null));buildShots();
+        S.spec.shots=S.spec.shots.filter(s=>!(s.type==='focus'&&s.target.class===c.key&&s.target.component!=null));buildShots();
         say('Threshold updated.','ok');preview();}catch(e){say(e.message,'err');}};
       td.append(lb,thr,tv);tr2.appendChild(td);tb.appendChild(tr2);}}
   const pr=$('#presets');pr.innerHTML='';
@@ -402,8 +421,7 @@ for(const ev of ['dragleave','drop'])document.addEventListener(ev,e=>{e.preventD
 document.addEventListener('drop',e=>{const fs=[...(e.dataTransfer?e.dataTransfer.files:[])];if(fs.length)handleFiles(fs);});
 $('#openpaths').onclick=()=>{const p=[$('#path1').value,$('#path2').value].map(s=>s.trim()).filter(Boolean);if(p.length)load({paths:p});};
 $('#startover').onclick=async()=>{try{await api('/api/reset',{});}catch(e){}location.reload();};
-$('#image').onchange=e=>load({image:e.target.value});
-$('#roi').onchange=e=>load({roi:e.target.value});
+$('#image').onchange=async e=>{try{say('Changing the tomogram ...');applyInfo(await api('/api/tomogram',{key:e.target.value}));}catch(err){say(err.message,'err');}};
 $('#go').onclick=async()=>{
   try{await api('/api/render',{spec:specFor(),name:$('#name').value});$('#result').innerHTML='';startPoll();}catch(e){say(e.message,'err');}};
 $('#cancel').onclick=()=>api('/api/cancel',{});
@@ -421,6 +439,6 @@ async function poll(){
     preview();}
   else if(j.state==='error'){$('#jobmsg').textContent='';say('Rendering failed: '+j.message,'err');preview();}
   else if(j.state==='cancelled'){$('#jobmsg').textContent='Cancelled';preview();}}
-(async()=>{try{const s=await api('/api/state');if(s.info.ready||s.info.files.tomogram||s.info.files.segmentation)applyInfo(s.info);if(s.job.state==='rendering')startPoll();}catch(e){}})();
+(async()=>{try{const s=await api('/api/state');if(s.info.can_show||(s.info.segmentation_sources||[]).length)applyInfo(s.info);if(s.job.state==='rendering')startPoll();}catch(e){}})();
 </script></body></html>
 """

@@ -53,7 +53,7 @@ def test_window_opens_and_loads_demo(demo):
     win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     for _ in range(40):
         app.processEvents()
-    if not win.st.ready() or win.st.ren is None:
+    if not win.st.can_show or win.st.ren is None:
         win.close(); pytest.skip("3D rendering is not available here")
     assert win.struct_group.isVisible() and win.clip_s["z"].mx == 47
     win._clip_changed("z", 10, 30)
@@ -64,7 +64,7 @@ def test_window_opens_and_loads_demo(demo):
 
 
 def test_structure_list_follows_each_new_segmentation(demo, tmp_path):
-    """F1 regression: the Structures list must show the names of the segmentation loaded last, every time."""
+    """F1 regression: the Structures list follows what is switched on, every time it is rebuilt (3.1.0 kept the first list)."""
     QtCore = pytest.importorskip("PySide6.QtCore")
     import argparse
     import json
@@ -80,22 +80,26 @@ def test_structure_list_follows_each_new_segmentation(demo, tmp_path):
     old_hook = __import__("sys").excepthook
     __import__("sys").excepthook = lambda t, v, tb: errors.append(v)
 
-    def load(paths):
+    def wait(start):
         loop = QtCore.QEventLoop()
-        win.load(paths=paths); win.worker.finished.connect(loop.quit); loop.exec()
+        start(); win.worker.finished.connect(loop.quit); loop.exec()
         for _ in range(40):
             app.processEvents()
         return [w.text() for w in (win.struct_grid.itemAt(i).widget() for i in range(win.struct_grid.count()))
                 if isinstance(w, QtWidgets.QLineEdit)]
 
+    first_key, other_key = "labels:" + win.st._norm(demo["labels"]), "labels:" + win.st._norm(other)
     try:
-        first = load([demo["tomogram"], demo["labels"]])
-        if not win.st.ready() or win.st.ren is None:
+        first = wait(lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
+        if not win.st.can_show or win.st.ren is None:
             pytest.skip("3D rendering is not available here")
         assert first == ["membrane", "vesicles", "filaments", "particles"]
+        assert wait(lambda: win.load(paths=[other])) == first + ["alpha", "beta"]  # added to what is loaded
         for _ in range(2):  # every rebuild of a list is tested at least twice
-            assert load([other]) == ["alpha", "beta"]
-            assert load([demo["labels"]]) == first
+            assert wait(lambda: win.set_segmentation(first_key, False)) == ["alpha", "beta"]
+            assert wait(lambda: win.set_segmentation(first_key, True)) == first + ["alpha", "beta"]
+            assert wait(lambda: win.set_segmentation(other_key, False)) == first
+            assert wait(lambda: win.set_segmentation(other_key, True)) == first + ["alpha", "beta"]
         assert not errors, errors
     finally:
         __import__("sys").excepthook = old_hook

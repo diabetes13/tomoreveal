@@ -162,6 +162,27 @@ class OrsSession:
         return {k: dict(name=names.get(k) or f"class {k}", color=colors.get(k) or PALETTE[(k - 1) % len(PALETTE)])
                 for k in range(1, nlab + 1)}
 
+    def preview_classes(self, obj):
+        """Names and colours of an object's structures without decoding its voxels (for listing it before use)."""
+        if obj["kind"] == "ROI":
+            return {1: dict(name=obj["title"], color=PALETTE[0])}
+        names = {}
+        isc = obj["el"].find("InternalScalars")
+        for c in (isc if isc is not None else []):
+            if c.tag.startswith("ScalarValues_") and c.attrib.get("GUID", "").endswith("CxvArrayString") and c.findtext("RecordOffset"):
+                try:
+                    names = parse_strings(self._read(int(c.findtext("RecordOffset"))))
+                except Exception:
+                    names = {}
+                break
+        nlab = max(names, default=0)
+        if not nlab:
+            try:
+                _, _, l = self._runs(obj); nlab = int(l.max()) if len(l) else 0
+            except UserError:
+                nlab = 0
+        return self._multiroi_classes(obj["el"], nlab)
+
     def read_roi(self, obj):
         """Plain ROI: uint32 pairs (first voxel, last voxel) of each run."""
         el = obj["el"]; nx, ny, nz = obj["dims"]; n = nx * ny * nz

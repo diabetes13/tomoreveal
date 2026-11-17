@@ -261,59 +261,284 @@ class MovieEditor(QtC.QObject):
         m.exec(pos)
 
 
-class PartsRows(QtW.QWidget):
-    """The parts of the movie as rows in the Movie tab: tick box, number and name, duration, tomogram, a menu."""
+class ClickableHeader(QtW.QWidget):
+    clicked = QtC.Signal()
+
+    def mousePressEvent(self, e):
+        if e.button() == QtC.Qt.LeftButton:
+            self.clicked.emit()
+
+
+def _combo(items, current, on_change):
+    """A drop-down list of (text, value); on_change(value) when the user picks one."""
+    cb = QtW.QComboBox()
+    for t, d in items:
+        cb.addItem(t, d)
+    i = cb.findData(current)
+    cb.setCurrentIndex(i if i >= 0 else 0)
+    cb.activated.connect(lambda j: on_change(cb.itemData(j)))
+    return cb
+
+
+def _spin(lo, hi, value, on_change, step=0.5, suffix=" s", decimals=2, special=None):
+    sp = QtW.QDoubleSpinBox(); sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(decimals); sp.setSuffix(suffix)
+    if special:  # the lowest value stands for "automatic"
+        sp.setSpecialValueText(special)
+    sp.setValue(value); sp.valueChanged.connect(on_change)
+    return sp
+
+
+SLIDE_ENDS = (("first slice", "first"), ("last slice", "last"), ("where the slice is", "current"), ("a slice number", "number"))
+STRUCTURES = (("hidden", "none"), ("above the slice", "above"), ("all", "all"), ("leave as they are", "keep"))
+MOTIONS = (("rock", "rock"), ("full spin", "spin"), ("still", "none"))
+FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))
+OTHERS = (("grey", "grey"), ("hidden", "hide"), ("unchanged", "keep"))
+
+
+class PartsPanel(QtW.QWidget):
+    """The parts of the movie in the Movie tab: one line each that opens to show its settings (one open at a time).
+    The open line is the part selected on the timeline. Widgets look parts up by id, never by position."""
 
     def __init__(self, win):
-        super().__init__(); self.win = win; self.rows = {}
-        self.lay = QtW.QVBoxLayout(self); self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(2)
+        super().__init__(); self.win = win; self.rows = {}; self.open_id = None; self._sig = None
+        self.lay = QtW.QVBoxLayout(self); self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(3)
 
-    def build(self):
-        win, spec, info = self.win, self.win.spec, self.win.info or {}
-        clear_layout(self.lay); self.rows = {}
-        has_t, has_s = bool(info.get("has_tomogram")), bool(info.get("has_segmentation"))
-        problems = win.timeline.canvas.plan.problems if win.timeline.canvas.plan else {}
-        for i, p in enumerate(spec["shots"]):
-            box = QtW.QFrame(); box.setFrameShape(QtW.QFrame.StyledPanel) if p["id"] == win.selected_part else None
-            v = QtW.QVBoxLayout(box); v.setContentsMargins(4, 2, 4, 2); v.setSpacing(2)
-            row = QtW.QHBoxLayout()
-            on = QtW.QCheckBox(f"{i + 1}. {sb.part_name(p, spec, win.st.ds)}"); on.setChecked(bool(p.get("on", True)))
-            on.toggled.connect(lambda val, pid=p["id"]: self._set(pid, "on", val))
-            row.addWidget(on, 1)
-            if p["type"] == "overview":
-                mo = QtW.QComboBox()
-                for t, d in (("rock", "rock"), ("full spin", "spin"), ("still", "none")):
-                    mo.addItem(t, d)
-                mo.setCurrentIndex(max(0, mo.findData(p.get("motion", "rock"))))
-                mo.activated.connect(lambda j, mo=mo, pid=p["id"]: self._set(pid, "motion", mo.itemData(j))); row.addWidget(mo)
-            sec = QtW.QDoubleSpinBox(); sec.setRange(0.2, 120); sec.setSingleStep(0.5); sec.setSuffix(" s"); sec.setValue(float(p.get("seconds", 5)))
-            sec.valueChanged.connect(lambda val, pid=p["id"]: self._set(pid, "seconds", val)); row.addWidget(sec)
-            more = QtW.QToolButton(); more.setText("⋮"); more.setToolTip("Duplicate, move or delete this part")
-            more.setPopupMode(QtW.QToolButton.InstantPopup); menu = QtW.QMenu(more); more.setMenu(menu)
-            menu.addAction("Duplicate", lambda pid=p["id"]: win.editor.duplicate(pid))
-            menu.addAction("Move up", lambda pid=p["id"]: win.editor.move_by(pid, -1)).setEnabled(i > 0)
-            menu.addAction("Move down", lambda pid=p["id"]: win.editor.move_by(pid, 1)).setEnabled(i < len(spec["shots"]) - 1)
-            menu.addSeparator(); menu.addAction("Delete", lambda pid=p["id"]: win.editor.delete(pid))
-            row.addWidget(more); v.addLayout(row)
-            need = ""
-            if p["type"] == "slide" and p.get("structures") == "none" and not has_t:
-                need = "needs a tomogram"
-            elif p["type"] == "slide" and p.get("structures") in ("above", "all") and not has_s:
-                need = "needs a segmentation"
-            elif p["id"] in problems:
-                need = problems[p["id"]]
-            if need:
-                on.setToolTip(need); lab = QtW.QLabel(f"    {need}, so it is left out"); lab.setStyleSheet(DIM); v.addWidget(lab)
-                on.setStyleSheet(DIM)
-            tomo = win._tomo_row(p); v.addWidget(tomo)
-            self.lay.addWidget(box)
-            self.rows[p["id"]] = dict(on=on, seconds=sec, tomo=tomo, box=box)
-        if not spec["shots"]:
-            lab = QtW.QLabel("The movie has no parts. Add one with + Add part."); lab.setStyleSheet(DIM); self.lay.addWidget(lab)
+    # ---- helpers ----
+    def part(self, pid):
+        for p in self.win.spec["shots"]:
+            if p["id"] == pid:
+                return p
+        return None
 
-    def _set(self, pid, key, value):
-        sb.set_part(self.win.spec, pid, **{key: value})
-        if key == "on":
-            self.win.editor.commit(select=pid)
+    def _problems(self):
+        plan = self.win.timeline.canvas.plan
+        return plan.problems if plan is not None else {}
+
+    def _reason(self, p):
+        info = self.win.info or {}
+        if not p.get("on", True):
+            return "switched off"
+        if p["type"] == "slide" and p.get("structures") == "none" and not info.get("has_tomogram"):
+            return "needs a tomogram, so it is left out"
+        if p["type"] == "slide" and p.get("structures") in ("above", "all") and not info.get("has_segmentation"):
+            return "needs a segmentation, so it is left out"
+        if p["id"] in self._problems():
+            return "structure not loaded, so it is left out; choose another structure or load it again"
+        return ""
+
+    # ---- building ----
+    def sync(self, force=False):
+        """Rebuild when the list of parts changed (ids or order, or other data); otherwise update the lines in place."""
+        spec, info = self.win.spec, self.win.info or {}
+        sig = (id(spec), tuple(p["id"] for p in spec["shots"]), bool(info.get("has_tomogram")), bool(info.get("has_segmentation")),
+               tuple(c["key"] for c in info.get("structures", [])))
+        if force or sig != self._sig:
+            self._sig = sig; self.rebuild()
         else:
-            self.win.editor.changed(); self.win._sweep_hint(); self.win.schedule()
+            for pid in self.rows:
+                self.refresh_line(pid)
+        sel = self.win.selected_part
+        if sel in self.rows and sel != self.open_id:
+            self.open(sel, select=False)
+        elif sel not in self.rows and self.open_id is not None:
+            self.close_open()
+
+    def rebuild(self):
+        clear_layout(self.lay); self.rows = {}; keep = self.open_id; self.open_id = None
+        for i, p in enumerate(self.win.spec["shots"]):
+            box = QtW.QFrame(); box.setFrameShape(QtW.QFrame.StyledPanel); box.setObjectName("part")
+            v = QtW.QVBoxLayout(box); v.setContentsMargins(4, 2, 4, 2); v.setSpacing(2)
+            head = ClickableHeader(); h = QtW.QHBoxLayout(head); h.setContentsMargins(0, 0, 0, 0)
+            arrow = QtW.QToolButton(); arrow.setArrowType(QtC.Qt.RightArrow); arrow.setAutoRaise(True)
+            arrow.setToolTip("Open or close the settings of this part")
+            tick = QtW.QCheckBox(); tick.setToolTip("Untick to leave this part out of the movie without deleting it")
+            num = QtW.QLabel(f"{i + 1}"); num.setFixedWidth(18)
+            name = QtW.QLabel(""); dur = QtW.QLabel(""); dur.setStyleSheet(DIM)
+            more = QtW.QToolButton(); more.setText("\u22ee"); more.setToolTip("Duplicate, move or delete this part")
+            more.setPopupMode(QtW.QToolButton.InstantPopup); menu = QtW.QMenu(more); more.setMenu(menu)
+            pid = p["id"]
+            menu.addAction("Duplicate", lambda pid=pid: self.win.editor.duplicate(pid))
+            menu.addAction("Move up", lambda pid=pid: self.win.editor.move_by(pid, -1)).setEnabled(i > 0)
+            menu.addAction("Move down", lambda pid=pid: self.win.editor.move_by(pid, 1)).setEnabled(i < len(self.win.spec["shots"]) - 1)
+            menu.addSeparator(); menu.addAction("Delete", lambda pid=pid: self.win.editor.delete(pid))
+            for w, stretch in ((arrow, 0), (tick, 0), (num, 0), (name, 1), (dur, 0), (more, 0)):
+                h.addWidget(w, stretch)
+            arrow.clicked.connect(lambda _=False, pid=pid: self.toggle(pid)); head.clicked.connect(lambda pid=pid: self.toggle(pid))
+            tick.toggled.connect(lambda on, pid=pid: self.set_on(pid, on))
+            note = QtW.QLabel(""); note.setStyleSheet(DIM); note.setWordWrap(True); note.setContentsMargins(46, 0, 0, 0)
+            details = QtW.QWidget(); details.setVisible(False); dl = QtW.QFormLayout(details); dl.setContentsMargins(46, 2, 0, 4)
+            v.addWidget(head); v.addWidget(note); v.addWidget(details)
+            self.lay.addWidget(box)
+            self.rows[pid] = dict(box=box, head=head, arrow=arrow, on=tick, num=num, name=name, dur=dur, note=note,
+                                  details=details, form=dl)
+            self.refresh_line(pid)
+        if not self.win.spec["shots"]:
+            lab = QtW.QLabel("The movie has no parts. Add one with + Add part."); lab.setStyleSheet(DIM); self.lay.addWidget(lab)
+        if keep in self.rows:
+            self.open(keep, select=False)
+
+    def refresh_line(self, pid):
+        r, p = self.rows[pid], self.part(pid)
+        if p is None:
+            return
+        r["on"].blockSignals(True); r["on"].setChecked(bool(p.get("on", True))); r["on"].blockSignals(False)
+        r["name"].setText(sb.part_name(p, self.win.spec, self.win.st.ds)); r["dur"].setText(f"{float(p.get('seconds', 5)):.1f} s")
+        why = self._reason(p)
+        r["note"].setText(why); r["note"].setVisible(bool(why))
+        r["name"].setStyleSheet(DIM if why else ""); r["on"].setToolTip(why or "Untick to leave this part out of the movie without deleting it")
+
+    # ---- opening and closing ----
+    def toggle(self, pid):
+        if self.open_id == pid:
+            self.close_open(); self.win.selected_part = None; self.win.timeline.set_selected(None)
+        else:
+            self.open(pid)
+
+    def close_open(self):
+        r = self.rows.get(self.open_id)
+        if r:
+            clear_layout(r["form"]); r["details"].setVisible(False); r["arrow"].setArrowType(QtC.Qt.RightArrow)
+            r["box"].setStyleSheet("")
+        self.open_id = None
+
+    def open(self, pid, select=True):
+        """Open one line (closing the others); select=True also selects the part on the timeline and shows it."""
+        if pid not in self.rows:
+            return
+        self.close_open(); self.open_id = pid; r = self.rows[pid]
+        self.fill_details(pid); r["details"].setVisible(True); r["arrow"].setArrowType(QtC.Qt.DownArrow)
+        r["box"].setStyleSheet("QFrame#part { border: 1px solid palette(highlight); border-radius: 3px }")  # not its labels
+        if select:
+            self.win.selected_part = pid; self.win.timeline.set_selected(pid)
+            if self.win.timeline.canvas.parts.get(pid):
+                self.win.req = {"at": {"part": pid, "u": 0}}; self.win.schedule(0)
+            self.win.editor.refresh_buttons()
+        QtC.QTimer.singleShot(0, lambda: self.scroll_to(pid))
+
+    def scroll_to(self, pid):
+        r = self.rows.get(pid); w = self.parentWidget()
+        while w is not None and not isinstance(w, QtW.QScrollArea):
+            w = w.parentWidget()
+        if r and w is not None:
+            w.ensureWidgetVisible(r["box"], 0, 20)
+
+    # ---- settings ----
+    def set_on(self, pid, on):
+        sb.set_part(self.win.spec, pid, on=bool(on)); self.win.editor.commit(select=pid)
+
+    def set(self, pid, key, value, rebuild=False):
+        p = self.part(pid)
+        if p is None:
+            return
+        if value is None:
+            p.pop(key, None)
+        else:
+            p[key] = value
+        self.refresh_line(pid); self.win.editor.changed(); self.win._sweep_hint(); self.win.schedule()
+        if rebuild:
+            self.fill_details(pid)
+
+    def fill_details(self, pid):
+        r, p = self.rows[pid], self.part(pid)
+        form = r["form"]; clear_layout(form)
+        add = form.addRow
+        t = p["type"]
+        if t == "slide":
+            self._slide_rows(pid, p, form)
+        elif t == "overview":
+            add("Camera movement", _combo(MOTIONS, p.get("motion", "rock"), lambda v: self.set(pid, "motion", v, rebuild=True)))
+            if p.get("motion", "rock") == "rock":
+                add("Rock angle", _spin(5, 90, float(p.get("angle", 25)), lambda v: self.set(pid, "angle", v), step=5, suffix="\u00b0", decimals=0))
+        elif t == "focus":
+            self._focus_rows(pid, p, form)
+        add("Duration", _spin(0.2, 120, float(p.get("seconds", 5)), lambda v: self.set(pid, "seconds", v)))
+        cap = QtW.QLineEdit(p.get("caption", "")); cap.setPlaceholderText("text shown at the bottom while this part plays")
+        cap.textChanged.connect(lambda txt: self.set(pid, "caption", txt)); add("Caption", cap); r["caption"] = cap
+        tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
+        tr = p.get("transition")
+        add("Transition in", _spin(-0.1, 10, -0.1 if tr is None else float(tr), lambda v: self.set(pid, "transition", None if v < 0 else v),
+                                   step=0.1, special="automatic"))
+        form.labelForField(form.itemAt(form.rowCount() - 1, QtW.QFormLayout.FieldRole).widget()).setToolTip(
+            "Seconds of camera flight into this part; 0 cuts straight to it")
+
+    def _slide_rows(self, pid, p, form):
+        nz = (self.win.info or {}).get("dims", [1, 1, 1])[2]
+        for key, label, choices in (("from", "From", SLIDE_ENDS), ("to", "To", SLIDE_ENDS[:2] + SLIDE_ENDS[3:])):
+            val = p.get(key); mode = "number" if isinstance(val, int) else val
+            row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+            num = QtW.QSpinBox(); num.setRange(1, nz); num.setPrefix("slice "); num.setValue((val + 1) if isinstance(val, int) else 1)
+            num.setVisible(mode == "number")
+            num.valueChanged.connect(lambda v, key=key: self.set(pid, key, int(v) - 1))
+            cb = _combo(choices, mode, lambda v, key=key, num=num: (num.setVisible(v == "number"),
+                                                                     self.set(pid, key, int(num.value()) - 1 if v == "number" else v)))
+            h.addWidget(cb, 1); h.addWidget(num); form.addRow(label, row)
+        form.addRow("Structures", _combo(STRUCTURES, p.get("structures", "keep"), lambda v: self.set(pid, "structures", v)))
+        form.addRow("Pause before", _spin(0, 10, float(p.get("pause_before", 0)), lambda v: self.set(pid, "pause_before", v), step=0.25))
+        form.addRow("Pause after", _spin(0, 10, float(p.get("pause_after", 0)), lambda v: self.set(pid, "pause_after", v), step=0.25))
+
+    def structure_combo(self, pid, p):
+        """Drop-down of the loaded structures with their colours, grouped under the source when there are several."""
+        win, spec = self.win, self.win.spec
+        structs = [c for c in (win.info or {}).get("structures", []) if c.get("mesh")]
+        cb = QtW.QComboBox(); model = QtG.QStandardItemModel(); cb.setModel(model)
+        several = len({c["source"] for c in structs}) > 1; src = None
+        for c in structs:
+            if several and c["source"] != src:
+                src = c["source"]; head = QtG.QStandardItem(c["source_title"]); head.setEnabled(False); model.appendRow(head)
+            cs = spec["classes"].get(c["key"], {})
+            pm = QtG.QPixmap(12, 12); pm.fill(QtG.QColor(cs.get("color", c["color"])))
+            it = QtG.QStandardItem(QtG.QIcon(pm), cs.get("name", c["name"])); it.setData(c["key"], QtC.Qt.UserRole); model.appendRow(it)
+        cur = (p.get("target") or {}).get("class")
+        k = win.st.ds.id_of(cur) if cur is not None else None
+        key = win.st.ds.key_of(k) if k is not None else None
+        i = cb.findData(key)
+        if i < 0:
+            cb.insertItem(0, "(structure not loaded)", None); i = 0
+        cb.setCurrentIndex(i)
+        cb.activated.connect(lambda j: self.retarget(pid, cb.itemData(j)))
+        return cb
+
+    def retarget(self, pid, key):
+        """Another structure for a close-up: whole structure, and the caption follows unless the user wrote their own."""
+        p = self.part(pid)
+        if p is None or key is None:
+            return
+        ds, spec = self.win.st.ds, self.win.spec
+        old = (p.get("target") or {}).get("class"); k_old = ds.id_of(old) if old is not None else None
+        old_name = spec["classes"].get(ds.key_of(k_old), {}).get("name") if k_old is not None else None
+        new_name = spec["classes"].get(key, {}).get("name", ds.classes[ds.id_of(key)]["name"])
+        p["target"] = {"class": key}
+        if not p.get("caption") or p.get("caption") == old_name:
+            p["caption"] = new_name
+        self.win.editor.commit(select=pid); self.fill_details(pid)
+
+    def _focus_rows(self, pid, p, form):
+        win = self.win; ds = win.st.ds
+        form.addRow("Structure", self.structure_combo(pid, p))
+        tgt = p.get("target") or {}; k = ds.id_of(tgt.get("class")) if tgt.get("class") is not None else None
+        obj = QtW.QComboBox(); obj.addItem("whole structure", "whole")
+        if tgt.get("component") is not None and k is not None:
+            try:
+                n = int(ds.components(k)[2][int(tgt["component"])])
+            except (IndexError, KeyError, TypeError):
+                n = 0
+            obj.addItem(f"one object (picked in the preview), {n:,} voxels", "one")
+            obj.setCurrentIndex(1)
+        obj.addItem("pick an object in the preview...", "pick"); obj.setEnabled(k is not None)
+
+        def chose(j):
+            v = obj.itemData(j)
+            if v == "whole":
+                t = dict(p.get("target") or {}); t.pop("component", None); p["target"] = t
+                self.win.editor.commit(select=pid); self.fill_details(pid)
+            elif v == "pick":
+                obj.setCurrentIndex(1 if tgt.get("component") is not None else 0)
+                win.start_object_pick(pid, ds.key_of(k))
+        obj.activated.connect(chose)
+        form.addRow("Object", obj)
+        form.addRow("Other structures", _combo(OTHERS, p.get("others", "grey"), lambda v: self.set(pid, "others", v)))
+        form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v)))
+        form.addRow("Zoom", _spin(0.3, 4, float(p.get("zoom", 1)), lambda v: self.set(pid, "zoom", v), step=0.1, suffix=" x"))
+        form.addRow("Tilt", _spin(-1, 85, float(p["tilt"]) if p.get("tilt") is not None else -1,
+                                  lambda v: self.set(pid, "tilt", None if v < 0 else v), step=5, suffix="\u00b0", decimals=0,
+                                  special="automatic"))

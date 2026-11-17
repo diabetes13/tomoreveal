@@ -123,7 +123,7 @@ def test_shortcuts_only_act_on_the_timeline(window):
     app, win, errors = window
     win.editor.add_closeup(win.st.ds.key_of(2), "vesicles"); refresh(app, win)
     n = len(ids(win))
-    caption = [w for w in win.shots_w.findChildren(QtWidgets.QLineEdit)][0]
+    caption = win.parts_panel.rows[win.selected_part]["caption"]  # the new close-up is open
     caption.setFocus(); QtTest.QTest.keyClick(caption, QtCore.Qt.Key_Delete); QtTest.QTest.keyClick(caption, QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
     pump(app)
     assert len(ids(win)) == n

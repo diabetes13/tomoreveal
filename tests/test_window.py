@@ -40,8 +40,11 @@ def seg_ticks(win):
 
 
 def row(win, i):
-    """The Movie tab row of part number i (0-based)."""
-    return win.parts_rows.rows[win.spec["shots"][i]["id"]]
+    """The Movie tab line of part number i (0-based), opened so that its settings exist."""
+    pid = win.spec["shots"][i]["id"]
+    if win.parts_panel.open_id != pid:
+        win.parts_panel.open(pid, select=False)
+    return win.parts_panel.rows[pid]
 
 
 def tabs_shown(win):
@@ -62,7 +65,7 @@ def test_tomogram_first_then_segmentation(window, demo):
         assert tabs_shown(win) == [True, True, True, True, True]
         assert structure_names(win) == [] and not win.struct_note.isHidden()
         assert "No segmentation loaded" in win.struct_note.text()
-        assert row(win, 0)["on"].toolTip() == "" and row(win, 1)["on"].toolTip() == "needs a segmentation"  # slide up yes, reveal no
+        assert row(win, 0)["note"].isHidden() and row(win, 1)["note"].text().startswith("needs a segmentation")  # slide up yes, reveal no
         assert not win.pick_btn.isEnabled()  # no close-ups without structures
         assert len(win.data.tomo_group.buttons()) == 2  # None + the file
         wait(app, win, lambda: win.data.add_segmentation([demo["labels"]]))
@@ -86,8 +89,8 @@ def test_segmentation_only_then_none(window, demo):
         if win.st.ren is None:
             pytest.skip("3D rendering is not available here")
         assert structure_names(win) == ["membrane", "vesicles", "filaments", "particles"]
-        assert row(win, 0)["on"].toolTip() == "needs a tomogram"
-        assert row(win, 1)["on"].toolTip() == "" and win.pick_btn.isEnabled()
+        assert row(win, 0)["note"].text().startswith("needs a tomogram")
+        assert row(win, 1)["note"].isHidden() and win.pick_btn.isEnabled()
         assert win.data.info["tomogram"] is None and win.data.tomo_group.buttons()[0].isChecked()  # "None"
         assert "drawn on its own" in win.data.dims_lbl.text()
         assert win.prev.pixmap() is not None and not win.prev.pixmap().isNull()  # a preview was drawn

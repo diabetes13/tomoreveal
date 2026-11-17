@@ -43,7 +43,7 @@ def build_gui(args):
     from .gui_data import DataPanel, clear_layout
     from .gui_explore import ExplorePanel
     from .gui_timeline import Timeline
-    from .gui_movie import MovieEditor, PartsRows
+    from .gui_movie import MovieEditor, PartsPanel
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
@@ -180,6 +180,7 @@ def build_gui(args):
             self.st = Studio(headless=args.headless, outdir=outdir)
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
             self.selected_part = None  # id of the part selected on the timeline
+            self.pick_for = None       # (part id, structure key) while picking the object of a close-up
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
@@ -306,12 +307,10 @@ def build_gui(args):
             self.reset_parts_btn = QtW.QPushButton("Reset to the default movie")
             self.reset_parts_btn.setToolTip("Slide up, slide back revealing the segmentation, overview. Undo brings your parts back.")
             self.reset_parts_btn.clicked.connect(lambda: self.editor.reset_default()); row.addWidget(self.reset_parts_btn); ml.addLayout(row)
-            self.parts_rows = PartsRows(self); ml.addWidget(self.parts_rows)
+            self.parts_panel = PartsPanel(self); ml.addWidget(self.parts_panel)
             self.sweep_hint = self._note("A slide-up shows only the moving slice; with the tomogram hidden it shows nothing.", ml)
             self.sweep_hint.setVisible(False)
             self._note("Add, remove, split and reorder parts on the timeline under the preview, or with its right-click menu.", ml)
-            ml.addWidget(QtW.QLabel("<b>Close-up details</b>"))
-            self.shots_w = QtW.QWidget(); self.shots_lay = QtW.QVBoxLayout(self.shots_w); self.shots_lay.setContentsMargins(0, 0, 0, 0); ml.addWidget(self.shots_w)
             self.pick_btn = QtW.QPushButton("+ Click a structure in the preview"); self.pick_btn.setCheckable(True)
             self.pick_btn.toggled.connect(self.set_pick); ml.addWidget(self.pick_btn)
             self.rto_cb = QtW.QCheckBox("Return to the overview at the end"); self.rto_cb.toggled.connect(lambda v: self._spec_set("return_to_overview", v))
@@ -551,7 +550,7 @@ def build_gui(args):
             self._sync_clip()
             has_t, has_s = self.info.get("has_tomogram"), self.info.get("has_segmentation")
             self.struct_help.setVisible(bool(has_s))
-            self.parts_rows.build()
+            self.parts_panel.sync()
             tst = sp["style"].setdefault("tomogram", dict(show=True, opacity=1.0))
             self._setv(self.tshow_cb, tst.get("show", True)); self._setv(self.topac_s, 100 * float(tst.get("opacity", 1.0)))
             self.tslice_group.setEnabled(bool(has_t)); self.tslice_group.setToolTip("" if has_t else "needs a tomogram")
@@ -562,43 +561,6 @@ def build_gui(args):
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
             self.title_le.blockSignals(True); self.title_le.setText(st.get("title", "")); self.title_le.blockSignals(False)
-            self.build_shots()
-
-        def build_shots(self):
-            lay = self.shots_lay
-            while lay.count():
-                w = lay.takeAt(0).widget()
-                if w:
-                    w.setParent(None); w.deleteLater()
-            n = 0
-            for i, sh in enumerate(self.spec["shots"]):
-                if sh["type"] != "focus":
-                    continue
-                n += 1; fr = QtW.QFrame(); fr.setFrameShape(QtW.QFrame.StyledPanel); g = QtW.QGridLayout(fr)
-                cap = QtW.QLineEdit(sh.get("caption", "")); cap.setPlaceholderText("caption")
-                cap.textChanged.connect(lambda t, sh=sh: self._shot_edit(sh, "caption", t))
-                show = QtW.QPushButton("Show"); show.clicked.connect(lambda _=False, i=i: self.show_shot(i))
-                rm = QtW.QPushButton("Remove"); rm.clicked.connect(lambda _=False, sh=sh: self.remove_shot(sh))
-                g.addWidget(cap, 0, 0, 1, 2); g.addWidget(show, 0, 2); g.addWidget(rm, 0, 3)
-                combos = (("others", (("grey out the rest", "grey"), ("hide the rest", "hide"), ("keep the rest", "keep"))),
-                          ("motion", (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))))
-                for j, (key, opts) in enumerate(combos):
-                    cb = QtW.QComboBox(); vals = [d for _, d in opts]
-                    for t, d in opts:
-                        cb.addItem(t, d)
-                    cb.setCurrentIndex(vals.index(sh.get(key)) if sh.get(key) in vals else 0)
-                    cb.activated.connect(lambda j2, cb=cb, sh=sh, key=key: self._shot_edit(sh, key, cb.itemData(j2)))
-                    g.addWidget(cb, 1, j * 2, 1, 2)
-                sec = QtW.QDoubleSpinBox(); sec.setRange(0.5, 120); sec.setSingleStep(0.5); sec.setSuffix(" s"); sec.setValue(float(sh.get("seconds", 5)))
-                sec.valueChanged.connect(lambda x, sh=sh: self._shot_edit(sh, "seconds", x))
-                zm = QtW.QDoubleSpinBox(); zm.setRange(0.3, 4); zm.setSingleStep(0.1); zm.setPrefix("zoom "); zm.setSuffix("x"); zm.setValue(float(sh.get("zoom", 1)))
-                zm.valueChanged.connect(lambda x, sh=sh: self._shot_edit(sh, "zoom", x))
-                what = QtW.QLabel("one object" if sh["target"].get("component") is not None else "whole structure"); what.setStyleSheet(DIM)
-                g.addWidget(sec, 2, 0); g.addWidget(zm, 2, 1); g.addWidget(what, 2, 2, 1, 2)
-                g.addWidget(self._tomo_row(sh), 3, 0, 1, 4)
-                lay.addWidget(fr)
-            if not n:
-                self._note("None yet. Use a Zoom button in the Structures tab, or click a structure in the preview.", lay)
 
         def _paint(self, b, hexc):
             b.setStyleSheet(f"background:{hexc}; border:1px solid palette(mid); border-radius:3px")
@@ -657,13 +619,6 @@ def build_gui(args):
                 self.spec["style"].setdefault("tomogram", dict(show=True, opacity=1.0))[key] = v
                 self._sweep_hint(); self.schedule()
 
-        def _shot_set(self, i, key, v):
-            if self.spec:
-                self.spec["shots"][i][key] = v; self._sweep_hint(); self.schedule()
-
-        def _shot_edit(self, sh, key, v):
-            sh[key] = v; self.schedule()
-
         def _style_set(self, key, v):
             if self.spec:
                 self.spec["style"][key] = v; self.schedule()
@@ -671,12 +626,6 @@ def build_gui(args):
         def _spec_set(self, key, v):
             if self.spec:
                 self.spec[key] = v; self.schedule()
-
-        def show_shot(self, i):
-            self.req = {"at": {"shot": i, "u": 0.08}}; self.schedule(0)
-
-        def remove_shot(self, sh):
-            self.editor.delete(sh["id"])
 
         def add_focus(self, target, name, after=None):
             self.editor.insert(focus_shot(target, name), after)
@@ -735,14 +684,18 @@ def build_gui(args):
                             c.update(threshold=r["threshold"], voxels=r["voxels"], mesh=r["mesh"]); key = c["key"]
                     if cid in self.vox_lbl:
                         self.vox_lbl[cid].setText(f"{r['voxels']:,}")
-                    self.spec["shots"] = [s for s in self.spec["shots"]
-                                          if not (s["type"] == "focus" and s["target"]["class"] == key and s["target"].get("component") is not None)]
-                self.say("Threshold updated.", "ok")
+                    # object numbers change with the threshold: those close-ups show the whole structure again
+                    reset = 0
+                    for s in self.spec["shots"]:
+                        if s["type"] == "focus" and (s.get("target") or {}).get("class") == key and s["target"].get("component") is not None:
+                            s["target"] = {"class": key}; reset += 1
+                self.say("Threshold updated." + (f" {reset} close-up{'s' if reset > 1 else ''} of one object now show{'' if reset > 1 else 's'} "
+                                                 "the whole structure, because the objects changed." if reset else ""), "ok")
             except UserError as exc:
                 self.say(str(exc), "err")
             finally:
                 QtW.QApplication.restoreOverrideCursor()
-            self.build_shots(); self.schedule(0)
+            self.build_controls(); self.editor.record(); self.schedule(0)
 
         # ---------- view and preview ----------
         def _main_req(self):
@@ -817,17 +770,27 @@ def build_gui(args):
             self.editor.refresh_buttons()
 
         def select_part(self, pid):
-            self.selected_part = pid
+            """A block clicked on the timeline: its line opens in the Movie tab."""
+            self.selected_part = pid; self.parts_panel.open(pid, select=False); self.editor.refresh_buttons()
 
         def open_part(self, pid):
             """Double-click on a block: show the part's settings in the Movie tab."""
-            self.selected_part = pid; self.tabs.setCurrentIndex(self.TAB_MOVIE)
+            self.tabs.setCurrentIndex(self.TAB_MOVIE); self.select_part(pid)
+
+        def start_object_pick(self, pid, key):
+            """'Pick an object in the preview...' of a close-up: the next click on that structure sets the object."""
+            self.pick_for = (pid, key); self.pick_btn.setChecked(True)
+            self.editor.pending_after = None
+            name = self.spec["classes"].get(key, {}).get("name", "structure")
+            self.say(f"Click one {name} object in the preview.")
 
         def on_scrub(self, v):
             self.req = {"frame": int(v)}; self.schedule(40)
 
         def set_pick(self, on):
             self.pick_mode = bool(on); self.prev.setCursor(QtC.Qt.CrossCursor if on else QtC.Qt.ArrowCursor)
+            if not on:
+                self.pick_for = None
             if on and self.spec and self.editor.pending_after is None:
                 self.editor.pending_after = self.editor.anchor()  # the close-up goes where the playhead was
             if on and self.spec:
@@ -843,6 +806,17 @@ def build_gui(args):
                 self.say(f"Could not pick: {exc}", "err"); return
             if not p.get("found"):
                 self.say("Nothing there. Click directly on a coloured structure.", "err"); return
+            if self.pick_for:  # choosing the object of an existing close-up
+                pid, key = self.pick_for
+                if p["class"] != key or p.get("component") is None:
+                    self.say(f"That is not one {self.spec['classes'].get(key, {}).get('name', 'such')} object. Click one of them.", "err"); return
+                self.pick_for = None; self.pick_btn.setChecked(False)
+                part = self.parts_panel.part(pid)
+                if part is not None:
+                    part["target"] = {"class": key, "component": p["component"]}
+                    self.editor.commit(select=pid); self.parts_panel.fill_details(pid)
+                    self.say(f"The close-up now shows one object ({p['voxels']:,} voxels).", "ok")
+                return
             self.pick_btn.setChecked(False)
             extra = f" (one object, {p['voxels']:,} voxels)" if p.get("component") is not None else ""
             after, self.editor.pending_after = self.editor.pending_after, None

@@ -43,6 +43,7 @@ def build_gui(args):
     from .gui_data import DataPanel, clear_layout
     from .gui_explore import ExplorePanel
     from .gui_timeline import Timeline
+    from .gui_movie import MovieEditor, PartsRows
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
@@ -186,7 +187,7 @@ def build_gui(args):
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
             self.thr_timer.timeout.connect(self.apply_thresholds)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
-            self._build(); self._menus(); self.show_empty()
+            self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
             self._sync_theme()
             hints = QtW.QApplication.instance().styleHints()
             if hasattr(hints, "colorSchemeChanged"):  # follow the desktop while "System" is chosen
@@ -301,22 +302,15 @@ def build_gui(args):
                        "Everything outside is left out of the preview and the movie.", cl)
             # movie
             self.movie_group, ml = self._group("Movie", lay)
-            self.shot_ctl = []; self.shot_tomo = []
-            for i, text in enumerate(["1. Slide up through the slices", "2. Slide back, revealing the segmentation", "3. Overview"]):
-                row = QtW.QHBoxLayout(); cb = QtW.QCheckBox(text); sp = QtW.QDoubleSpinBox(); sp.setRange(0.5, 120); sp.setSingleStep(0.5); sp.setSuffix(" s")
-                cb.toggled.connect(lambda v, i=i: self._shot_set(i, "on", v)); sp.valueChanged.connect(lambda v, i=i: self._shot_set(i, "seconds", v))
-                row.addWidget(cb, 1)
-                if i == 2:
-                    self.motion_cb = QtW.QComboBox()
-                    for t, d in (("rock", "rock"), ("full spin", "spin"), ("still", "none")):
-                        self.motion_cb.addItem(t, d)
-                    self.motion_cb.activated.connect(lambda j: self._shot_set(2, "motion", self.motion_cb.itemData(j))); row.addWidget(self.motion_cb)
-                row.addWidget(sp); ml.addLayout(row); self.shot_ctl.append((cb, sp))
-                tw = QtW.QWidget(); tl = QtW.QVBoxLayout(tw); tl.setContentsMargins(24, 0, 0, 4); ml.addWidget(tw); self.shot_tomo.append(tl)
-                if i == 0:
-                    self.sweep_hint = self._note("The slide-up shows only the moving slice; with the tomogram hidden this shot "
-                                                 "shows nothing.", ml); self.sweep_hint.setVisible(False)
-            ml.addWidget(QtW.QLabel("<b>Close-ups</b> (played after the overview)"))
+            row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("<b>Parts of the movie</b>"), 1)
+            self.reset_parts_btn = QtW.QPushButton("Reset to the default movie")
+            self.reset_parts_btn.setToolTip("Slide up, slide back revealing the segmentation, overview. Undo brings your parts back.")
+            self.reset_parts_btn.clicked.connect(lambda: self.editor.reset_default()); row.addWidget(self.reset_parts_btn); ml.addLayout(row)
+            self.parts_rows = PartsRows(self); ml.addWidget(self.parts_rows)
+            self.sweep_hint = self._note("A slide-up shows only the moving slice; with the tomogram hidden it shows nothing.", ml)
+            self.sweep_hint.setVisible(False)
+            self._note("Add, remove, split and reorder parts on the timeline under the preview, or with its right-click menu.", ml)
+            ml.addWidget(QtW.QLabel("<b>Close-up details</b>"))
             self.shots_w = QtW.QWidget(); self.shots_lay = QtW.QVBoxLayout(self.shots_w); self.shots_lay.setContentsMargins(0, 0, 0, 0); ml.addWidget(self.shots_w)
             self.pick_btn = QtW.QPushButton("+ Click a structure in the preview"); self.pick_btn.setCheckable(True)
             self.pick_btn.toggled.connect(self.set_pick); ml.addWidget(self.pick_btn)
@@ -493,6 +487,7 @@ def build_gui(args):
                 self.spec = info["spec"]; self.req = self._main_req()
             else:  # keep the user's settings of every structure that is still there
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
+            self.editor.reset_history()  # loading other data starts a new history
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
@@ -555,18 +550,12 @@ def build_gui(args):
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()
             has_t, has_s = self.info.get("has_tomogram"), self.info.get("has_segmentation")
-            for i, (cb, spin) in enumerate(self.shot_ctl):
-                self._setv(cb, sp["shots"][i].get("on", True)); self._setv(spin, float(sp["shots"][i].get("seconds", 5)))
-                need = "needs a tomogram" if (i == 0 and not has_t) else "needs a segmentation" if (i == 1 and not has_s) else ""
-                cb.setEnabled(not need); spin.setEnabled(not need); cb.setToolTip(need)
             self.struct_help.setVisible(bool(has_s))
-            for i, tl in enumerate(self.shot_tomo):
-                clear_layout(tl); tl.addWidget(self._tomo_row(sp["shots"][i], i))
+            self.parts_rows.build()
             tst = sp["style"].setdefault("tomogram", dict(show=True, opacity=1.0))
             self._setv(self.tshow_cb, tst.get("show", True)); self._setv(self.topac_s, 100 * float(tst.get("opacity", 1.0)))
             self.tslice_group.setEnabled(bool(has_t)); self.tslice_group.setToolTip("" if has_t else "needs a tomogram")
             self._sweep_hint()
-            self.motion_cb.setCurrentIndex(max(0, self.motion_cb.findData(sp["shots"][2].get("motion", "rock"))))
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
             self._setv(self.legend_cb, st.get("legend", True)); self._setv(self.slabel_cb, st.get("slice_label", True)); self._setv(self.invert_cb, st.get("invert", False))
@@ -654,10 +643,14 @@ def build_gui(args):
 
         def _sweep_hint(self):
             if self.spec:
-                t = shot_tomogram(self.spec["shots"][0]); st = self.spec["style"].get("tomogram", {})
-                hidden = t["mode"] == "hidden" or (t["mode"] == "default" and not st.get("show", True)) or \
-                    (t["mode"] == "faded" and t["opacity"] == 0) or (t["mode"] == "default" and float(st.get("opacity", 1)) == 0)
-                self.sweep_hint.setVisible(bool(hidden and self.spec["shots"][0].get("on", True) and self.info.get("has_tomogram")))
+                st = self.spec["style"].get("tomogram", {})
+
+                def hidden(p):
+                    t = shot_tomogram(p)
+                    return t["mode"] == "hidden" or (t["mode"] == "faded" and t["opacity"] == 0) or \
+                        (t["mode"] == "default" and (not st.get("show", True) or float(st.get("opacity", 1)) == 0))
+                bare = [p for p in self.spec["shots"] if p.get("on", True) and p["type"] == "slide" and p.get("structures") == "none" and hidden(p)]
+                self.sweep_hint.setVisible(bool(bare and self.info.get("has_tomogram")))
 
         def _tomo_style(self, key, v):
             if self.spec:
@@ -683,11 +676,10 @@ def build_gui(args):
             self.req = {"at": {"shot": i, "u": 0.08}}; self.schedule(0)
 
         def remove_shot(self, sh):
-            self.spec["shots"] = [s for s in self.spec["shots"] if s is not sh]; self.build_shots(); self.schedule()
+            self.editor.delete(sh["id"])
 
-        def add_focus(self, target, name):
-            part = focus_shot(target, name); self.spec["shots"].append(part)
-            self.req = {"at": {"part": part["id"], "u": 0.08}}; self.build_shots(); self.schedule(0)
+        def add_focus(self, target, name, after=None):
+            self.editor.insert(focus_shot(target, name), after)
 
         # ---------- clip box ----------
         def _sync_clip(self):
@@ -787,6 +779,8 @@ def build_gui(args):
 
         def schedule(self, delay=120):
             self.prev_timer.start(delay)
+            if self.spec is not None and hasattr(self, "editor"):
+                self.editor.changed()  # one undo step once things settle
 
         def spec_for(self):
             sp = json.loads(json.dumps(self.spec)); sp["output"]["size"] = list(self.quality_cb.currentData())
@@ -815,6 +809,12 @@ def build_gui(args):
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
                 self.selected_part = None
             self.timeline.set_plan(plan, self.spec); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+            empty = not any(p.get("on", True) for p in self.spec["shots"])
+            self.go_btn.setEnabled(not empty)
+            self.go_btn.setToolTip("The movie has no parts. Add one with + Add part." if empty else "")
+            if empty:
+                self.say("The movie has no parts. Add one with + Add part under the timeline.")
+            self.editor.refresh_buttons()
 
         def select_part(self, pid):
             self.selected_part = pid
@@ -828,6 +828,8 @@ def build_gui(args):
 
         def set_pick(self, on):
             self.pick_mode = bool(on); self.prev.setCursor(QtC.Qt.CrossCursor if on else QtC.Qt.ArrowCursor)
+            if on and self.spec and self.editor.pending_after is None:
+                self.editor.pending_after = self.editor.anchor()  # the close-up goes where the playhead was
             if on and self.spec:
                 self.req = self._main_req(); self.schedule(0)
                 self.say("Click the structure you want a close-up of.")
@@ -843,7 +845,9 @@ def build_gui(args):
                 self.say("Nothing there. Click directly on a coloured structure.", "err"); return
             self.pick_btn.setChecked(False)
             extra = f" (one object, {p['voxels']:,} voxels)" if p.get("component") is not None else ""
-            self.add_focus({"class": p["class"], "component": p["component"]} if p.get("component") is not None else {"class": p["class"]}, p["name"])
+            after, self.editor.pending_after = self.editor.pending_after, None
+            self.add_focus({"class": p["class"], "component": p["component"]} if p.get("component") is not None else {"class": p["class"]},
+                           p["name"], after)
             self.say(f"Added a close-up of {p['name']}{extra}.", "ok")
 
         def on_drag(self, dx, dy):
@@ -870,6 +874,8 @@ def build_gui(args):
         def make_movie(self):
             if not self.st.can_show or self.gen is not None or self.busy:
                 return
+            if not any(p.get("on", True) for p in self.spec["shots"]):
+                self.say("The movie has no parts. Add one with + Add part under the timeline.", "err"); return
             folder = os.path.abspath(os.path.expanduser(self.folder_le.text().strip() or self.st.outdir))
             name = re.sub(r"[^\w\-. ]+", "_", self.name_le.text().strip()).strip() or "tomogram_reveal"
             if not name.lower().endswith(".mp4"):

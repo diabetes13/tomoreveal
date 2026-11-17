@@ -39,6 +39,11 @@ def seg_ticks(win):
     return [w for w in (lay.itemAt(i).widget() for i in range(lay.count())) if isinstance(w, QtWidgets.QCheckBox)]
 
 
+def row(win, i):
+    """The Movie tab row of part number i (0-based)."""
+    return win.parts_rows.rows[win.spec["shots"][i]["id"]]
+
+
 def tabs_shown(win):
     return [win.tabs.isTabVisible(i) for i in range(win.tabs.count())]
 
@@ -57,7 +62,7 @@ def test_tomogram_first_then_segmentation(window, demo):
         assert tabs_shown(win) == [True, True, True, True, True]
         assert structure_names(win) == [] and not win.struct_note.isHidden()
         assert "No segmentation loaded" in win.struct_note.text()
-        assert win.shot_ctl[0][0].isEnabled() and not win.shot_ctl[1][0].isEnabled()  # sweep yes, reveal needs a segmentation
+        assert row(win, 0)["on"].toolTip() == "" and row(win, 1)["on"].toolTip() == "needs a segmentation"  # slide up yes, reveal no
         assert not win.pick_btn.isEnabled()  # no close-ups without structures
         assert len(win.data.tomo_group.buttons()) == 2  # None + the file
         wait(app, win, lambda: win.data.add_segmentation([demo["labels"]]))
@@ -81,8 +86,8 @@ def test_segmentation_only_then_none(window, demo):
         if win.st.ren is None:
             pytest.skip("3D rendering is not available here")
         assert structure_names(win) == ["membrane", "vesicles", "filaments", "particles"]
-        assert not win.shot_ctl[0][0].isEnabled() and win.shot_ctl[0][0].toolTip() == "needs a tomogram"
-        assert win.shot_ctl[1][0].isEnabled() and win.pick_btn.isEnabled()
+        assert row(win, 0)["on"].toolTip() == "needs a tomogram"
+        assert row(win, 1)["on"].toolTip() == "" and win.pick_btn.isEnabled()
         assert win.data.info["tomogram"] is None and win.data.tomo_group.buttons()[0].isChecked()  # "None"
         assert "drawn on its own" in win.data.dims_lbl.text()
         assert win.prev.pixmap() is not None and not win.prev.pixmap().isNull()  # a preview was drawn
@@ -111,18 +116,18 @@ def test_tomogram_opacity_controls(window, demo):
     assert win.tslice_group.isEnabled() and win.tshow_cb.isChecked() and win.topac_s.value() == 100
     win.topac_s.setValue(40)
     assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)
-    row = win.shot_tomo[2].itemAt(0).widget()  # shot 3: overview
-    combo = row.findChild(QtWidgets.QComboBox)
+    tomo = row(win, 2)["tomo"]  # part 3: overview
+    combo = tomo.findChild(QtWidgets.QComboBox)
     combo.setCurrentIndex(combo.findData("hidden")); combo.activated.emit(combo.currentIndex())
     assert win.spec["shots"][2]["tomogram"]["mode"] == "hidden"
     assert win.sweep_hint.isHidden()
-    row0 = win.shot_tomo[0].itemAt(0).widget().findChild(QtWidgets.QComboBox)
+    row0 = row(win, 0)["tomo"].findChild(QtWidgets.QComboBox)
     row0.setCurrentIndex(row0.findData("hidden")); row0.activated.emit(row0.currentIndex())
     assert not win.sweep_hint.isHidden()  # the slide-up would show nothing
     frames, _ = __import__("tomoreveal").build_timeline(win.spec_for(), win.st.ds)
     s3 = [f["slice"] for f in frames if f["shot"] == 2]
     assert s3[0] > 0.3 and max(s3[15:]) == 0  # fades out over 0.5 s, then hidden
     wait(app, win, lambda: win.data.remove("file:" + win.st._norm(demo["tomogram"])))
-    assert not win.tslice_group.isEnabled() and not win.shot_tomo[2].itemAt(0).widget().isEnabled()  # no tomogram
+    assert not win.tslice_group.isEnabled() and not row(win, 2)["tomo"].isEnabled()  # no tomogram
     assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)  # settings kept
     assert not errors, errors

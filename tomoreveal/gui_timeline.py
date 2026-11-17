@@ -17,6 +17,12 @@ class TimelineCanvas(QtW.QWidget):
     part_selected = QtC.Signal(str)
     part_activated = QtC.Signal(str)
     zoomed = QtC.Signal()
+    resizing = QtC.Signal(str, float)      # live, while the right edge is dragged
+    resized = QtC.Signal(str, float)       # on release
+    moved = QtC.Signal(str, int)           # part id, new position among the parts that are on
+    command = QtC.Signal(str)              # delete, duplicate, split, undo, redo (keys)
+    context_requested = QtC.Signal(str, QtC.QPoint)
+    add_requested = QtC.Signal(QtC.QPoint)
 
     def __init__(self):
         super().__init__()
@@ -139,11 +145,18 @@ class TimelineCanvas(QtW.QWidget):
         if self.selected in self.parts:
             pen = QtG.QPen(pal.color(QtG.QPalette.Highlight), 2.5); p.setPen(pen); p.setBrush(QtC.Qt.NoBrush)
             p.drawRoundedRect(self.block_rect(self.selected).adjusted(-1, -1, 1, 1), 4, 4)
-        # playhead with a handle on the ruler
-        x = self.x_of(self.frame + 0.5) if self.ppf > 2 else self.x_of(self.frame)
+        d = self._drag
+        if d and d.get("kind") == "block" and d.get("moving") and d.get("target") is not None:
+            order = sorted(self.parts, key=lambda pid: self.parts[pid]["start"]); t = d["target"]
+            xi = self.x_of(self.parts[order[t]]["start"]) if t < len(order) else self.x_of(self.total)
+            p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 3)); p.drawLine(QtC.QPointF(xi, ROW_TOP - 3), QtC.QPointF(xi, ROW_TOP + ROW_H + 3))
+        # playhead with a handle on the ruler; the handle carries a + (add a part here)
+        x = self._playhead_x()
         p.setPen(QtG.QPen(QtG.QColor(PLAYHEAD), 2)); p.drawLine(QtC.QPointF(x, 2), QtC.QPointF(x, self.height()))
         p.setBrush(QtG.QColor(PLAYHEAD)); p.setPen(QtC.Qt.NoPen)
-        p.drawPolygon(QtG.QPolygonF([QtC.QPointF(x - 6, 1), QtC.QPointF(x + 6, 1), QtC.QPointF(x, 9)]))
+        p.drawRoundedRect(QtC.QRectF(x - 7, 0, 14, 11), 3, 3)
+        p.setPen(QtG.QPen(QtG.QColor("#000000"), 1.6))
+        p.drawLine(QtC.QPointF(x - 3.5, 5.5), QtC.QPointF(x + 3.5, 5.5)); p.drawLine(QtC.QPointF(x, 2), QtC.QPointF(x, 9))
 
     # ---- mouse and keys ----
     def _move_playhead(self, f, emit=True):
@@ -160,22 +173,93 @@ class TimelineCanvas(QtW.QWidget):
         if x < MARGIN or x > self.width() - MARGIN:
             self.offset = max(0.0, min(self.content_width() - self.width(), self.offset + x - self.width() / 2)); self.zoomed.emit()
 
+    # editing gestures: drag a block's right edge (length), drag a block sideways (order)
+    EDGE, MOVE_START = 5, 6
+
+    def edge_at(self, pos):
+        """Id of the part whose main block has its right edge within 5 px of pos."""
+        if not (ROW_TOP <= pos.y() <= ROW_TOP + ROW_H):
+            return None
+        for pid, d in self.parts.items():
+            if d["main"] and abs(self.x_of(d["main"][0] + d["main"][1]) - pos.x()) <= self.EDGE:
+                return pid
+        return None
+
+    def on_handle(self, pos):
+        """The + handle on the playhead (top of the ruler)."""
+        return pos.y() <= 11 and abs(pos.x() - self._playhead_x()) <= 8
+
+    def _playhead_x(self):
+        return self.x_of(self.frame + 0.5) if self.ppf > 2 else self.x_of(self.frame)
+
+    def drop_index(self, x):
+        """Where a dragged block would land: the position among the parts that are on, 0 = first."""
+        order = sorted(self.parts, key=lambda pid: self.parts[pid]["start"])
+        for i, pid in enumerate(order):
+            d = self.parts[pid]
+            if x < (self.x_of(d["start"]) + self.x_of(d["end"])) / 2:
+                return i
+        return len(order)
+
     def mousePressEvent(self, e):
-        if e.button() != QtC.Qt.LeftButton or not self.total:
+        if not self.total:
             return
-        self.setFocus()
-        pos = e.position(); pid = self.part_at(pos)
+        self.setFocus(); pos = e.position()
+        if e.button() == QtC.Qt.RightButton:
+            pid = self.part_at(pos)
+            if pid is not None:
+                self.selected = pid; self.part_selected.emit(pid); self.update()
+            self.context_requested.emit(pid or "", e.globalPosition().toPoint())
+            return
+        if e.button() != QtC.Qt.LeftButton:
+            return
+        if self.on_handle(pos):
+            self.add_requested.emit(e.globalPosition().toPoint()); return
+        edge = self.edge_at(pos)
+        if edge is not None:
+            part = self.part(edge)
+            self._drag = dict(kind="resize", pid=edge, x0=pos.x(), secs=float(part.get("seconds", 5)), last=None)
+            self.selected = edge; self.part_selected.emit(edge); self.update(); return
+        pid = self.part_at(pos)
         if pid is not None:
             self.selected = pid; self.part_selected.emit(pid)
-        self._drag = "playhead"; self._move_playhead(self.frame_at(pos.x()))
+            self._drag = dict(kind="block", pid=pid, x0=pos.x(), moving=False, target=None)
+        else:
+            self._drag = dict(kind="playhead")
+        self._move_playhead(self.frame_at(pos.x()))
 
     def mouseMoveEvent(self, e):
-        if self._drag == "playhead":
-            self._move_playhead(self.frame_at(e.position().x()))
+        pos = e.position(); d = self._drag
+        if d is None:
+            self.setCursor(QtC.Qt.SizeHorCursor if self.edge_at(pos) else QtC.Qt.PointingHandCursor if self.on_handle(pos) else QtC.Qt.ArrowCursor)
+            return
+        if d["kind"] == "playhead":
+            self._move_playhead(self.frame_at(pos.x()))
+        elif d["kind"] == "resize":
+            step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
+            secs = d["secs"] + (pos.x() - d["x0"]) / (self.ppf * (self.plan.fps if self.plan else 30))
+            secs = min(120.0, max(0.2, round(round(secs / step) * step, 2)))
+            if secs != d["last"]:
+                d["last"] = secs; self.resizing.emit(d["pid"], secs)  # only the timeline redraws while dragging
+        elif d["kind"] == "block":
+            if not d["moving"] and abs(pos.x() - d["x0"]) >= self.MOVE_START:
+                d["moving"] = True; self.setCursor(QtC.Qt.ClosedHandCursor)
+            if d["moving"]:
+                d["target"] = self.drop_index(pos.x()); self.update()
+            else:
+                self._move_playhead(self.frame_at(pos.x()))
 
     def mouseReleaseEvent(self, e):
-        if self._drag:
-            self._drag = None; self.released.emit()
+        d, self._drag = self._drag, None
+        self.setCursor(QtC.Qt.ArrowCursor)
+        if d is None:
+            return
+        if d["kind"] == "resize":
+            if d["last"] is not None:
+                self.resized.emit(d["pid"], d["last"])
+        elif d["kind"] == "block" and d["moving"] and d["target"] is not None:
+            self.update(); self.moved.emit(d["pid"], d["target"])
+        self.released.emit()
 
     def mouseDoubleClickEvent(self, e):
         pid = self.part_at(e.position())
@@ -213,7 +297,15 @@ class TimelineCanvas(QtW.QWidget):
                 d = self.parts[pid]
                 self._move_playhead((d["main"] or (d["start"],))[0])
                 self.selected = pid; self.part_selected.emit(pid)
+        elif k == QtC.Qt.Key_Escape and self._drag and self._drag.get("kind") == "block":
+            self._drag = None; self.setCursor(QtC.Qt.ArrowCursor); self.update(); return  # cancel the move
         else:
+            ctrl = bool(e.modifiers() & QtC.Qt.ControlModifier)
+            cmd = {(QtC.Qt.Key_Delete, False): "delete", (QtC.Qt.Key_Backspace, False): "delete", (QtC.Qt.Key_D, True): "duplicate",
+                   (QtC.Qt.Key_S, False): "split", (QtC.Qt.Key_Z, True): "redo" if shift else "undo",
+                   (QtC.Qt.Key_Y, True): "redo"}.get((k, ctrl))
+            if cmd:
+                self.command.emit(cmd); return
             return super().keyPressEvent(e)
         self.released.emit()
 
@@ -256,6 +348,8 @@ class Timeline(QtW.QWidget):
         c.frame_changed.connect(self._frame); c.released.connect(self.released)
         c.part_selected.connect(self.part_selected); c.part_activated.connect(self.part_activated)
         c.zoomed.connect(self._sync_scroll)
+        for name in ("resizing", "resized", "moved", "command", "context_requested", "add_requested"):
+            setattr(self, name, getattr(c, name))
         self.scroll.valueChanged.connect(self._scrolled)
 
     def set_plan(self, plan, spec):

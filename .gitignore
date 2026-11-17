@@ -1,0 +1,30 @@
+# Never publish data by accident: tomograms, segmentations, sessions and movies stay out of the repository.
+*.mrc
+*.mrcs
+*.rec
+*.map
+*.st
+*.tif
+*.tiff
+*.ORSSession
+*.orssession
+*.ORSObject
+*.mp4
+*.mov
+*.avi
+tomoreveal_output/
+TomoReveal movies/
+segmented/
+
+# Python and tooling
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

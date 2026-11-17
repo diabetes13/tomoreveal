@@ -1,0 +1,63 @@
+"""Tests that draw: one frame, the clip box, picking, a short movie and the window. Skipped where no renderer can start."""
+import os
+
+import numpy as np
+import pytest
+
+import tomoreveal as tr
+
+
+def _overview(st, spec):
+    frames, _ = tr.build_timeline(spec, st.ds)
+    return [f for f in frames if f["shot"] == 2][0]
+
+
+def test_frame_shows_tomogram_and_structures(studio):
+    spec = tr.default_spec(studio.ds)
+    img = studio.ren.draw(_overview(studio, spec), spec, (640, 360))
+    assert img.shape == (360, 640, 3)
+    rgb = img.reshape(-1, 3).astype(int)
+    coloured = (np.abs(rgb[:, 0] - rgb[:, 1]) > 40) | (np.abs(rgb[:, 1] - rgb[:, 2]) > 40)
+    assert coloured.mean() > 0.03          # structures are drawn in colour
+    assert (rgb.sum(1) > 60).mean() > 0.3  # and the grey slice fills a good part of the frame
+
+
+def test_clip_box_removes_geometry(studio):
+    spec = tr.default_spec(studio.ds); spec["style"]["legend"] = False
+    full = studio.ren.draw(_overview(studio, spec), spec, (640, 360)).astype(int)
+    spec["clip"] = dict(x=[0, 255], y=[0, 100], z=[0, 47], fit=False)
+    part = studio.ren.draw(_overview(studio, spec), spec, (640, 360)).astype(int)
+    assert (part.sum(2) > 60).sum() < 0.6 * (full.sum(2) > 60).sum()
+    hits = [studio.ren.pick(x, y) for x in np.linspace(0.05, 0.95, 19) for y in np.linspace(0.1, 0.9, 9)]
+    ys = [h[1][1] for h in hits if h]
+    assert ys and max(ys) <= 101.5         # nothing can be picked in the part that was clipped away
+
+
+def test_short_movie_is_written(studio, tmp_path):
+    spec = tr.default_spec(studio.ds)
+    for s in spec["shots"]:
+        s["seconds"] = 0.3
+    spec["output"].update(size=[320, 180], fps=10, aa=False)
+    out = str(tmp_path / "test.mp4")
+    n, secs = tr.render_movie(studio.ren, spec, out)
+    assert n > 5 and os.path.getsize(out) > 2000
+    assert os.path.exists(str(tmp_path / "test_poster.png"))
+
+
+def test_window_opens_and_loads_demo(demo):
+    QtCore = pytest.importorskip("PySide6.QtCore")
+    import argparse
+    from tomoreveal.gui import build_gui
+    app, win = build_gui(argparse.Namespace(files=[], outdir=os.path.dirname(demo["tomogram"]), headless=True))
+    loop = QtCore.QEventLoop()
+    win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
+    for _ in range(40):
+        app.processEvents()
+    if not win.st.ready() or win.st.ren is None:
+        win.close(); pytest.skip("3D rendering is not available here")
+    assert win.struct_group.isVisible() and win.clip_s["z"].mx == 47
+    win._clip_changed("z", 10, 30)
+    assert win.spec["clip"]["z"] == [10, 30]
+    win.reset_clip()
+    assert win.spec["clip"] is None
+    win.close()

@@ -1,0 +1,19 @@
+name: tomoreveal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pyside6
+  - pyvista
+  - vtk
+  - numpy
+  - scipy
+  - scikit-image
+  - imageio
+  - imageio-ffmpeg
+  - mrcfile
+  - tifffile
+  - zstandard
+  - pillow
+  - pytest

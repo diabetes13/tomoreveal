@@ -55,7 +55,7 @@ def test_window_opens_and_loads_demo(demo):
         app.processEvents()
     if not win.st.can_show or win.st.ren is None:
         win.close(); pytest.skip("3D rendering is not available here")
-    assert win.struct_group.isVisible() and win.clip_s["z"].mx == 47
+    assert win.tabs.isTabVisible(win.TAB_STRUCT) and win.clip_s["z"].mx == 47
     win._clip_changed("z", 10, 30)
     assert win.spec["clip"]["z"] == [10, 30]
     win.reset_clip()

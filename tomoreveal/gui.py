@@ -40,11 +40,10 @@ def cmd_icon(args):
 
 def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
+    from .gui_data import DataPanel
     DIM = "color:#80868f"
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
-    FILTER = ("Tomograms and segmentations (*.mrc *.MRC *.rec *.map *.mrcs *.st *.tif *.tiff *.TIF *.TIFF *.ORSSession *.orssession);;"
-              "All files (*)")
 
     def to_qimage(a):
         a = np.ascontiguousarray(a); h, w = a.shape[:2]; ch = a.shape[2] if a.ndim == 3 else 1
@@ -197,7 +196,7 @@ def build_gui(args):
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
             self.thr_timer.timeout.connect(self.apply_thresholds)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
-            self._build(); self._fill_files(self.st.info()); self.show_empty()
+            self._build(); self.show_empty()
 
         # ---------- layout ----------
         def _group(self, title, parent):
@@ -226,45 +225,33 @@ def build_gui(args):
             if hasattr(s, "_val"):
                 s._val.setText(s._fmt(int(round(v))))
 
+        def _tab(self, name):
+            """A scrollable page of the tab widget; returns its layout."""
+            scroll = QtW.QScrollArea(); scroll.setWidgetResizable(True); scroll.setHorizontalScrollBarPolicy(QtC.Qt.ScrollBarAlwaysOff)
+            page = QtW.QWidget(); lay = QtW.QVBoxLayout(page); scroll.setWidget(page)
+            lay.setSizeConstraint(QtW.QLayout.SetMinimumSize)  # grow and scroll rather than squash rows together
+            self.tabs.addTab(scroll, name); self.pages.append(page)
+            return lay
+
         def _build(self):
             split = QtW.QSplitter(); self.setCentralWidget(split)
-            scroll = QtW.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(470)
-            scroll.setHorizontalScrollBarPolicy(QtC.Qt.ScrollBarAlwaysOff)
-            self.panel = QtW.QWidget(); lay = QtW.QVBoxLayout(self.panel); scroll.setWidget(self.panel)
-            lay.setSizeConstraint(QtW.QLayout.SetMinimumSize)  # grow and scroll rather than squash rows together
-            # files
-            g, gl = self._group("Files", lay)
-            self._note("Drop a tomogram and its segmentation anywhere on this window, or use the buttons. Segmentation: a Dragonfly "
-                       ".ORSSession, a label volume, or easymode / Ais files (name__feature.mrc). A Dragonfly session alone is enough.", gl)
-            row = QtW.QHBoxLayout()
-            b = QtW.QPushButton("Open files..."); b.clicked.connect(lambda: self.open_files()); row.addWidget(b)
-            b = QtW.QPushButton("Add easymode files..."); b.clicked.connect(lambda: self.open_files(features=True)); row.addWidget(b)
-            row.addStretch(1); gl.addLayout(row)
-            row = QtW.QHBoxLayout()
-            b = QtW.QPushButton("Try demo data"); b.setToolTip("Load a small made-up tomogram to try the program"); b.clicked.connect(self.load_demo); row.addWidget(b)
-            row.addStretch(1)
-            b = QtW.QPushButton("Start over"); b.clicked.connect(self.start_over); row.addWidget(b)
-            gl.addLayout(row)
-            self.msg_lbl = QtW.QLabel(""); self.msg_lbl.setWordWrap(True); gl.addWidget(self.msg_lbl)
-            self.files_lbl = self._note("No files loaded.", gl)
-            form = QtW.QFormLayout(); self.image_cb = QtW.QComboBox()
-            self.image_cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); self.image_cb.setMinimumContentsLength(14)
-            self.image_cb.activated.connect(lambda i: self.set_tomogram(self.image_cb.itemData(i)))
-            form.addRow("Tomogram", self.image_cb); gl.addLayout(form)
-            self.image_lab = form.labelForField(self.image_cb)
-            self.seg_head = QtW.QLabel("<b>Segmentation</b>"); gl.addWidget(self.seg_head)
-            self.seg_w = QtW.QWidget(); self.seg_lay = QtW.QVBoxLayout(self.seg_w); self.seg_lay.setContentsMargins(0, 0, 0, 0)
-            gl.addWidget(self.seg_w)
-            self.dims_lbl = self._note("", gl)
-            self.match_lbl = self._note("", gl); self.match_lbl.setVisible(False)
+            left = QtW.QWidget(); left.setMinimumWidth(470); outer = QtW.QVBoxLayout(left); outer.setContentsMargins(4, 4, 4, 4)
+            self.msg_lbl = QtW.QLabel(""); self.msg_lbl.setWordWrap(True); outer.addWidget(self.msg_lbl)
+            self.tabs = QtW.QTabWidget(); self.pages = []; outer.addWidget(self.tabs, 1)
+            # data
+            lay = self._tab("Data")
+            self.data = DataPanel(self.st, self.run_job, self.settings, self.load_demo, self.start_over); lay.addWidget(self.data)
             # structures
+            lay = self._tab("Structures")
             self.struct_group, sl = self._group("Structures", lay)
             self.struct_box = QtW.QWidget(); self.struct_grid = QtW.QGridLayout(self.struct_box); self.struct_grid.setContentsMargins(0, 0, 0, 0)
             self.struct_grid.setColumnStretch(2, 1); sl.addWidget(self.struct_box)
-            self.struct_note = QtW.QLabel("No segmentation loaded. Add one with Open files, or switch one on above."); sl.addWidget(self.struct_note)
-            self._note("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures have a threshold: "
-                       "the surface is drawn where the network's score is above it.", sl)
+            self.struct_note = QtW.QLabel("No segmentation loaded. Add one in the Data tab."); sl.addWidget(self.struct_note)
+            self.struct_help = self._note("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures "
+                                          "have a threshold: the surface is drawn where the network's score is above it.", sl)
+            lay.addStretch(1)
             # view
+            lay = self._tab("Movie"); self.movie_lay = lay
             self.view_group, vl = self._group("Main view", lay)
             pg = QtW.QGridLayout()
             for i, (name, (tilt, az)) in enumerate(VIEWS.items()):
@@ -307,6 +294,8 @@ def build_gui(args):
             self.rto_cb = QtW.QCheckBox("Return to the overview at the end"); self.rto_cb.toggled.connect(lambda v: self._spec_set("return_to_overview", v))
             ml.addWidget(self.rto_cb)
             # look
+            mk = lay  # the Make the movie box goes at the end of this tab
+            lay = self._tab("Look")
             self.look_group, ll = self._group("Look", lay)
             row = QtW.QHBoxLayout(); self.legend_cb = QtW.QCheckBox("Legend"); self.slabel_cb = QtW.QCheckBox("Slice number"); self.invert_cb = QtW.QCheckBox("Invert contrast")
             for cb, key in ((self.legend_cb, "legend"), (self.slabel_cb, "slice_label"), (self.invert_cb, "invert")):
@@ -331,7 +320,7 @@ def build_gui(args):
             self.scrub = QtW.QSlider(QtC.Qt.Horizontal); self.scrub.valueChanged.connect(self.on_scrub); rl.addWidget(self.scrub)
             self.marks = Marks(); rl.addWidget(self.marks)
             self.frame_lbl = QtW.QLabel(""); self.frame_lbl.setStyleSheet(DIM); rl.addWidget(self.frame_lbl)
-            g = QtW.QGroupBox("Make the movie"); grid = QtW.QGridLayout(g)
+            g = QtW.QGroupBox("Make the movie"); grid = QtW.QGridLayout(g); self.make_group = g
             self.quality_cb = QtW.QComboBox()
             for t, wh in QUALITY:
                 self.quality_cb.addItem(t, wh)
@@ -350,8 +339,8 @@ def build_gui(args):
             row.addStretch(1); grid.addLayout(row, 2, 0, 1, 5)
             self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 3, 0, 1, 5)
             self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 4, 0, 1, 5)
-            rl.addWidget(g)
-            split.addWidget(scroll); split.addWidget(right); split.setStretchFactor(1, 1); split.setSizes([500, 980])
+            mk.addWidget(g); mk.addStretch(1)
+            split.addWidget(left); split.addWidget(right); split.setStretchFactor(1, 1); split.setSizes([520, 960])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)
 
         # ---------- messages and state ----------
@@ -361,27 +350,28 @@ def build_gui(args):
             if text:
                 self.statusBar().showMessage(text, 10000)
 
+        TAB_DATA, TAB_STRUCT, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3
+
         def show_empty(self):
-            for g in (self.struct_group, self.view_group, self.clip_group, self.movie_group, self.look_group):
-                g.setVisible(False)
+            for i in (self.TAB_STRUCT, self.TAB_MOVIE, self.TAB_LOOK):
+                self.tabs.setTabVisible(i, False)
+            self.tabs.setCurrentIndex(self.TAB_DATA)
             self.scrub.setVisible(False); self.marks.set([], 1); self.frame_lbl.setText(""); self.go_btn.setEnabled(False)
-            self.prev.clear_image("The preview appears here once a tomogram or a segmentation is loaded.\n\nDrop files onto this window to begin.")
+            self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
 
         def set_busy(self, flag, msg=None):
-            self.busy = flag; self.panel.setEnabled(not flag); self.go_btn.setEnabled(not flag and self.st.can_show)
+            """While files are read: the Data tab shows a progress line and the other tabs are disabled."""
+            self.busy = flag; self.go_btn.setEnabled(not flag and self.st.can_show)
+            for i, page in enumerate(self.pages):
+                if i != self.TAB_DATA:
+                    page.setEnabled(not flag)
+            self.data.set_busy(flag, msg or "")
             if flag:
                 QtW.QApplication.setOverrideCursor(QtC.Qt.BusyCursor); self.say(msg)
             else:
                 QtW.QApplication.restoreOverrideCursor()
 
         # ---------- loading ----------
-        def open_files(self, features=False):
-            start = self.settings.value("lastdir", "") or os.path.expanduser("~")
-            paths, _ = QtW.QFileDialog.getOpenFileNames(self, "Add easymode files" if features else "Open tomogram and segmentation", start, FILTER)
-            if paths:
-                self.settings.setValue("lastdir", os.path.dirname(paths[0]))
-                self.load(paths=paths, features=paths if features else ())
-
         def dragEnterEvent(self, e):
             if e.mimeData().hasUrls():
                 e.acceptProposedAction()
@@ -397,7 +387,8 @@ def build_gui(args):
                 return
             self.set_busy(True, msg)
             self.worker = Worker(fn)
-            self.worker.log.connect(lambda m: self.say(m)); self.worker.done.connect(self._loaded); self.worker.failed.connect(self._load_failed)
+            self.worker.log.connect(lambda m: (self.say(m), self.data.log(m)))
+            self.worker.done.connect(self._loaded); self.worker.failed.connect(self._load_failed)
             self.worker.start()
 
         def load(self, paths=(), roi=None, image=None, features=()):
@@ -405,14 +396,13 @@ def build_gui(args):
             self.run_job(lambda log: st.load(paths, roi=roi, image=image, log=log, as_features=features, make_renderer=False))
 
         def set_tomogram(self, key):
-            self.run_job(lambda log: self.st.set_tomogram_source(key or None, log=log, make_renderer=False), "Changing the tomogram ...")
+            self.data.choose_tomogram(key or None)
 
         def set_segmentation(self, key, on):
-            self.run_job(lambda log: self.st.set_segmentation_enabled(key, on, log=log, make_renderer=False),
-                         "Reading the segmentation and building 3D surfaces ..." if on else "Updating ...")
+            self.data.switch(key, on)
 
         def remove_source(self, key):
-            self.run_job(lambda log: self.st.remove_source(key, log=log, make_renderer=False), "Updating ...")
+            self.data.remove(key)
 
         def _loaded(self, info):
             try:
@@ -433,50 +423,12 @@ def build_gui(args):
         def start_over(self):
             if self.busy or self.gen is not None:
                 return
-            self.st.reset(); self.info = self.spec = None; self._fill_files(self.st.info()); self.show_empty(); self.say("")
-
-        def _fill_files(self, info):
-            choices = info.get("tomogram_choices", []); sources = info.get("segmentation_sources", [])
-            loaded = len(choices) > 1 or bool(sources)
-            self.files_lbl.setVisible(not loaded); self.files_lbl.setText("No files loaded.")
-            cb = self.image_cb; cb.blockSignals(True); cb.clear()
-            for o in choices:
-                cb.addItem(o["label"], o["key"] or "")
-            cb.setCurrentIndex(max(0, cb.findData(info.get("tomogram") or ""))); cb.blockSignals(False)
-            cb.setVisible(loaded); self.image_lab.setVisible(loaded)
-            lay = self.seg_lay
-            while lay.count():  # store each widget before setParent(None): afterwards item.widget() is None
-                w = lay.takeAt(0).widget()
-                if w:
-                    w.setParent(None); w.deleteLater()
-            self.seg_head.setVisible(bool(sources)); group = None
-            hidden = {h["key"][8:]: h for h in info.get("sessions", [])}
-            for s in sources:
-                if s["group"] != group:
-                    group = s["group"]; lab = QtW.QLabel(group); lab.setStyleSheet(DIM); lay.addWidget(lab)
-                names = ", ".join(s["names"][:6]) + (", ..." if len(s["names"]) > 6 else "")
-                n = s["count"]
-                tick = QtW.QCheckBox(f"{s['label']} ({n} structure{'s' if n != 1 else ''})" if s["kind"] != "scores" else s["label"])
-                tick.setChecked(bool(s["enabled"])); tick.setEnabled(bool(s["usable"]))
-                tick.setToolTip(s["reason"] or names)
-                tick.toggled.connect(lambda v, key=s["key"]: self.set_segmentation(key, v)); lay.addWidget(tick)
-                note = QtW.QLabel(("    " + s["reason"]) if not s["usable"] else ("    " + names if s["kind"] != "scores" else ""))
-                note.setStyleSheet(DIM); note.setWordWrap(True)
-                if note.text().strip():
-                    lay.addWidget(note)
-                if s["session"] and s is [x for x in sources if x["session"] == s["session"]][-1]:
-                    h = hidden.get(s["session"][8:], {})
-                    if h.get("previews"):
-                        lab = QtW.QLabel(f"    {h['previews']} single-slice previews from the Segmentation Wizard hidden"); lab.setStyleSheet(DIM)
-                        lay.addWidget(lab)
-            dims = info.get("dims")
-            self.match_lbl.setText(info.get("match_note") or ""); self.match_lbl.setVisible(bool(info.get("match_note")))
-            self.dims_lbl.setText((" x ".join(map(str, dims)) + " voxels" + (f" \u00b7 {info['voxel'] / 10:.2f} nm per voxel" if info.get("voxel") else "")) if dims else "")
+            self.st.reset(); self.info = self.spec = None; self.data.refresh(self.st.info()); self.show_empty(); self.say("")
 
         def apply_info(self, info, keep_message=False):
             prev = self.info
             same = bool(prev and prev.get("can_show") and info.get("can_show") and self.spec)
-            self.info = info; self._fill_files(info)
+            self.info = info; self.data.refresh(info)
             if not info.get("can_show"):
                 if not keep_message:
                     self.say(info.get("message", ""))
@@ -487,8 +439,8 @@ def build_gui(args):
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
-            for g in (self.struct_group, self.view_group, self.clip_group, self.movie_group, self.look_group):
-                g.setVisible(True)
+            for i in (self.TAB_STRUCT, self.TAB_MOVIE, self.TAB_LOOK):
+                self.tabs.setTabVisible(i, True)
             self.scrub.setVisible(True); self.go_btn.setEnabled(True)
             self.build_controls()
             if not keep_message:
@@ -545,8 +497,12 @@ def build_gui(args):
             v = sp["view"]
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()
+            has_t, has_s = self.info.get("has_tomogram"), self.info.get("has_segmentation")
             for i, (cb, spin) in enumerate(self.shot_ctl):
                 self._setv(cb, sp["shots"][i].get("on", True)); self._setv(spin, float(sp["shots"][i].get("seconds", 5)))
+                need = "needs a tomogram" if (i == 0 and not has_t) else "needs a segmentation" if (i == 1 and not has_s) else ""
+                cb.setEnabled(not need); spin.setEnabled(not need); cb.setToolTip(need)
+            self.struct_help.setVisible(bool(has_s))
             self.motion_cb.setCurrentIndex(max(0, self.motion_cb.findData(sp["shots"][2].get("motion", "rock"))))
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
@@ -590,7 +546,7 @@ def build_gui(args):
                 g.addWidget(sec, 2, 0); g.addWidget(zm, 2, 1); g.addWidget(what, 2, 2, 1, 2)
                 lay.addWidget(fr)
             if not n:
-                self._note("None yet. Use a Zoom button above, or click a structure in the preview.", lay)
+                self._note("None yet. Use a Zoom button in the Structures tab, or click a structure in the preview.", lay)
 
         def _paint(self, b, hexc):
             b.setStyleSheet(f"background:{hexc}; border:1px solid #555; border-radius:3px")
@@ -820,7 +776,13 @@ def build_gui(args):
             self._rendering(True); self.status_lbl.setText("Starting ..."); self.render_timer.start()
 
         def _rendering(self, on):
-            self.panel.setEnabled(not on); self.scrub.setEnabled(not on)
+            # everything is locked while the movie is made, except Cancel (in the Make the movie box)
+            for i, page in enumerate(self.pages):
+                if i != self.TAB_MOVIE:
+                    page.setEnabled(not on)
+            for g in (self.view_group, self.clip_group, self.movie_group):
+                g.setEnabled(not on)
+            self.scrub.setEnabled(not on)
             for w in (self.quality_cb, self.name_le, self.folder_le):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)

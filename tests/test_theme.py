@@ -45,11 +45,9 @@ def test_custom_painted_widgets_in_both_themes(window):
     app, win = window
     for choice in ("dark", "light", "system"):
         win.set_theme(choice)
-        for w in (win.marks, win.clip_s["x"]):
-            w.resize(300, 30); img = w.grab().toImage()
+        for w in (win.timeline.canvas, win.clip_s["x"]):
+            w.resize(300, 70); img = w.grab().toImage()
             assert not img.isNull()
-        win.marks.set([dict(frame=0, label="Slices")], 10)
-        assert not win.marks.grab().toImage().isNull()
 
 
 def test_choice_is_used_when_the_window_opens(tmp_path):

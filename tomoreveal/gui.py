@@ -42,6 +42,7 @@ def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
     from .gui_data import DataPanel, clear_layout
     from .gui_explore import ExplorePanel
+    from .gui_timeline import Timeline
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
@@ -170,19 +171,6 @@ def build_gui(args):
         def mouseReleaseEvent(self, e):
             self._grab = None
 
-    class Marks(QtW.QWidget):
-        def __init__(self):
-            super().__init__(); self.setFixedHeight(18); self.marks, self.total = [], 1
-
-        def set(self, marks, total):
-            self.marks, self.total = marks, max(1, total); self.update()
-
-        def paintEvent(self, e):
-            p = QtG.QPainter(self); p.setPen(self.palette().color(QtG.QPalette.PlaceholderText)); f = p.font(); f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85)); p.setFont(f)
-            w = self.width() - 14
-            for m in self.marks:
-                x = int(7 + w * m["frame"] / max(1, self.total - 1)); p.drawLine(x, 1, x, 16); p.drawText(x + 3, 13, m["label"])
-
     class Main(QtW.QMainWindow):
         def __init__(self):
             super().__init__()
@@ -190,6 +178,7 @@ def build_gui(args):
             outdir = args.outdir or self.settings.value("outdir", "") or os.path.join(os.path.expanduser("~"), "TomoReveal movies")
             self.st = Studio(headless=args.headless, outdir=outdir)
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
+            self.selected_part = None  # id of the part selected on the timeline
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
@@ -253,7 +242,7 @@ def build_gui(args):
             self.say(*getattr(self, "_msg", ("", None)))
             if self.spec is not None and self.info is not None:
                 self.build_controls()  # colour swatches and grey notes
-            for w in (self.marks, *self.clip_s.values()):
+            for w in (self.timeline.canvas, *self.clip_s.values()):
                 w.update()
 
         def _tab(self, name):
@@ -373,9 +362,9 @@ def build_gui(args):
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
             rl.addWidget(self.prev, 1)
-            self.scrub = QtW.QSlider(QtC.Qt.Horizontal); self.scrub.valueChanged.connect(self.on_scrub); rl.addWidget(self.scrub)
-            self.marks = Marks(); rl.addWidget(self.marks)
-            self.frame_lbl = QtW.QLabel(""); self.frame_lbl.setStyleSheet(DIM); rl.addWidget(self.frame_lbl)
+            self.timeline = Timeline(); rl.addWidget(self.timeline)
+            self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
+            self.timeline.part_selected.connect(self.select_part); self.timeline.part_activated.connect(self.open_part)
             g = QtW.QGroupBox("Make the movie"); grid = QtW.QGridLayout(g); self.make_group = g
             self.quality_cb = QtW.QComboBox()
             for t, wh in QUALITY:
@@ -423,7 +412,7 @@ def build_gui(args):
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
-            self.scrub.setVisible(False); self.marks.set([], 1); self.frame_lbl.setText(""); self.go_btn.setEnabled(False)
+            self.timeline.setVisible(False); self.go_btn.setEnabled(False)
             self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
 
         def set_busy(self, flag, msg=None):
@@ -509,7 +498,7 @@ def build_gui(args):
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, True)
             self.explore.set_data(info)
-            self.scrub.setVisible(True); self.go_btn.setEnabled(True)
+            self.timeline.setVisible(True); self.go_btn.setEnabled(True)
             self.build_controls()
             if not keep_message:
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
@@ -810,7 +799,7 @@ def build_gui(args):
                 self.explore._range_text(); self.explore.refresh()
                 return
             spec = self.spec_for(); req = self.req or {"t": self.frame / max(1, self.total - 1)}; self.req = None
-            frames, marks, i = self.st._frame(spec, req)
+            plan, i = self.st.plan_frame(spec, req); frames = plan.frames
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             try:
                 img = self.st.ren.draw(frames[i], spec, size, aa=False)
@@ -823,9 +812,16 @@ def build_gui(args):
                 self.say(f"Preview failed: {exc}", "err"); return
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
-            self.scrub.blockSignals(True); self.scrub.setRange(0, len(frames) - 1); self.scrub.setValue(i); self.scrub.blockSignals(False)
-            self.marks.set(marks, len(frames)); fps = int(spec["output"].get("fps", 30))
-            self.frame_lbl.setText(f"{i / fps:.1f} s of {len(frames) / fps:.1f} s  \u00b7  drag the slider to scrub through the movie")
+            if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
+                self.selected_part = None
+            self.timeline.set_plan(plan, self.spec); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+
+        def select_part(self, pid):
+            self.selected_part = pid
+
+        def open_part(self, pid):
+            """Double-click on a block: show the part's settings in the Movie tab."""
+            self.selected_part = pid; self.tabs.setCurrentIndex(self.TAB_MOVIE)
 
         def on_scrub(self, v):
             self.req = {"frame": int(v)}; self.schedule(40)
@@ -898,7 +894,7 @@ def build_gui(args):
                     page.setEnabled(not on)
             for g in (self.view_group, self.clip_group, self.movie_group):
                 g.setEnabled(not on)
-            self.scrub.setEnabled(not on)
+            self.timeline.setEnabled(not on)
             for w in (self.quality_cb, self.name_le, self.folder_le):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)

@@ -17,7 +17,7 @@ from .common import UserError, VIEWS, __version__
 from .dragonfly import OrsSession, guess_roi
 from .matching import apply_match, match_volume
 from .render import Renderer, render_movie
-from .storyboard import build_timeline, class_spec, default_spec
+from .storyboard import build_plan, build_timeline, class_spec, default_spec
 from .volumes import Dataset, load_volume, looks_like_labels, looks_like_scores, regrid, score_scale, sidecar_classes
 
 
@@ -419,8 +419,19 @@ class Studio:
         return d
 
     # ---- preview / pick ----
+    def plan_frame(self, spec, req):
+        """(Plan, index of the frame asked for)."""
+        plan = build_plan(spec, self.ds)
+        frames, marks, i = self._pick_frame(plan.frames, plan.marks, req)
+        return plan, i
+
     def _frame(self, spec, req):
-        frames, marks = build_timeline(spec, self.ds); n = len(frames)
+        plan = build_plan(spec, self.ds)
+        return self._pick_frame(plan.frames, plan.marks, req)
+
+    @staticmethod
+    def _pick_frame(frames, marks, req):
+        n = len(frames)
         if req.get("at"):
             at = req["at"]  # {"part": id, "u": ...}, or {"shot": position, "u": ...} from the browser version
             idx = [i for i, s in enumerate(frames) if s["phase"] == "main" and

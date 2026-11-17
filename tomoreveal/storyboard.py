@@ -105,7 +105,8 @@ def default_opacity(spec, has_tomo=True):
 # Never address a part by its position in the list: use its id.
 # ---------------------------------------------------------------------------------------------------------------
 PART_TYPES = ("slide", "overview", "focus", "hold")
-PRESETS = ("slide_up", "reveal", "overview", "focus", "hold")
+PRESETS = ("slide_up", "reveal", "overview", "view", "focus", "hold")
+VIEW_TRANSITION = 1.5  # seconds of camera flight into a "View from here" part
 CLOSEUP_TRANSITION = 1.3  # seconds of camera flight into and out of a close-up
 OTHER_TRANSITION = 0.5
 
@@ -131,6 +132,9 @@ def new_part(kind, **fields):
         p = _common(type="slide", seconds=7, structures="keep", **{"from": "current", "to": "last"})
     elif kind == "overview":
         p = _common(type="overview", seconds=6, motion="rock", angle=25, view=None)
+    elif kind == "view":  # "View from here": a still overview with its own camera position (pass view={tilt, az, zoom})
+        p = _common(type="overview", seconds=3, motion="none", angle=25, view=dict(tilt=42.0, az=0.0, zoom=1.0),
+                    transition=VIEW_TRANSITION)
     elif kind == "focus":
         p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30)
     elif kind == "hold":

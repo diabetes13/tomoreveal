@@ -80,6 +80,13 @@ def build_gui(args):
             self.setMinimumSize(320, 180); self.setSizePolicy(QtW.QSizePolicy.Ignored, QtW.QSizePolicy.Ignored)
             self.setStyleSheet("background: palette(base); color: palette(placeholder-text); border-radius:8px; padding:6px")
             self._img = None; self._press = None; self._moved = False
+            self.note = QtW.QLabel(self); self.note.setStyleSheet(
+                "background: rgba(0, 0, 0, 160); color: #ffffff; border-radius: 4px; padding: 3px 8px")
+            self.note.move(10, 10); self.note.setVisible(False)
+
+        def set_note(self, text):
+            """A line in the preview corner, e.g. which part's view dragging changes."""
+            self.note.setText(text or ""); self.note.adjustSize(); self.note.setVisible(bool(text))
 
         def set_image(self, qimg):
             self._img = qimg; self._rescale()
@@ -762,6 +769,8 @@ def build_gui(args):
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
                 self.selected_part = None
             self.timeline.set_plan(plan, self.spec); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+            vp = self.view_part()
+            self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
             empty = not any(p.get("on", True) for p in self.spec["shots"])
             self.go_btn.setEnabled(not empty)
             self.go_btn.setToolTip("The movie has no parts. Add one with + Add part." if empty else "")
@@ -824,20 +833,45 @@ def build_gui(args):
                            p["name"], after)
             self.say(f"Added a close-up of {p['name']}{extra}.", "ok")
 
+        def view_part(self):
+            """The selected "own view" part when the playhead is inside it: dragging and scrolling change its view."""
+            pid = self.selected_part; plan = self.timeline.canvas.plan
+            if not (pid and self.spec and plan) or not (0 <= self.frame < len(plan.frames)) or plan.frames[self.frame].get("part") != pid:
+                return None
+            part = self.parts_panel.part(pid)
+            return part if part and part["type"] == "overview" and part.get("view") else None
+
+        def set_part_view(self, part, quick=False, **kw):
+            vw = dict(part["view"])
+            vw.update({k: float(v) for k, v in kw.items() if v is not None}); part["view"] = vw
+            self.parts_panel.show_view(part["id"]); self.parts_panel.refresh_line(part["id"])
+            if quick:
+                self.req = {"frame": self.frame}; self.do_preview(quick=True)
+            else:
+                self.schedule()
+
         def on_drag(self, dx, dy):
             if self.pick_mode or not self.spec or self.gen is not None or self.busy:
                 return
+            part = self.view_part()
             if self._drag0 is None:
-                self._drag0 = dict(self.spec["view"])
+                self._drag0 = dict(part["view"] if part else self.spec["view"])
             v0 = self._drag0
-            self.set_view(tilt=min(85.0, max(0.0, v0["tilt"] + dy * 0.25)), az=((v0["az"] - dx * 0.35 + 180.0) % 360.0) - 180.0, quick=True)
+            tilt, az = min(85.0, max(0.0, v0["tilt"] + dy * 0.25)), ((v0["az"] - dx * 0.35 + 180.0) % 360.0) - 180.0
+            if part:
+                self.set_part_view(part, quick=True, tilt=tilt, az=az)
+            else:
+                self.set_view(tilt=tilt, az=az, quick=True)
 
         def on_release(self):
             self._drag0 = None; self.schedule(0)
 
         def on_wheel(self, delta):
             if self.spec and self.gen is None:
-                self.set_view(zoom=min(3.0, max(0.5, self.spec["view"]["zoom"] * 1.1 ** (delta / 120.0))))
+                part = self.view_part()
+                z = (part["view"] if part else self.spec["view"]).get("zoom", 1.0)
+                z = min(3.0, max(0.5, float(z) * 1.1 ** (delta / 120.0)))
+                self.set_part_view(part, zoom=z) if part else self.set_view(zoom=z)
 
         # ---------- making the movie ----------
         def choose_folder(self):

@@ -7,7 +7,7 @@ from .gui_data import clear_layout
 from .gui_theme import DIM
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
-               ("Overview", "overview"), ("Hold (pause)", "hold"))
+               ("Overview", "overview"), ("View from here", "view"), ("Hold (pause)", "hold"))
 
 
 class MovieEditor(QtC.QObject):
@@ -129,7 +129,11 @@ class MovieEditor(QtC.QObject):
         self.commit(select=part["id"], show=part["id"])
 
     def add(self, kind, after=None):
-        self.insert(sb.new_part(kind), after)
+        if kind == "view":  # the camera position of the main view as it is now
+            v = self.spec["view"]
+            self.insert(sb.new_part("view", view=dict(tilt=float(v["tilt"]), az=float(v["az"]), zoom=float(v["zoom"]))), after)
+        else:
+            self.insert(sb.new_part(kind), after)
 
     def add_closeup(self, key, name, after=None):
         self.insert(sb.focus_shot({"class": key}, name), after)
@@ -227,6 +231,9 @@ class MovieEditor(QtC.QObject):
             a = menu.addAction(text, lambda kind=kind: self.add(kind, after))
             need = "needs a tomogram" if kind == "slide_up" and not has_t else "needs a segmentation" if kind == "reveal" and not has_s else ""
             a.setEnabled(not need); a.setToolTip(need)
+            if kind == "view":
+                a.setToolTip("A still view with its own camera position; drag in the preview to change it. "
+                             "Two of them in a row make the camera fly from one to the other.")
             if kind == "overview":
                 sub = menu.addMenu("Close-up of"); sub.setEnabled(has_s); sub.setToolTip("" if has_s else "needs a segmentation")
                 self._fill_closeups(sub, after)
@@ -449,6 +456,7 @@ class PartsPanel(QtW.QWidget):
             add("Camera movement", _combo(MOTIONS, p.get("motion", "rock"), lambda v: self.set(pid, "motion", v, rebuild=True)))
             if p.get("motion", "rock") == "rock":
                 add("Rock angle", _spin(5, 90, float(p.get("angle", 25)), lambda v: self.set(pid, "angle", v), step=5, suffix="\u00b0", decimals=0))
+            self._view_rows(pid, p, form)
         elif t == "focus":
             self._focus_rows(pid, p, form)
         add("Duration", _spin(0.2, 120, float(p.get("seconds", 5)), lambda v: self.set(pid, "seconds", v)))
@@ -460,6 +468,52 @@ class PartsPanel(QtW.QWidget):
                                    step=0.1, special="automatic"))
         form.labelForField(form.itemAt(form.rowCount() - 1, QtW.QFormLayout.FieldRole).widget()).setToolTip(
             "Seconds of camera flight into this part; 0 cuts straight to it")
+
+    def _view_rows(self, pid, p, form):
+        """View: the main view, or this part's own camera position (Tilt, Rotate, Zoom)."""
+        own = bool(p.get("view"))
+        main = self.win.spec["view"]
+
+        def choose(v):
+            self.set(pid, "view", dict(tilt=float(main["tilt"]), az=float(main["az"]), zoom=float(main["zoom"])) if v == "own" else None,
+                     rebuild=True)
+        form.addRow("View", _combo((("main view", "main"), ("own view", "own")), "own" if own else "main", choose))
+        if not own:
+            return
+        vw = p["view"]; self.view_sliders = {}
+
+        def slider(key, lo, hi, scale, fmt):
+            row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+            s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(round(float(vw.get(key, 0)) * scale)))
+            val = QtW.QLabel(fmt(s.value())); val.setFixedWidth(52)
+
+            def moved(x, key=key):
+                val.setText(fmt(x)); cur = dict(self.part(pid).get("view") or {}); cur[key] = x / scale
+                self.set(pid, "view", cur)
+            s.valueChanged.connect(moved); h.addWidget(s, 1); h.addWidget(val)
+            self.view_sliders[key] = (s, val, scale, fmt)
+            return row
+        form.addRow("Tilt", slider("tilt", 0, 85, 1, lambda x: f"{x}\u00b0"))
+        form.addRow("Rotate", slider("az", -180, 180, 1, lambda x: f"{x}\u00b0"))
+        form.addRow("Zoom", slider("zoom", 50, 300, 100, lambda x: f"{x / 100:.2f}x"))
+        tip = QtW.QLabel("Or drag in the preview while this part is selected and the playhead is in it.")
+        tip.setStyleSheet(DIM); tip.setWordWrap(True); form.addRow("", tip)
+
+    def show_view(self, pid):
+        """The part's view was changed by dragging in the preview: move its sliders along (without changing it again)."""
+        if pid != self.open_id or not getattr(self, "view_sliders", None):
+            return
+        vw = (self.part(pid) or {}).get("view") or {}
+        for key, (s, val, scale, fmt) in self.view_sliders.items():
+            try:
+                s.blockSignals(True); s.setValue(int(round(float(vw.get(key, 0)) * scale))); val.setText(fmt(s.value()))
+            except RuntimeError:  # the sliders were rebuilt meanwhile
+                pass
+            finally:
+                try:
+                    s.blockSignals(False)
+                except RuntimeError:
+                    pass
 
     def _slide_rows(self, pid, p, form):
         nz = (self.win.info or {}).get("dims", [1, 1, 1])[2]

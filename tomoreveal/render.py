@@ -96,7 +96,9 @@ class Renderer:
         # No depth peeling for a see-through slice: with software rendering (VTK 9.6, OSMesa) it hid the slice
         # completely in frames drawn without anti-aliasing (the preview). Plain blending looks right here.
         self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
-        self.plane.SetOrigin(0, 0, (k + 0.5) if s["reveal"] else self.shape[0] + 10)
+        # the cutting plane keeps what lies above it: structures above the slice, all of them, or none
+        cut = s.get("cut") or ("above" if s["reveal"] else "none")
+        self.plane.SetOrigin(0, 0, {"above": k + 0.5, "all": -10.0}.get(cut, self.shape[0] + 10))
         cb = clip_box(spec, self.shape); far = 1e9
         (x0, y0, _), (x1, y1, z1) = cb if cb else ((-far, -far, 0), (far, far, far))
         for p, o in zip(self.cplanes, ((x0 - 0.5, 0, 0), (x1 + 0.5, 0, 0), (0, y0 - 0.5, 0), (0, y1 + 0.5, 0), (0, 0, z1 + 0.5))):

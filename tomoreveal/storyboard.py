@@ -258,5 +258,5 @@ def build_timeline(spec, ds):
 
 def state_key(s):
     p = s["pose"]
-    return (s["k"], s["reveal"], round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), s["others"],
+    return (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), s["others"],
             s["caption"], tuple(np.round(p["c"], 2)), round(p["tilt"], 3), round(p["az"] % 360.0, 3), round(p["dist"], 2))

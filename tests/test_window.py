@@ -44,7 +44,7 @@ def tabs_shown(win):
 
 
 def is_empty(win):
-    return tabs_shown(win) == [True, False, False, False] and not win.data.empty_lbl.isHidden() and win.spec is None
+    return tabs_shown(win) == [True, False, False, False, False] and not win.data.empty_lbl.isHidden() and win.spec is None
 
 
 def test_tomogram_first_then_segmentation(window, demo):
@@ -54,7 +54,7 @@ def test_tomogram_first_then_segmentation(window, demo):
         wait(app, win, lambda: win.data.add_tomogram([demo["tomogram"]]))
         if win.st.ren is None:
             pytest.skip("3D rendering is not available here")
-        assert tabs_shown(win) == [True, True, True, True]
+        assert tabs_shown(win) == [True, True, True, True, True]
         assert structure_names(win) == [] and not win.struct_note.isHidden()
         assert "No segmentation loaded" in win.struct_note.text()
         assert win.shot_ctl[0][0].isEnabled() and not win.shot_ctl[1][0].isEnabled()  # sweep yes, reveal needs a segmentation

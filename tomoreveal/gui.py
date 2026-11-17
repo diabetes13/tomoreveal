@@ -41,6 +41,7 @@ def cmd_icon(args):
 def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
     from .gui_data import DataPanel, clear_layout
+    from .gui_explore import ExplorePanel
     DIM = "color:#80868f"
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
@@ -250,6 +251,11 @@ def build_gui(args):
             self.struct_help = self._note("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures "
                                           "have a threshold: the surface is drawn where the network's score is above it.", sl)
             lay.addStretch(1)
+            # explore
+            lay = self._tab("Explore")
+            self.explore = ExplorePanel(self.st, lambda: self.spec, self.spec_for, self._set_z_range,
+                                        lambda key, name: self.add_focus({"class": key}, name), self.say)
+            lay.addWidget(self.explore)
             # view
             lay = self._tab("Movie"); self.movie_lay = lay
             self.view_group, vl = self._group("Main view", lay)
@@ -322,7 +328,10 @@ def build_gui(args):
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("Title", self.title_le); ll.addLayout(form)
             lay.addStretch(1)
             # preview side
-            right = QtW.QWidget(); rl = QtW.QVBoxLayout(right)
+            self.right = QtW.QStackedWidget()
+            right = QtW.QWidget(); rl = QtW.QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0)
+            self.right.addWidget(right); self.right.addWidget(self.explore.page)
+            self.tabs.currentChanged.connect(self._tab_changed)
             self.prev = Preview()
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
@@ -350,7 +359,7 @@ def build_gui(args):
             self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 3, 0, 1, 5)
             self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 4, 0, 1, 5)
             mk.addWidget(g); mk.addStretch(1)
-            split.addWidget(left); split.addWidget(right); split.setStretchFactor(1, 1); split.setSizes([520, 960])
+            split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([520, 960])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)
 
         # ---------- messages and state ----------
@@ -360,10 +369,21 @@ def build_gui(args):
             if text:
                 self.statusBar().showMessage(text, 10000)
 
-        TAB_DATA, TAB_STRUCT, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3
+        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4
+
+        def _tab_changed(self, i):
+            """The Explore tab shows its own slice view on the right; every other tab shows the movie preview."""
+            self.right.setCurrentIndex(1 if i == self.TAB_EXPLORE else 0)
+            if i == self.TAB_EXPLORE:
+                self.explore.view.setFocus()
+            self.schedule(0)
+
+        def _set_z_range(self, zr):
+            if self.spec:
+                self.spec["z_range"] = zr; self.schedule()
 
         def show_empty(self):
-            for i in (self.TAB_STRUCT, self.TAB_MOVIE, self.TAB_LOOK):
+            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
             self.scrub.setVisible(False); self.marks.set([], 1); self.frame_lbl.setText(""); self.go_btn.setEnabled(False)
@@ -449,8 +469,9 @@ def build_gui(args):
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
-            for i in (self.TAB_STRUCT, self.TAB_MOVIE, self.TAB_LOOK):
+            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, True)
+            self.explore.set_data(info)
             self.scrub.setVisible(True); self.go_btn.setEnabled(True)
             self.build_controls()
             if not keep_message:
@@ -744,6 +765,9 @@ def build_gui(args):
 
         def do_preview(self, quick=False):
             if self.spec is None or self.busy or self.gen is not None or not self.st.can_show or self.st.ren is None:
+                return
+            if self.tabs.currentIndex() == self.TAB_EXPLORE:
+                self.explore._range_text(); self.explore.refresh()
                 return
             spec = self.spec_for(); req = self.req or {"t": self.frame / max(1, self.total - 1)}; self.req = None
             frames, marks, i = self.st._frame(spec, req)

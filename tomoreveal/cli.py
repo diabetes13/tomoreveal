@@ -30,7 +30,7 @@ from .common import UserError, VIEWS, __version__
 from .dragonfly import OrsSession, describe_session, guess_roi
 from .gui import cmd_demo, cmd_gui, cmd_icon
 from .render import get_font, render_movie
-from .storyboard import build_timeline, default_spec, focus_shot
+from .storyboard import build_plan, default_spec, focus_shot, main_range
 from .studio import Studio
 from .volumes import write_mrc
 from .webapp import cmd_app
@@ -110,8 +110,11 @@ def cmd_movie(args):
     spec["style"].update(legend=not args.no_legend, slice_label=not args.no_slice_label, title=args.title or "")
     spec["z_range"] = list(args.z_range) if args.z_range else None
     spec["output"].update(fps=args.fps, crf=args.crf)
-    spec["shots"][0]["seconds"] = spec["shots"][1]["seconds"] = args.sweep_seconds
-    spec["shots"][2].update(on=args.end != "none", motion=args.end, seconds=args.end_seconds, angle=args.rock_angle)
+    for part in spec["shots"]:  # by type, never by position
+        if part["type"] == "slide":
+            part["seconds"] = args.sweep_seconds
+        elif part["type"] == "overview":
+            part.update(on=args.end != "none", motion=args.end, seconds=args.end_seconds, angle=args.rock_angle)
     for name in args.focus or []:
         hits = [k for k, c in ds.classes.items() if name == str(c["label"]) or name.lower() == c["name"].lower()]
         if not hits or hits[0] not in ds.meshes:
@@ -142,8 +145,11 @@ def cmd_preview(args):
     sheet = Image.new("RGB", (cols * size[0], rows * size[1]), args.bg); font = get_font(20)
     for i, (name, tilt, az) in enumerate(views):
         spec["view"].update(tilt=tilt, az=az)
-        frames, _ = build_timeline(spec, st.ds)
-        idx = [j for j, s in enumerate(frames) if s["reveal"] and s["shot"] == 1 and s["phase"] == "main"] or list(range(len(frames)))
+        plan = build_plan(spec, st.ds); frames = plan.frames
+        # halfway through the first slide that shows structures
+        reveal = next((p["id"] for p in spec["shots"] if p["type"] == "slide" and p.get("structures") in ("above", "all")
+                       and main_range(plan, p["id"])), None)
+        idx = [j for j, s in enumerate(frames) if s["part"] == reveal and s["phase"] == "main"] or list(range(len(frames)))
         s = dict(frames[idx[len(idx) // 2]])
         if args.z is not None:
             s["k"] = args.z

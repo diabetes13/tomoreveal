@@ -422,7 +422,9 @@ class Studio:
     def _frame(self, spec, req):
         frames, marks = build_timeline(spec, self.ds); n = len(frames)
         if req.get("at"):
-            idx = [i for i, s in enumerate(frames) if s["shot"] == int(req["at"].get("shot", -9)) and s["phase"] == "main"]
+            at = req["at"]  # {"part": id, "u": ...}, or {"shot": position, "u": ...} from the browser version
+            idx = [i for i, s in enumerate(frames) if s["phase"] == "main" and
+                   (s.get("part") == at["part"] if at.get("part") else s["shot"] == int(at.get("shot", -9)))]
             i = idx[min(len(idx) - 1, int(float(req["at"].get("u", 0.5)) * len(idx)))] if idx else n - 1
         elif req.get("frame") is not None:
             i = int(req["frame"])

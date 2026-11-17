@@ -214,7 +214,9 @@ def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True
         os.makedirs(frames_dir, exist_ok=True)
     w = imageio.get_writer(out, fps=fps, codec="libx264", quality=None, macro_block_size=2, pixelformat="yuv420p",
                            output_params=["-crf", str(int(o.get("crf", 20))), "-preset", "medium", "-movflags", "+faststart"])
-    reveal_idx = [i for i, s in enumerate(frames) if s["reveal"] and s["phase"] == "main" and s["e"] == 0]
+    # poster: a frame from the main phase of a slide that shows structures (else an overview), never a close-up
+    reveal_idx = [i for i, s in enumerate(frames) if s.get("type") == "slide" and s["reveal"] and s["phase"] == "main" and s["e"] == 0] \
+        or [i for i, s in enumerate(frames) if s.get("type") == "overview" and s["phase"] == "main" and s["e"] == 0]
     poster_i = reveal_idx[len(reveal_idx) // 4] if (reveal_idx and poster) else -1
     last_key, img = None, None
     try:

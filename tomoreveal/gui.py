@@ -189,7 +189,7 @@ def build_gui(args):
             self.settings = QtC.QSettings("TomoReveal", "TomoReveal")
             outdir = args.outdir or self.settings.value("outdir", "") or os.path.join(os.path.expanduser("~"), "TomoReveal movies")
             self.st = Studio(headless=args.headless, outdir=outdir)
-            self.spec = self.info = None; self.frame, self.total, self.cur_shot = 0, 1, 0; self.req = None
+            self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
@@ -697,8 +697,8 @@ def build_gui(args):
             self.spec["shots"] = [s for s in self.spec["shots"] if s is not sh]; self.build_shots(); self.schedule()
 
         def add_focus(self, target, name):
-            self.spec["shots"].append(focus_shot(target, name))
-            self.req = {"at": {"shot": len(self.spec["shots"]) - 1, "u": 0.08}}; self.build_shots(); self.schedule(0)
+            part = focus_shot(target, name); self.spec["shots"].append(part)
+            self.req = {"at": {"part": part["id"], "u": 0.08}}; self.build_shots(); self.schedule(0)
 
         # ---------- clip box ----------
         def _sync_clip(self):
@@ -765,15 +765,18 @@ def build_gui(args):
 
         # ---------- view and preview ----------
         def _main_req(self):
-            sh = self.spec["shots"]
-            if sh[2].get("on", True):
-                return {"at": {"shot": 2, "u": 0}}
-            if sh[1].get("on", True):
-                return {"at": {"shot": 1, "u": 0.999}}
+            """The frame that shows the main view best: the start of the first overview, else the end of a reveal."""
+            on = [p for p in self.spec["shots"] if p.get("on", True)]
+            ov = next((p for p in on if p["type"] == "overview" and not p.get("view")), None)
+            if ov:
+                return {"at": {"part": ov["id"], "u": 0}}
+            rv = next((p for p in on if p["type"] == "slide" and p.get("structures") in ("above", "all")), None)
+            if rv:
+                return {"at": {"part": rv["id"], "u": 0.999}}
             return {"t": 0.5}
 
         def _in_closeup(self):
-            return self.spec is not None and self.cur_shot >= 3
+            return self.spec is not None and self.cur_type == "focus"
 
         def set_view(self, tilt=None, az=None, zoom=None, quick=False):
             if not self.spec:
@@ -818,7 +821,7 @@ def build_gui(args):
                     self.say("Graphics problem: switched to software rendering (slower).", "err")
                     return self.do_preview(quick)
                 self.say(f"Preview failed: {exc}", "err"); return
-            self.frame, self.total, self.cur_shot = i, len(frames), frames[i]["shot"]
+            self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
             self.scrub.blockSignals(True); self.scrub.setRange(0, len(frames) - 1); self.scrub.setValue(i); self.scrub.blockSignals(False)
             self.marks.set(marks, len(frames)); fps = int(spec["output"].get("fps", 30))

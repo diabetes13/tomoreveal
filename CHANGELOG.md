@@ -1,5 +1,23 @@
 # Change log
 
+## 3.2.0
+
+- **Structure names from Dragonfly (F1).** The Structures tab now always shows the names and colours of the segmentation that is switched on.
+  - Cause: in 3.1.0 the list of structures could not be rebuilt after the first load. Choosing another segmentation, or dropping another session, kept the names of the first one on screen while the movie already used the new ones.
+  - Names, colours and Dragonfly's "visible" flag are now read by the type of each stored property, not by guessing. This also fixes wrong, almost black colours in some training multi-ROIs.
+  - Structures that are hidden in Dragonfly, and background structures, are listed in grey with the tick box off. You can switch them on.
+  - A label without a name is shown as "label 3 (no name in the session)"; names are never made up.
+  - New command `tomoreveal inspect session.ORSSession` prints everything TomoReveal reads from a session.
+- **Tomogram opacity (F2).** In the Look tab: show or hide the tomogram slice, and set its opacity. In the Movie tab, each shot can use the default, show, fade or hide the tomogram, with a fade time. Movies without any tomogram are possible.
+- **Data tab (F3).** Load a tomogram only, a segmentation only, or both. Several sessions and files can be loaded at the same time.
+  - The tomogram is one choice: none, your file, or an image saved in a Dragonfly session. A session alone uses its own image.
+  - Every segmentation of every session is listed with a tick box, its number of structures and their names. Segmentations on another grid are greyed out with the reason. Segmentation Wizard previews are hidden.
+  - "Add tomogram..." and "Add segmentation..." always treat a file as what you chose; right-click a file to change it. Each file has a Remove button.
+  - A structure keeps its name, colour and tick when you add or remove other files.
+- **Explore tab (F4).** Go through the slices by hand, with the segmentation on top (filled, outlines or off) or in 3D at that slice. The line below the image shows the slice, the depth in nm, and the grey value and structure under the mouse. Buttons set where the slice sweep of the movie starts and ends, and add a close-up of the structure under the mouse.
+- **Dark mode (F5).** View menu or Look tab: System, Light or Dark. The choice is remembered.
+- The left side of the window is now in tabs: Data, Structures, Explore, Movie and Look.
+
 ## 3.1.0
 
 - The original tomogram file can be used together with a Dragonfly session even when Dragonfly changed the image at import. The program compares the file with the copy stored in the session and lines it up (flipped axes, binning, cropping). The Image list offers both "your file" and "Dragonfly's copy".

@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.1.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.2.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -122,7 +122,7 @@ The application writes a small made-up tomogram in a temporary folder and opens 
 
 ### 1. Load the files
 
-Drop the files on the window, or click **Open files**. You can drop all files at the same time.
+Drop the files on the window, or use the buttons in the **Data** tab. You can drop all files at the same time, and add more later: new files are added to what is loaded. **Start over** unloads everything.
 
 ![Empty window](docs/images/01-start.png)
 
@@ -131,37 +131,60 @@ Drop the files on the window, or click **Open files**. You can drop all files at
 | A Dragonfly session | The `.ORSSession` file. The tomogram file is optional, because the session contains a copy of the image. |
 | easymode or Ais output | The tomogram and the `name__feature.mrc` files |
 | A label volume | The tomogram and the label file |
+| Only a tomogram | The tomogram. The movie is the slice sweep and the overview. |
+| Only a segmentation | The segmentation. The movie shows the structures without a tomogram. |
 | A Dragonfly session and easymode output | All of them. The structures of both are shown. |
 
-Large tomograms and sessions can take a minute to load.
+TomoReveal recognises each dropped file by its content. To choose yourself, use **Add tomogram...** (the file is always used as the tomogram) or **Add segmentation...** (a session, a label volume or easymode files; never used as the tomogram). If a dropped file was recognised wrongly, right-click it in the Data tab and choose **Use as tomogram** or **Use as segmentation**.
 
-### 2. Select the image and the segmentation
+Large tomograms and sessions can take a minute to load. A line in the Data tab shows the progress.
 
-When you load a Dragonfly session, the **Image** list contains:
+### 2. Choose the tomogram and the segmentations
 
-- **your file**: the tomogram file that you loaded.
-- **Dragonfly's copy**: each image that is saved in the session, also filtered copies that you made in Dragonfly.
+![The Data tab with a session loaded](docs/images/02-data.png)
 
-Sometimes the image is changed during the import into Dragonfly: it is cropped, binned, or an axis is flipped. Then the tomogram file and the segmentation are not on the same grid. TomoReveal compares your file with Dragonfly's copy and finds the crop, the binning and the flips. It then puts your file on the grid of the segmentation. A line below the lists tells you what it found, for example "cropped to x 60-767, y 150-1315, z 6-73".
+**TOMOGRAM** lists every image that you can show under the segmentation. Only one is used at a time:
 
-easymode files that were made from the original tomogram file are put on the Dragonfly grid in the same way.
+- **None**: no tomogram. The structures are drawn on their own.
+- **your file**: a tomogram file that you loaded.
+- **from Dragonfly session ...**: each image that is saved in a session, also filtered copies that you made in Dragonfly. When you load only a session, its first image is selected for you.
 
-If the file is not the image that was imported, TomoReveal tells you and shows Dragonfly's copy.
+Sometimes the image is changed during the import into Dragonfly: it is cropped, binned, or an axis is flipped. Then the tomogram file and the segmentation are not on the same grid. TomoReveal compares your file with Dragonfly's copy and finds the crop, the binning and the flips. It then puts your file on the grid of the segmentation. A line below the list tells you what it found, for example "cropped to x 60-767, y 150-1315, z 6-73". easymode files that were made from the original tomogram file are put on the Dragonfly grid in the same way. If the file is not the image that was imported, TomoReveal tells you and shows Dragonfly's copy.
 
-The **Segmentation** list contains each multi-ROI and ROI of the session. TomoReveal selects the one that looks like the final segmentation. Select a different one if necessary.
+**SEGMENTATION** lists every multi-ROI and ROI of each session, and each label or easymode file, with a tick box. Next to each one you see how many structures it has and, in grey, their names, so that you can see what you switch on. You can switch on several at the same time; their structures are listed in groups in the Structures tab. For each session, TomoReveal switches on the one that looks like the final segmentation. Change it with one click if it chose wrongly.
+
+- A segmentation on another grid than the tomogram is greyed out, with the reason, for example "511 × 720 × 250 voxels, but the tomogram is 512 × 720 × 250".
+- The single-slice previews that Dragonfly's Segmentation Wizard leaves in a session, and Dragonfly's undo copies, are not listed. A grey line says how many were left out.
+- **Remove** unloads a file or a session. Your files on disk are not touched.
 
 ### 3. Set the structures
 
-For each structure you can:
+The **Structures** tab lists the structures with the names and colours that are saved in the Dragonfly session (or in the `.json` file next to a label volume). For each structure you can:
 
 - remove the tick to hide it.
 - click the coloured box to change the colour.
 - change the name. The legend uses this name.
 - move the **threshold** bar (easymode and Ais structures only). The surface is drawn where the score of the network is above the threshold.
 
+Structures that are hidden in Dragonfly, and the background, are listed in grey with the tick removed. Tick them to show them anyway. A structure that has no name in the session is shown as "label 3 (no name in the session)".
+
+### Look through the slices
+
+The **Explore** tab is for looking at the data slice by slice. It does not change the movie.
+
+![The Explore tab](docs/images/06-explore.png)
+
+- Move through the slices with the slider, **Previous** and **Next**, the mouse wheel, or the keys: Down or Right for the next slice, Up or Left for the previous one, Page Down and Page Up for ten slices, Home and End for the first and the last slice.
+- **2D slice** shows the slice flat, with the segmentation filled, as outlines, or off. **Overlay opacity** sets how strongly the colours cover the slice. Ctrl + mouse wheel zooms, dragging moves the image, and a double-click shows the whole slice again.
+- **3D at this slice** shows the 3D view with the slice at this position, and the structures above the slice, all structures, or none.
+- The line below the image shows the slice number, the depth in nm, and under the mouse the position, the grey value and the name of the structure.
+- Colours and which structures are shown come from the Structures tab. The clip box is drawn as a dashed rectangle, and slices outside the movie's slice range are dimmed.
+
+Three buttons pass what you found to the movie: **Start the slice sweep here**, **End the slice sweep here**, and **Add a close-up of** the structure under the mouse.
+
 ### 4. Set the view
 
-Click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. You can also drag in the preview to rotate, and scroll to zoom.
+In the **Movie** tab, click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. You can also drag in the preview to rotate, and scroll to zoom.
 
 ### 5. Clip the tomogram
 
@@ -176,19 +199,40 @@ Use **Clip** to keep only a part of the tomogram, as with the clip box in Dragon
 - Click **Zoom** next to a structure to add a close-up of all of that structure.
 - Click **+ Click a structure in the preview**, then click one object (one vesicle, one filament) to add a close-up of that object only.
 
-For each close-up you can set a caption, the duration, the zoom, the camera movement (orbit, rock or still), and what happens to the other structures (grey, hidden or unchanged).
+For each close-up you can set a caption, the duration, the zoom, the camera movement (orbit, rock or still), what happens to the other structures (grey, hidden or unchanged), and the tomogram (see the next step).
 
 ![A close-up of one object](docs/images/04-closeup.png)
 
 Drag the bar below the preview to look through the full movie before you make it.
 
-### 7. Make the movie
+### 7. Show, fade or hide the tomogram
 
-Select the quality, the name and the folder. Click **Make movie**. A bar shows the progress and the time that remains. When the movie is complete, click **Play movie** to open it in your video player, or **Show folder**.
+In the **Look** tab, **Tomogram slice** sets the default for the whole movie: **Show the tomogram slice**, and its **Opacity** from 0 to 100 %.
+
+In the **Movie** tab, each shot (slide up, reveal, overview and each close-up) has its own **Tomogram** choice:
+
+- **as default**: as set in the Look tab.
+- **shown**: fully visible.
+- **faded**: see-through, with the opacity that you set for this shot.
+- **hidden**: not shown, so only the structures are visible.
+
+The change happens at the start of the shot, over the **fade** time (0.5 s unless you change it). For example, set the overview to **hidden** to let the tomogram fade out after the reveal. If you hide the tomogram during the slide-up, a grey line warns you that this shot then shows nothing.
+
+![The tomogram choice for each shot](docs/images/07-tomogram.png)
+
+### 8. Make the movie
+
+At the end of the **Movie** tab, select the quality, the name and the folder. Click **Make movie**. A bar shows the progress and the time that remains. When the movie is complete, click **Play movie** to open it in your video player, or **Show folder**.
 
 ![The movie is saved](docs/images/05-movie-saved.png)
 
 Save the movies in a folder that is not your data folder.
+
+## Dark mode
+
+In the **View** menu, or in the Look tab under **Window**, choose the theme: **System** (follow the desktop), **Light** or **Dark**. TomoReveal remembers the choice. The theme changes only the window; the background of the movie is set separately in the Look tab.
+
+![Dark mode](docs/images/08-dark.png)
 
 ## Supported files
 
@@ -199,7 +243,7 @@ Save the movies in a folder that is not your data folder.
 | Label volume | `.mrc` `.tif` with whole numbers | One number for each structure. Put a `.json` file with the same name next to it to give names and colours: `{"1": {"name": "membrane", "color": "#d7566e"}}` |
 | easymode or Ais output | `name__feature.mrc` | One file for each structure. Scores as int8 (0 to 127), uint16 (0 to 255) or float32 (0 to 1). |
 
-The tomogram and the segmentation must show the same volume. A segmentation at a different binning of the same volume is resampled. For Dragonfly sessions, see [Select the image and the segmentation](#2-select-the-image-and-the-segmentation).
+The tomogram and the segmentation must show the same volume, and so must several segmentations that are switched on together. A segmentation at a different binning of the same volume is resampled. For Dragonfly sessions, see [Choose the tomogram and the segmentations](#2-choose-the-tomogram-and-the-segmentations).
 
 These files are not supported: Dragonfly `.ORSObject` files, Amira `.am`, IMOD `.mod`, and particle coordinate files such as `.star`.
 
@@ -260,9 +304,19 @@ tomoreveal --headless
 
 On Windows and macOS, update the graphics driver or the operating system.
 
-### The tomogram and the segmentation do not agree ("grid mismatch")
+### The structure names are not the ones in Dragonfly
 
-The two files do not show the same volume. Make sure that you selected the tomogram that the segmentation was made from. For a Dragonfly session, load the session without a tomogram file to use Dragonfly's copy of the image.
+Check which segmentation is ticked in the Data tab: a session can hold several, for example training data and the final result. To see exactly what TomoReveal reads from a session, run:
+
+~~~text
+tomoreveal inspect session.ORSSession
+~~~
+
+It prints each image and segmentation in the session, the stored names, colours and visible flags, and which stored property each was read from. Compare it with Dragonfly's Data Properties panel. Give a folder instead of a file to inspect every session in it, and add `--json` for output that other programs can read.
+
+### A segmentation is greyed out, or "grid mismatch"
+
+The tomogram and the segmentation do not show the same volume. Make sure that you selected the tomogram that the segmentation was made from. For a Dragonfly session, load the session without a tomogram file to use Dragonfly's copy of the image.
 
 ### A Dragonfly session cannot be read
 
@@ -278,6 +332,7 @@ The same functions are available as commands, for example on a computer without 
 
 ~~~text
 tomoreveal list    session.ORSSession
+tomoreveal inspect session.ORSSession
 tomoreveal movie   tomogram.mrc --session session.ORSSession --view oblique,top --focus "vesicles" -o movie.mp4
 tomoreveal movie   tomogram.mrc --features tomogram__membrane.mrc --threshold 0.5 --clip 0,400,0,600,10,50
 tomoreveal extract session.ORSSession --masks -o segmentation_out
@@ -288,7 +343,9 @@ On a Linux computer without a display, add `--headless` to the `movie` command.
 
 `tomoreveal extract` writes the selected Dragonfly segmentation as `labels.mrc` with the names and colours in `classes.json`.
 
-`tomoreveal app` shows the controls in a web browser tab on this computer in place of the window. This older interface does not have the clip bars.
+`tomoreveal inspect` prints what TomoReveal reads from a session; see [The structure names are not the ones in Dragonfly](#the-structure-names-are-not-the-ones-in-dragonfly).
+
+`tomoreveal app` shows the controls in a web browser tab on this computer in place of the window. This older interface does not have the clip bars, the Explore tab, the tomogram controls or dark mode.
 
 ## Scope and data safety
 
@@ -311,6 +368,9 @@ The source code is in the `tomoreveal` folder:
 | `render.py` | Drawing one frame and writing the movie |
 | `studio.py` | Program state that the window and the commands share |
 | `gui.py` | The desktop window |
+| `gui_data.py` | The Data tab |
+| `gui_explore.py`, `explore.py` | The Explore tab and its slice drawing |
+| `gui_theme.py` | Light and dark themes |
 | `cli.py`, `webapp.py`, `demo.py` | Commands, browser interface, demo data |
 
 To run the tests:
@@ -320,7 +380,7 @@ conda activate tomoreveal
 python -m pytest
 ~~~
 
-The tests use made-up data. They do not include a Dragonfly session, so the session reader is not covered by them. The tests that draw are skipped on a computer where no renderer can start.
+The tests use made-up data, including small made-up Dragonfly sessions. To also test real sessions, set `TOMOREVEAL_TEST_DATA` to a folder that contains them (outside the repository); those tests are skipped otherwise. The tests that draw are skipped on a computer where no renderer can start.
 
 ## License
 

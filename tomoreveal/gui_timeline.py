@@ -302,7 +302,7 @@ class TimelineCanvas(QtW.QWidget):
         else:
             ctrl = bool(e.modifiers() & QtC.Qt.ControlModifier)
             cmd = {(QtC.Qt.Key_Delete, False): "delete", (QtC.Qt.Key_Backspace, False): "delete", (QtC.Qt.Key_D, True): "duplicate",
-                   (QtC.Qt.Key_S, False): "split", (QtC.Qt.Key_Z, True): "redo" if shift else "undo",
+                   (QtC.Qt.Key_S, False): "split", (QtC.Qt.Key_Z, True): "redo" if shift else "undo", (QtC.Qt.Key_Space, False): "play",
                    (QtC.Qt.Key_Y, True): "redo"}.get((k, ctrl))
             if cmd:
                 self.command.emit(cmd); return

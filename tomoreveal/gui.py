@@ -196,6 +196,13 @@ def build_gui(args):
             self.thr_timer.timeout.connect(self.apply_thresholds)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
+            # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
+            self.play_btn = QtW.QPushButton("Play"); self.play_btn.setToolTip("Play the movie in the preview from the playhead (Space)")
+            self.play_btn.clicked.connect(self.toggle_play); self.timeline.buttons.insertWidget(self.timeline.buttons.count() - 1, self.play_btn)
+            self.play_timer = QtC.QTimer(self); self.play_timer.setInterval(5); self.play_timer.timeout.connect(self._play_step)
+            self.playing = None  # dict(t0, f0, spec, frames, size, drawn) while playing
+            self.timeline.canvas.frame_changed.connect(lambda _f: self.stop_play())  # any click on the timeline stops it
+            self.timeline.part_selected.connect(lambda _p: self.stop_play())
             self._sync_theme()
             hints = QtW.QApplication.instance().styleHints()
             if hasattr(hints, "colorSchemeChanged"):  # follow the desktop while "System" is chosen
@@ -397,8 +404,50 @@ def build_gui(args):
 
         TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4
 
+        # ---------- playback ----------
+        def toggle_play(self):
+            self.stop_play() if self.playing else self.start_play()
+
+        def start_play(self):
+            if self.playing or self.spec is None or self.busy or self.gen is not None or self.st.ren is None or not self.st.can_show:
+                return
+            spec = self.spec_for(); plan = self.st.plan_frame(spec, {"frame": self.timeline.frame})[0]
+            if len(plan.frames) < 2:
+                return
+            f0 = self.timeline.frame if self.timeline.frame < len(plan.frames) - 1 else 0  # at the end: from the start
+            w, h = self.st._psize(spec)
+            self.playing = dict(t0=time.monotonic(), f0=f0, spec=spec, frames=plan.frames, fps=plan.fps,
+                                size=(w * 2 // 3, h * 2 // 3), drawn=0, last=None)
+            self.play_btn.setText("Stop"); self.prev_timer.stop(); self.play_timer.start()
+
+        def stop_play(self):
+            if not self.playing:
+                return
+            last = self.playing["last"]; self.playing = None; self.play_timer.stop(); self.play_btn.setText("Play")
+            if last is not None:  # leave the preview on the frame it stopped at, at full quality
+                self.req = {"frame": last}; self.schedule(0)
+
+        def _play_step(self):
+            p = self.playing
+            if p is None:
+                return
+            f = p["f0"] + int((time.monotonic() - p["t0"]) * p["fps"])
+            end = f >= len(p["frames"]) - 1
+            f = min(f, len(p["frames"]) - 1)
+            if f != p["last"]:
+                try:
+                    img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=False)
+                except Exception as exc:
+                    traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
+                p["last"] = f; p["drawn"] += 1
+                self.prev.set_image(to_qimage(img)); self.frame = f
+                self.timeline.set_frame(f)
+            if end:
+                self.stop_play()
+
         def _tab_changed(self, i):
             """The Explore tab shows its own slice view on the right; every other tab shows the movie preview."""
+            self.stop_play()
             self.right.setCurrentIndex(1 if i == self.TAB_EXPLORE else 0)
             if i == self.TAB_EXPLORE:
                 self.explore.view.setFocus()
@@ -681,6 +730,7 @@ def build_gui(args):
             if self.busy or self.gen is not None:
                 self.thr_timer.start(); return
             pend, self._thr_pending = self._thr_pending, {}
+            reset = 0  # close-ups of single objects set back to the whole structure
             QtW.QApplication.setOverrideCursor(QtC.Qt.WaitCursor)
             try:
                 for cid, v in pend.items():
@@ -692,7 +742,6 @@ def build_gui(args):
                     if cid in self.vox_lbl:
                         self.vox_lbl[cid].setText(f"{r['voxels']:,}")
                     # object numbers change with the threshold: those close-ups show the whole structure again
-                    reset = 0
                     for s in self.spec["shots"]:
                         if s["type"] == "focus" and (s.get("target") or {}).get("class") == key and s["target"].get("component") is not None:
                             s["target"] = {"class": key}; reset += 1
@@ -747,7 +796,7 @@ def build_gui(args):
             return sp
 
         def do_preview(self, quick=False):
-            if self.spec is None or self.busy or self.gen is not None or not self.st.can_show or self.st.ren is None:
+            if self.spec is None or self.busy or self.gen is not None or not self.st.can_show or self.st.ren is None or self.playing:
                 return
             if self.tabs.currentIndex() == self.TAB_EXPLORE:
                 self.explore._range_text(); self.explore.refresh()
@@ -898,6 +947,7 @@ def build_gui(args):
             except OSError as exc:
                 self.say(f"Cannot use that folder: {exc}", "err"); return
             self.settings.setValue("outdir", folder)
+            self.stop_play()
             self.gen = movie_frames(self.st.ren, self.spec_for(), path); self.render_path = path; self.t0 = time.time()
             self._rendering(True); self.status_lbl.setText("Starting ..."); self.render_timer.start()
 
@@ -908,7 +958,7 @@ def build_gui(args):
                     page.setEnabled(not on)
             for g in (self.view_group, self.clip_group, self.movie_group):
                 g.setEnabled(not on)
-            self.timeline.setEnabled(not on)
+            self.timeline.setEnabled(not on); self.play_btn.setEnabled(not on)
             for w in (self.quality_cb, self.name_le, self.folder_le):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)

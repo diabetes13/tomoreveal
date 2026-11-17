@@ -221,7 +221,7 @@ class MovieEditor(QtC.QObject):
 
     def command(self, cmd):
         {"delete": lambda: self.delete(), "duplicate": lambda: self.duplicate(), "split": self.split,
-         "undo": self.undo, "redo": self.redo}[cmd]()
+         "undo": self.undo, "redo": self.redo, "play": self.win.toggle_play}[cmd]()
 
     # ---- menus ----
     def fill_add_menu(self, menu, after=None):

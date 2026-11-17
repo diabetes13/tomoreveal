@@ -66,13 +66,40 @@ def class_spec(spec, ds, k):
     return cls.get(c.get("key")) or cls.get(str(k)) or {}
 
 
+TOMOGRAM_MODES = ("default", "shown", "faded", "hidden")
+
+
+def tomogram_setting(mode="default", opacity=0.4, fade=0.5):
+    """How a shot shows the tomogram slice: as the default (Look tab), shown, faded to `opacity`, or hidden;
+    the change happens over `fade` seconds at the start of the shot."""
+    return dict(mode=mode, opacity=opacity, fade=fade)
+
+
+def shot_tomogram(shot):
+    """A shot's tomogram setting, also reading the older close-up option slice = "keep" / "hide"."""
+    t = shot.get("tomogram")
+    if isinstance(t, dict) and t.get("mode") in TOMOGRAM_MODES:
+        return dict(tomogram_setting(), **t)
+    return tomogram_setting("hidden" if shot.get("slice") == "hide" else "default")
+
+
+def default_opacity(spec, has_tomo=True):
+    """Tomogram slice opacity for the whole movie and the preview (Look tab)."""
+    if not has_tomo:
+        return 0.0
+    t = spec.get("style", {}).get("tomogram") or {}
+    return float(min(1.0, max(0.0, t.get("opacity", 1.0)))) if t.get("show", True) else 0.0
+
+
 def default_spec(ds):
     return dict(
         classes={c["key"]: dict(name=c["name"], color=c["color"], show=not (c["background"] or c.get("hidden"))) for c in ds.classes.values()},
         view=dict(tilt=42, az=0, zoom=1.0),
-        style=dict(bg="#000000", legend=True, slice_label=True, title="", contrast=[1, 99], invert=False, ortho=False, fov=30),
-        shots=[dict(type="sweep", on=True, seconds=7), dict(type="reveal", on=True, seconds=7),
-               dict(type="overview", on=True, motion="rock", seconds=6, angle=25)],
+        style=dict(bg="#000000", legend=True, slice_label=True, title="", contrast=[1, 99], invert=False, ortho=False, fov=30,
+                   tomogram=dict(show=True, opacity=1.0)),
+        shots=[dict(type="sweep", on=True, seconds=7, tomogram=tomogram_setting()),
+               dict(type="reveal", on=True, seconds=7, tomogram=tomogram_setting()),
+               dict(type="overview", on=True, motion="rock", seconds=6, angle=25, tomogram=tomogram_setting())],
         return_to_overview=True, z_range=None, clip=None,
         output=dict(size=[1920, 1080], fps=30, crf=20, aa=True))
 
@@ -90,7 +117,7 @@ def merge_settings(spec, new, same_grid=True):
 
 def focus_shot(target, caption, **kw):
     s = dict(type="focus", on=True, target=target, caption=caption, others="grey", motion="orbit", seconds=5,
-             zoom=1.0, slice="keep", angle=30)
+             zoom=1.0, angle=30, tomogram=tomogram_setting())
     s.update(kw)
     return s
 
@@ -101,7 +128,13 @@ def build_timeline(spec, ds):
     style, v = spec.get("style", {}), spec.get("view", {})
     shape = ds.shape; nz, ny, nx = shape
     has_tomo, has_seg = ds.tomo is not None, ds.has_seg()
-    base = 1.0 if has_tomo else 0.0  # tomogram slice opacity when nothing else asks for it
+    base = default_opacity(spec, has_tomo)  # tomogram slice opacity when no shot asks for another
+
+    def target_of(shot):
+        if not has_tomo:
+            return 0.0
+        t = shot_tomogram(shot)
+        return {"default": base, "shown": 1.0, "hidden": 0.0}.get(t["mode"], float(min(1.0, max(0.0, t["opacity"]))))
     zr = spec.get("z_range") or [0, nz - 1]
     z0, z1 = max(0, int(zr[0])), min(nz - 1, int(zr[1]))
     if z1 < z0:
@@ -128,6 +161,11 @@ def build_timeline(spec, ds):
     st = dict(k=z0, reveal=False, slice=base, e=0.0, target=None, others="grey", caption="")
     pose = [ov()]
     half = max(1, round(fps * 0.5))
+    ramp = {}  # the tomogram fade at the start of the current shot
+
+    def start_fade(shot):
+        t = shot_tomogram(shot)
+        ramp.clear(); ramp.update(start=len(frames), s0=st["slice"], s1=target_of(shot), n=max(1, round(fps * max(0.0, float(t["fade"])))))
 
     def emit(n, fn, si, phase, label=None):
         n = max(1, int(n))
@@ -135,7 +173,11 @@ def build_timeline(spec, ds):
             marks.append(dict(frame=len(frames), label=label))
         for i in range(n):
             s = dict(st); s["pose"] = pose[0]; s["shot"] = si; s["phase"] = phase
-            s.update(fn(i / (n - 1) if n > 1 else 1.0)); frames.append(s)
+            d = fn(i / (n - 1) if n > 1 else 1.0)
+            if ramp and "slice" not in d:
+                q = smooth01((len(frames) - ramp["start"] + 1) / ramp["n"])
+                d["slice"] = ramp["s1"] if q >= 1 else ramp["s0"] + (ramp["s1"] - ramp["s0"]) * q
+            s.update(d); frames.append(s)
         last = frames[-1]
         for key in st:
             st[key] = last[key]
@@ -145,10 +187,10 @@ def build_timeline(spec, ds):
         if not st["reveal"]:
             st.update(reveal=True, k=z0)
 
-    def fly_back(si):
-        p0, e0, s0 = pose[0], st["e"], st["slice"]
+    def fly_back(si, to=None):
+        p0, e0, s0 = pose[0], st["e"], st["slice"]; s1 = base if to is None else to
         emit(round(fps * 1.3), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u)), e=e0 * (1 - smooth01(u)),
-                                              slice=s0 + (base - s0) * smooth01(u), caption=""), si, "fly")
+                                              slice=s0 + (s1 - s0) * smooth01(u), caption=""), si, "fly")
         st.update(target=None, e=0.0); pose[0] = ov()
 
     shots = spec.get("shots", [])
@@ -156,23 +198,22 @@ def build_timeline(spec, ds):
         if not shot.get("on", True):
             continue
         typ = shot.get("type"); n = max(1, round(fps * max(0.1, float(shot.get("seconds", 5)))))
+        if (typ == "sweep" and not has_tomo) or (typ == "reveal" and not has_seg):
+            continue
+        start_fade(shot)
         if typ == "sweep":
-            if not has_tomo:  # nothing to slide through without a tomogram
-                continue
             st.update(reveal=False, k=z0)
             emit(half, lambda u: {}, si, "hold", "Slices")
             emit(n, lambda u: dict(k=z0 + int(round(u * (z1 - z0)))), si, "main")
             emit(max(1, half // 2), lambda u: {}, si, "hold")
         elif typ == "reveal":
-            if not has_seg:  # nothing to reveal
-                continue
             st.update(k=z1)
             emit(n, lambda u: dict(k=z1 - int(round(u * (z1 - z0))), reveal=True), si, "main", "Reveal")
             emit(half, lambda u: {}, si, "hold")
         elif typ == "overview":
             show_all()
             if st["e"] > 0:
-                fly_back(si)
+                fly_back(si, ramp["s1"]); start_fade(dict(shot, tomogram=dict(shot_tomogram(shot), fade=0)))
             m, ang = shot.get("motion", "rock"), float(shot.get("angle", 25))
             emit(n, lambda u: dict(pose=ov(ang * math.sin(2 * math.pi * u) if m == "rock" else 360.0 * u if m == "spin" else 0.0)),
                  si, "main", "Overview")
@@ -189,7 +230,7 @@ def build_timeline(spec, ds):
                 return zoomed(fr.fit(blo, bhi, ft, az + d, 1.0), fz)
 
             p0, p1, e0, old, oldmode, s0 = pose[0], fp(), st["e"], st["target"], st["others"], st["slice"]
-            s1 = 0.0 if shot.get("slice") == "hide" else base
+            s1 = ramp["s1"]  # the fly-in is this shot's tomogram fade
             mode, cap = shot.get("others", "grey"), shot.get("caption", "")
 
             def fly(u):
@@ -209,7 +250,7 @@ def build_timeline(spec, ds):
                  si, "main")
             pose[0] = fp()
     if st["e"] > 0 and spec.get("return_to_overview", True):
-        fly_back(len(shots)); emit(half, lambda u: {}, len(shots), "hold")
+        ramp.clear(); fly_back(len(shots)); emit(half, lambda u: {}, len(shots), "hold")
     if not frames:
         show_all(); emit(1, lambda u: {}, -1, "main")
     return frames, marks

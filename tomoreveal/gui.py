@@ -12,7 +12,7 @@ import numpy as np
 from .common import UserError, VIEWS
 from .demo import make_demo
 from .render import movie_frames
-from .storyboard import focus_shot, merge_settings
+from .storyboard import focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
 
@@ -40,7 +40,7 @@ def cmd_icon(args):
 
 def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
-    from .gui_data import DataPanel
+    from .gui_data import DataPanel, clear_layout
     DIM = "color:#80868f"
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
@@ -276,7 +276,7 @@ def build_gui(args):
                        "Everything outside is left out of the preview and the movie.", cl)
             # movie
             self.movie_group, ml = self._group("Movie", lay)
-            self.shot_ctl = []
+            self.shot_ctl = []; self.shot_tomo = []
             for i, text in enumerate(["1. Slide up through the slices", "2. Slide back, revealing the segmentation", "3. Overview"]):
                 row = QtW.QHBoxLayout(); cb = QtW.QCheckBox(text); sp = QtW.QDoubleSpinBox(); sp.setRange(0.5, 120); sp.setSingleStep(0.5); sp.setSuffix(" s")
                 cb.toggled.connect(lambda v, i=i: self._shot_set(i, "on", v)); sp.valueChanged.connect(lambda v, i=i: self._shot_set(i, "seconds", v))
@@ -287,6 +287,10 @@ def build_gui(args):
                         self.motion_cb.addItem(t, d)
                     self.motion_cb.activated.connect(lambda j: self._shot_set(2, "motion", self.motion_cb.itemData(j))); row.addWidget(self.motion_cb)
                 row.addWidget(sp); ml.addLayout(row); self.shot_ctl.append((cb, sp))
+                tw = QtW.QWidget(); tl = QtW.QVBoxLayout(tw); tl.setContentsMargins(24, 0, 0, 4); ml.addWidget(tw); self.shot_tomo.append(tl)
+                if i == 0:
+                    self.sweep_hint = self._note("The slide-up shows only the moving slice; with the tomogram hidden this shot "
+                                                 "shows nothing.", ml); self.sweep_hint.setVisible(False)
             ml.addWidget(QtW.QLabel("<b>Close-ups</b> (played after the overview)"))
             self.shots_w = QtW.QWidget(); self.shots_lay = QtW.QVBoxLayout(self.shots_w); self.shots_lay.setContentsMargins(0, 0, 0, 0); ml.addWidget(self.shots_w)
             self.pick_btn = QtW.QPushButton("+ Click a structure in the preview"); self.pick_btn.setCheckable(True)
@@ -296,6 +300,12 @@ def build_gui(args):
             # look
             mk = lay  # the Make the movie box goes at the end of this tab
             lay = self._tab("Look")
+            self.tslice_group, tg = self._group("Tomogram slice", lay)
+            self.tshow_cb = QtW.QCheckBox("Show the tomogram slice"); self.tshow_cb.toggled.connect(lambda v: self._tomo_style("show", v))
+            tg.addWidget(self.tshow_cb)
+            self.topac_s = self._slider(tg, "Opacity", 0, 100, lambda v: self._tomo_style("opacity", v / 100), lambda v: f"{v} %")
+            self._note("The default for the whole movie and the preview. Each shot in the Movie tab can show, fade or hide "
+                       "the tomogram on its own.", tg)
             self.look_group, ll = self._group("Look", lay)
             row = QtW.QHBoxLayout(); self.legend_cb = QtW.QCheckBox("Legend"); self.slabel_cb = QtW.QCheckBox("Slice number"); self.invert_cb = QtW.QCheckBox("Invert contrast")
             for cb, key in ((self.legend_cb, "legend"), (self.slabel_cb, "slice_label"), (self.invert_cb, "invert")):
@@ -503,6 +513,12 @@ def build_gui(args):
                 need = "needs a tomogram" if (i == 0 and not has_t) else "needs a segmentation" if (i == 1 and not has_s) else ""
                 cb.setEnabled(not need); spin.setEnabled(not need); cb.setToolTip(need)
             self.struct_help.setVisible(bool(has_s))
+            for i, tl in enumerate(self.shot_tomo):
+                clear_layout(tl); tl.addWidget(self._tomo_row(sp["shots"][i], i))
+            tst = sp["style"].setdefault("tomogram", dict(show=True, opacity=1.0))
+            self._setv(self.tshow_cb, tst.get("show", True)); self._setv(self.topac_s, 100 * float(tst.get("opacity", 1.0)))
+            self.tslice_group.setEnabled(bool(has_t)); self.tslice_group.setToolTip("" if has_t else "needs a tomogram")
+            self._sweep_hint()
             self.motion_cb.setCurrentIndex(max(0, self.motion_cb.findData(sp["shots"][2].get("motion", "rock"))))
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
@@ -529,21 +545,21 @@ def build_gui(args):
                 rm = QtW.QPushButton("Remove"); rm.clicked.connect(lambda _=False, sh=sh: self.remove_shot(sh))
                 g.addWidget(cap, 0, 0, 1, 2); g.addWidget(show, 0, 2); g.addWidget(rm, 0, 3)
                 combos = (("others", (("grey out the rest", "grey"), ("hide the rest", "hide"), ("keep the rest", "keep"))),
-                          ("motion", (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))),
-                          ("slice", (("keep slice", "keep"), ("hide slice", "hide"))))
+                          ("motion", (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))))
                 for j, (key, opts) in enumerate(combos):
                     cb = QtW.QComboBox(); vals = [d for _, d in opts]
                     for t, d in opts:
                         cb.addItem(t, d)
                     cb.setCurrentIndex(vals.index(sh.get(key)) if sh.get(key) in vals else 0)
                     cb.activated.connect(lambda j2, cb=cb, sh=sh, key=key: self._shot_edit(sh, key, cb.itemData(j2)))
-                    g.addWidget(cb, 1, j, 1, 1 if j < 2 else 2)
+                    g.addWidget(cb, 1, j * 2, 1, 2)
                 sec = QtW.QDoubleSpinBox(); sec.setRange(0.5, 120); sec.setSingleStep(0.5); sec.setSuffix(" s"); sec.setValue(float(sh.get("seconds", 5)))
                 sec.valueChanged.connect(lambda x, sh=sh: self._shot_edit(sh, "seconds", x))
                 zm = QtW.QDoubleSpinBox(); zm.setRange(0.3, 4); zm.setSingleStep(0.1); zm.setPrefix("zoom "); zm.setSuffix("x"); zm.setValue(float(sh.get("zoom", 1)))
                 zm.valueChanged.connect(lambda x, sh=sh: self._shot_edit(sh, "zoom", x))
                 what = QtW.QLabel("one object" if sh["target"].get("component") is not None else "whole structure"); what.setStyleSheet(DIM)
                 g.addWidget(sec, 2, 0); g.addWidget(zm, 2, 1); g.addWidget(what, 2, 2, 1, 2)
+                g.addWidget(self._tomo_row(sh), 3, 0, 1, 4)
                 lay.addWidget(fr)
             if not n:
                 self._note("None yet. Use a Zoom button in the Structures tab, or click a structure in the preview.", lay)
@@ -565,9 +581,45 @@ def build_gui(args):
         def _class_set(self, k, key, v):
             self.spec["classes"][k][key] = v; self.schedule()
 
+        def _tomo_row(self, sh, index=None):
+            """'Tomogram: as default / shown / faded / hidden' for one shot, with the faded opacity and the fade time."""
+            t = shot_tomogram(sh); sh["tomogram"] = t; sh.pop("slice", None)
+            w = QtW.QWidget(); row = QtW.QHBoxLayout(w); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(QtW.QLabel("Tomogram"))
+            cb = QtW.QComboBox()
+            for text, mode in (("as default", "default"), ("shown", "shown"), ("faded", "faded"), ("hidden", "hidden")):
+                cb.addItem(text, mode)
+            cb.setCurrentIndex(max(0, cb.findData(t["mode"])))
+            op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setValue(int(round(100 * t["opacity"])))
+            op.setToolTip("Opacity of the faded tomogram"); op.setVisible(t["mode"] == "faded")
+            fade = QtW.QDoubleSpinBox(); fade.setRange(0, 10); fade.setSingleStep(0.25); fade.setPrefix("fade "); fade.setSuffix(" s")
+            fade.setValue(float(t["fade"])); fade.setToolTip("How long the change takes at the start of this shot")
+
+            def mode_changed(j):
+                t["mode"] = cb.itemData(j); op.setVisible(t["mode"] == "faded"); self._sweep_hint(); self.schedule()
+            cb.activated.connect(mode_changed)
+            op.valueChanged.connect(lambda v: (t.__setitem__("opacity", v / 100), self.schedule()))
+            fade.valueChanged.connect(lambda v: (t.__setitem__("fade", float(v)), self.schedule()))
+            row.addWidget(cb); row.addWidget(op); row.addWidget(fade); row.addStretch(1)
+            has_t = bool(self.info and self.info.get("has_tomogram"))
+            w.setEnabled(has_t); w.setToolTip("" if has_t else "needs a tomogram")
+            return w
+
+        def _sweep_hint(self):
+            if self.spec:
+                t = shot_tomogram(self.spec["shots"][0]); st = self.spec["style"].get("tomogram", {})
+                hidden = t["mode"] == "hidden" or (t["mode"] == "default" and not st.get("show", True)) or \
+                    (t["mode"] == "faded" and t["opacity"] == 0) or (t["mode"] == "default" and float(st.get("opacity", 1)) == 0)
+                self.sweep_hint.setVisible(bool(hidden and self.spec["shots"][0].get("on", True) and self.info.get("has_tomogram")))
+
+        def _tomo_style(self, key, v):
+            if self.spec:
+                self.spec["style"].setdefault("tomogram", dict(show=True, opacity=1.0))[key] = v
+                self._sweep_hint(); self.schedule()
+
         def _shot_set(self, i, key, v):
             if self.spec:
-                self.spec["shots"][i][key] = v; self.schedule()
+                self.spec["shots"][i][key] = v; self._sweep_hint(); self.schedule()
 
         def _shot_edit(self, sh, key, v):
             sh[key] = v; self.schedule()

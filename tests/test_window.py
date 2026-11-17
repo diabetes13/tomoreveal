@@ -101,3 +101,28 @@ def test_a_file_can_be_used_as_the_other_kind(window, demo):
     wait(app, win, lambda: win.data.add_segmentation([demo["labels"]]))  # "Use as segmentation"
     assert win.data.info["tomogram"] is None and len(seg_ticks(win)) == 1 and len(structure_names(win)) == 4
     assert not errors, errors
+
+
+def test_tomogram_opacity_controls(window, demo):
+    app, win, errors = window
+    wait(app, win, lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
+    if win.st.ren is None:
+        pytest.skip("3D rendering is not available here")
+    assert win.tslice_group.isEnabled() and win.tshow_cb.isChecked() and win.topac_s.value() == 100
+    win.topac_s.setValue(40)
+    assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)
+    row = win.shot_tomo[2].itemAt(0).widget()  # shot 3: overview
+    combo = row.findChild(QtWidgets.QComboBox)
+    combo.setCurrentIndex(combo.findData("hidden")); combo.activated.emit(combo.currentIndex())
+    assert win.spec["shots"][2]["tomogram"]["mode"] == "hidden"
+    assert win.sweep_hint.isHidden()
+    row0 = win.shot_tomo[0].itemAt(0).widget().findChild(QtWidgets.QComboBox)
+    row0.setCurrentIndex(row0.findData("hidden")); row0.activated.emit(row0.currentIndex())
+    assert not win.sweep_hint.isHidden()  # the slide-up would show nothing
+    frames, _ = __import__("tomoreveal").build_timeline(win.spec_for(), win.st.ds)
+    s3 = [f["slice"] for f in frames if f["shot"] == 2]
+    assert s3[0] > 0.3 and max(s3[15:]) == 0  # fades out over 0.5 s, then hidden
+    wait(app, win, lambda: win.data.remove("file:" + win.st._norm(demo["tomogram"])))
+    assert not win.tslice_group.isEnabled() and not win.shot_tomo[2].itemAt(0).widget().isEnabled()  # no tomogram
+    assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)  # settings kept
+    assert not errors, errors

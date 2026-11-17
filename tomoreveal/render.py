@@ -31,7 +31,7 @@ class Renderer:
             os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = "vtkOSOpenGLRenderWindow"
         import pyvista as pv, vtk
         self.pv, self.vtk, self.ds = pv, vtk, ds
-        self.size, self.aa, self.bg, self.shown = (960, 540), False, None, False
+        self.size, self.aa, self.bg, self.shown, self.peeling = (960, 540), False, None, False, False
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self.shape = ds.shape; nz, ny, nx = self.shape
         self.img = pv.ImageData(dimensions=(nx, ny, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
@@ -93,6 +93,8 @@ class Renderer:
             self.img.point_data["I"] = (255 - g if inv else g).ravel(); self._slice_key = key
         self.img.origin = (0, 0, float(k))
         show_slice = ds.tomo is not None and s["slice"] > 0.01
+        # No depth peeling for a see-through slice: with software rendering (VTK 9.6, OSMesa) it hid the slice
+        # completely in frames drawn without anti-aliasing (the preview). Plain blending looks right here.
         self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
         self.plane.SetOrigin(0, 0, (k + 0.5) if s["reveal"] else self.shape[0] + 10)
         cb = clip_box(spec, self.shape); far = 1e9

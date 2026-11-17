@@ -61,3 +61,42 @@ def test_window_opens_and_loads_demo(demo):
     win.reset_clip()
     assert win.spec["clip"] is None
     win.close()
+
+
+def test_structure_list_follows_each_new_segmentation(demo, tmp_path):
+    """F1 regression: the Structures list must show the names of the segmentation loaded last, every time."""
+    QtCore = pytest.importorskip("PySide6.QtCore")
+    import argparse
+    import json
+    from PySide6 import QtWidgets
+    from tomoreveal.gui import build_gui
+    from tomoreveal.volumes import load_volume, write_mrc
+    lab, vox = load_volume(demo["labels"])
+    other = str(tmp_path / "other_labels.mrc")
+    write_mrc(other, ((lab == 1) * 1 + (lab == 3) * 2).astype("int8"), vox)
+    json.dump({"1": {"name": "alpha"}, "2": {"name": "beta"}}, open(str(tmp_path / "other_labels.json"), "w"))
+    app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
+    errors = []
+    old_hook = __import__("sys").excepthook
+    __import__("sys").excepthook = lambda t, v, tb: errors.append(v)
+
+    def load(paths):
+        loop = QtCore.QEventLoop()
+        win.load(paths=paths); win.worker.finished.connect(loop.quit); loop.exec()
+        for _ in range(40):
+            app.processEvents()
+        return [w.text() for w in (win.struct_grid.itemAt(i).widget() for i in range(win.struct_grid.count()))
+                if isinstance(w, QtWidgets.QLineEdit)]
+
+    try:
+        first = load([demo["tomogram"], demo["labels"]])
+        if not win.st.ready() or win.st.ren is None:
+            pytest.skip("3D rendering is not available here")
+        assert first == ["membrane", "vesicles", "filaments", "particles"]
+        for _ in range(2):  # every rebuild of a list is tested at least twice
+            assert load([other]) == ["alpha", "beta"]
+            assert load([demo["labels"]]) == first
+        assert not errors, errors
+    finally:
+        __import__("sys").excepthook = old_hook
+        win.close()

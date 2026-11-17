@@ -470,9 +470,9 @@ def build_gui(args):
             sp = self.spec
             grid = self.struct_grid
             while grid.count():
-                it = grid.takeAt(0)
-                if it.widget():
-                    it.widget().setParent(None); it.widget().deleteLater()
+                it = grid.takeAt(0); w = it.widget()  # store it first: after setParent(None), it.widget() is None
+                if w:
+                    w.setParent(None); w.deleteLater()
                 elif it.layout():
                     lay = it.layout()
                     while lay.count():

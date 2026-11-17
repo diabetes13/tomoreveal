@@ -107,7 +107,8 @@ class OrsSession:
             raise UserError(f"'{name}' matches {len(hits)} objects in the session. {'Candidates' if hits else 'Available'}:\n  {names}")
         return hits[0]
 
-    def read_multiroi(self, obj):
+    def _runs(self, obj):
+        """Checked run-length intervals of a multi-ROI -> (begin, end, label) as int64 arrays, sorted by begin."""
         el = obj["el"]; ld = el.find("LabelData"); td = ld.find("TreeData")
         nx, ny, nz = obj["dims"]; n = nx * ny * nz
         arr = {}
@@ -129,6 +130,11 @@ class OrsSession:
             raise UserError(f"'{obj['title']}': decoded {total} labelled voxels in {len(b)} runs, but Dragonfly records "
                             f"{obj['voxels']} voxels in {n_int} runs. This session's layout differs from what the reader "
                             "understands; export the multi-ROI from Dragonfly as a TIFF stack and drop that instead.")
+        return b, e, l
+
+    def read_multiroi(self, obj):
+        el = obj["el"]; nx, ny, nz = obj["dims"]; n = nx * ny * nz
+        b, e, l = self._runs(obj)
         dt = np.int16 if (len(l) and l.max() > 127) else np.int8
         delta = np.zeros(n + 1, dt)
         delta[b] += l.astype(dt); delta[e + 1] -= l.astype(dt)
@@ -145,18 +151,12 @@ class OrsSession:
                     continue
                 off, kind = int(c.findtext("RecordOffset")), c.attrib.get("GUID", "")
                 if kind.endswith("CxvArrayString") and not names:
-                    raw, p = self._read(off), 0
-                    while p + 8 <= len(raw):  # [uint64 label][UTF-16-BE text][0x0000]
-                        k = struct.unpack_from("<Q", raw, p)[0]; p += 8; q = p
-                        while q + 1 < len(raw) and raw[q:q + 2] != b"\x00\x00":
-                            q += 2
-                        names[int(k)] = raw[p:q].decode("utf-16-be", "replace").strip(); p = q + 2
+                    names = parse_strings(self._read(off))
                 elif kind.endswith("CxvArrayUnsignedLong"):
                     v = self._array(off, int(c.findtext("size")))
                     if len(set(v[1:].tolist()) - {0}) > best:  # the colour slot has the most distinct values
                         best = len(set(v[1:].tolist()) - {0})
-                        colors = {k: "#%02x%02x%02x" % (int(x) & 255, (int(x) >> 8) & 255, (int(x) >> 16) & 255)
-                                  for k, x in enumerate(v.tolist()) if k > 0}  # stored as 0x00BBGGRR
+                        colors = {k: bgr_hex(x) for k, x in enumerate(v.tolist()) if k > 0}  # stored as 0x00BBGGRR
         except Exception as exc:  # names/colours are cosmetic: fall back rather than fail
             print(f"  note: could not read class names/colours from the session ({exc}); using defaults")
         return {k: dict(name=names.get(k) or f"class {k}", color=colors.get(k) or PALETTE[(k - 1) % len(PALETTE)])
@@ -205,3 +205,128 @@ def guess_roi(objs):
     if multi:
         return max(multi, key=score)["title"]
     return "__all_rois__" if len(objs) > 1 else (objs[0]["title"] if objs else None)
+
+
+def parse_strings(raw):
+    """A string slot: repeated [uint64 label][UTF-16-BE text][0x0000] -> {label: text}."""
+    out, p = {}, 0
+    while p + 8 <= len(raw):
+        k = struct.unpack_from("<Q", raw, p)[0]; p += 8; q = p
+        while q + 1 < len(raw) and raw[q:q + 2] != b"\x00\x00":
+            q += 2
+        out[int(k)] = raw[p:q].decode("utf-16-be", "replace").strip(); p = q + 2
+    return out
+
+
+def bgr_hex(x):
+    """Dragonfly colour 0x00BBGGRR -> '#rrggbb'."""
+    x = int(x)
+    return "#%02x%02x%02x" % (x & 255, (x >> 8) & 255, (x >> 16) & 255)
+
+
+# DataTypesScalarValues codes seen in Dragonfly 2022.2, and the GUID suffix of each slot kind
+SLOT_TYPES = {9: "string", 8: "bool", 4: "uint32", 5: "double"}
+_GUID_KINDS = (("CxvArrayString", "string"), ("CxvArrayUnsignedLong", "uint32"), ("CxvArrayDouble", "double"),
+               ("CxvArrayBool", "bool"), ("CxvArrayBoolean", "bool"))
+
+
+def _slot_number(tag):
+    try:
+        return int(tag.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _scalar_types(ses, isc):
+    """The DataTypesScalarValues list of an InternalScalars element, wherever it is stored (None if absent)."""
+    if isc is None:
+        return None, "no InternalScalars element"
+    for c in isc.iter():
+        if not c.tag.startswith("DataTypesScalarValues"):
+            continue
+        if c.findtext("RecordOffset") is not None:
+            raw = ses._read(int(c.findtext("RecordOffset")))
+            n = int(c.findtext("size") or 0) or len(raw) // 4
+            item = len(raw) // n if n else 4
+            v = np.frombuffer(raw[:n * item], {1: "u1", 2: "<u2", 4: "<u4", 8: "<u8"}.get(item, "<u4"))
+            return [int(x) for x in v], f"binary record ({item} bytes per entry)"
+        txt = " ".join(t.strip() for t in c.itertext() if t.strip())
+        nums = [int(x) for x in re.findall(r"-?\d+", txt)]
+        if nums:
+            return nums, "XML text"
+        nums = [int(v) for v in c.attrib.values() if re.fullmatch(r"-?\d+", v)]
+        return (nums or None), "XML attributes"
+    return None, "not found"
+
+
+def _decode_slot(ses, c, kind):
+    raw = ses._read(int(c.findtext("RecordOffset")))
+    size = int(c.findtext("size") or 0)
+    if kind == "string":
+        return {str(k): v for k, v in parse_strings(raw).items()}
+    item = len(raw) // size if size else {"uint32": 4, "double": 8, "bool": 1}.get(kind, 4)
+    if kind == "double" and item == 8:
+        return [float(x) for x in np.frombuffer(raw[:size * 8], "<f8")]
+    v = np.frombuffer(raw[:(size or len(raw) // item) * item], {1: "u1", 2: "<u2", 4: "<u4", 8: "<u8"}.get(item, "u1"))
+    if kind == "bool":
+        return [int(x) for x in v]
+    if kind == "uint32":
+        return ["0x%08x" % int(x) for x in v]
+    return {"bytes": len(raw), "first bytes": raw[:32].hex()}
+
+
+def describe_session(path):
+    """Everything inspect needs to know about a session, as plain JSON-able data."""
+    ses = OrsSession(path)
+    out = dict(path=os.path.abspath(path), dragonfly_version=ses.version, images=[], objects=[])
+    for im in ses.images():
+        out["images"].append(dict(kind="image", title=im["title"], grid=list(im["dims"]), voxel_nm=im["voxel"] / 10))
+    for o in ses.objects(include_undo=True):
+        d = dict(kind=o["kind"], title=o["title"], grid=list(o["dims"]), voxel_nm=o["voxel"] / 10,
+                 total_label_size=o["voxels"], undo_copy=o["title"].startswith("undoROI"),
+                 single_slice=o["dims"][2] == 1)
+        if o["kind"] == "ROI":
+            try:
+                mask, col = ses.read_roi(o)
+                d["table"] = [dict(label=1, voxels=int(mask.sum()), name=o["title"], colour=col, visible=None)]
+            except UserError as exc:
+                d["error"] = str(exc)
+            out["objects"].append(d); continue
+        isc = o["el"].find("InternalScalars")
+        types, where = _scalar_types(ses, isc)
+        d["data_types"] = types; d["data_types_source"] = where
+        slots = []
+        for c in (isc if isc is not None else []):
+            if not c.tag.startswith("ScalarValues_") or c.findtext("RecordOffset") is None:
+                continue
+            num, guid = _slot_number(c.tag), c.attrib.get("GUID", "")
+            kind = next((k for suf, k in _GUID_KINDS if guid.endswith(suf)), None)
+            code = None
+            if types and num is not None:  # slot numbering may start at 0 or 1; record both readings
+                code = dict(zero_based=types[num] if num < len(types) else None,
+                            one_based=types[num - 1] if 0 < num <= len(types) else None)
+            if kind is None and code:
+                kind = SLOT_TYPES.get(code["one_based"]) or SLOT_TYPES.get(code["zero_based"])
+            sl = dict(slot=c.tag, number=num, guid_kind=guid.rsplit(".", 1)[-1] if guid else "",
+                      type_code=code, decoded_as=kind or "unknown", size=int(c.findtext("size") or 0))
+            try:
+                sl["values"] = _decode_slot(ses, c, kind)
+            except Exception as exc:
+                sl["error"] = f"{type(exc).__name__}: {exc}"
+            slots.append(sl)
+        d["slots"] = slots
+        try:
+            b, e, l = ses._runs(o)
+            nlab = int(l.max()) if len(l) else 0
+            counts = np.bincount(l, weights=(e - b + 1), minlength=nlab + 1).astype(np.int64)
+            classes = ses._multiroi_classes(o["el"], nlab)
+            bools = [s["values"] for s in slots if s["decoded_as"] == "bool" and isinstance(s.get("values"), list)]
+            vis = bools[0] if len(bools) == 1 else None
+            d["table"] = [dict(label=k, voxels=int(counts[k]), name=c["name"], colour=c["color"],
+                               visible=(vis[k] if vis is not None and k < len(vis) else None))
+                          for k, c in classes.items()]
+            d["decoded_voxels"] = int(counts.sum())
+        except UserError as exc:
+            d["error"] = str(exc)
+        out["objects"].append(d)
+    return out

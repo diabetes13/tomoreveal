@@ -7,6 +7,7 @@ TomoReveal - slice-sweep and segmentation-reveal movies for cryo-ET tomograms.
 
 Without the window:
     tomoreveal list    session.ORSSession
+    tomoreveal inspect session.ORSSession   (or a folder of sessions; add --json for machine-readable output)
     tomoreveal movie   tomo.mrc --session session.ORSSession --roi SegWiz --view oblique,top --focus "light ves" -o out.mp4
     tomoreveal movie   tomo.mrc --features tomo__membrane.mrc tomo__ribosome.mrc --threshold 0.5 --clip 0,400,0,600,10,50
     tomoreveal preview tomo.mrc --session session.ORSSession --roi SegWiz
@@ -26,7 +27,7 @@ import sys
 import numpy as np
 
 from .common import UserError, VIEWS, __version__
-from .dragonfly import OrsSession, guess_roi
+from .dragonfly import OrsSession, describe_session, guess_roi
 from .gui import cmd_demo, cmd_gui, cmd_icon
 from .render import get_font, render_movie
 from .storyboard import build_timeline, default_spec, focus_shot
@@ -169,6 +170,77 @@ def cmd_list(args):
                 print(f"        {k:>3}  {c['color']}  {cnt[k]:>12,}  {c['name']}")
 
 
+def _session_paths(target):
+    if target == "demo" and not os.path.exists(target):
+        raise UserError("The demo data has no Dragonfly session: it is a tomogram file and a label file. "
+                        "There is nothing to inspect. Give a .ORSSession file or a folder that holds some.")
+    if os.path.isdir(target):
+        found = sorted(os.path.join(target, f) for f in os.listdir(target) if f.lower().endswith(".orssession"))
+        if not found:
+            raise UserError(f"There is no Dragonfly session (.ORSSession file) in the folder {target}. "
+                            "inspect only reads Dragonfly sessions.")
+        return found
+    if not os.path.isfile(target):
+        raise UserError(f"File not found: {target}")
+    if not target.lower().endswith(".orssession"):
+        raise UserError(f"{os.path.basename(target)} is not a Dragonfly session (.ORSSession file). "
+                        "inspect only reads Dragonfly sessions; tomograms and label files need no inspection.")
+    return [target]
+
+
+def _fmt_values(v, limit=12):
+    if isinstance(v, dict):
+        items = [f"{k}: {x}" for k, x in v.items()]
+    elif isinstance(v, list):
+        items = [f"{x:g}" if isinstance(x, float) else str(x) for x in v]
+    else:
+        return str(v)
+    more = f"  ... ({len(items) - limit} more)" if len(items) > limit else ""
+    return ", ".join(items[:limit]) + more
+
+
+def print_description(d):
+    print(f"{d['path']}")
+    print(f"  Dragonfly version {d['dragonfly_version']}")
+    for o in d["images"] + d["objects"]:
+        nx, ny, nz = o["grid"]
+        notes = [n for n, on in (("Dragonfly undo copy, skipped", o.get("undo_copy")),
+                                 ("single slice, cannot be shown", o.get("single_slice"))) if on]
+        line = f"\n  [{o['kind']}] {o['title']}\n    grid {nx} x {ny} x {nz} voxels, {o['voxel_nm']:.3f} nm per voxel"
+        if o["kind"] != "image":
+            line += f", TotalLabelSize {o['total_label_size']:,}"
+        print(line + "".join(f"\n    ({n})" for n in notes))
+        if o["kind"] == "multi-ROI":
+            print(f"    DataTypesScalarValues: {o['data_types']}  (from {o['data_types_source']})")
+            for sl in o["slots"]:
+                code = sl["type_code"]
+                cs = f", type code {code['one_based']} if numbered from 1 / {code['zero_based']} if from 0" if code else ""
+                print(f"    {sl['slot']}: {sl['decoded_as']} ({sl['guid_kind'] or 'no GUID'}{cs}), {sl['size']} entries")
+                print(f"      " + (sl["error"] if "error" in sl else _fmt_values(sl["values"])))
+        if "error" in o:
+            print(f"    PROBLEM: {o['error']}")
+        if o.get("table"):
+            if "decoded_voxels" in o:
+                ok = "matches" if o["decoded_voxels"] == o["total_label_size"] else "DOES NOT MATCH"
+                print(f"    decoded {o['decoded_voxels']:,} labelled voxels ({ok} TotalLabelSize)")
+            print(f"    {'label':>5} | {'voxels':>12} | {'colour':7} | visible | name")
+            for r in o["table"]:
+                vis = "?" if r["visible"] is None else ("yes" if r["visible"] else "no")
+                print(f"    {r['label']:>5} | {r['voxels']:>12,} | {r['colour'] or '-':7} | {vis:7} | {r['name']}")
+
+
+def cmd_inspect(args):
+    paths = _session_paths(args.session)
+    descs = [describe_session(p) for p in paths]
+    if args.json:
+        print(json.dumps(descs if len(descs) > 1 else descs[0], indent=2))
+        return
+    for i, d in enumerate(descs):
+        if i:
+            print("\n" + "-" * 70)
+        print_description(d)
+
+
 def cmd_extract(args):
     ses = OrsSession(args.session)
     if args.roi and len(args.roi) > 1:
@@ -247,6 +319,11 @@ def main():
     p.add_argument("session"); p.add_argument("--classes", action="store_true", help="also list the classes of each multi-ROI")
     p.add_argument("--all", action="store_true", help="include Dragonfly's undo copies"); p.set_defaults(func=cmd_list)
 
+    p = sub.add_parser("inspect", help="print everything TomoReveal reads from a Dragonfly session (for checking structure names)")
+    p.add_argument("session", help=".ORSSession file, or a folder of them")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_inspect)
+
     p = sub.add_parser("extract", help="write labels.mrc, classes.json and optional per-class masks from a session")
     p.add_argument("session"); p.add_argument("--roi", action="append")
     p.add_argument("-o", "--out", default="segmentation_out"); p.add_argument("--masks", action="store_true")
@@ -274,7 +351,7 @@ def main():
     p.set_defaults(func=cmd_preview)
 
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("gui", "app", "icon", "demo", "list", "extract", "movie", "preview", "-h", "--help", "--version"):
+    if not argv or argv[0] not in ("gui", "app", "icon", "demo", "list", "inspect", "extract", "movie", "preview", "-h", "--help", "--version"):
         argv = ["gui"] + argv  # bare "tomoreveal [files]" opens the desktop program
     args = ap.parse_args(argv)
     if args.cmd == "movie" and args.transparent_frames and not args.frames_dir:

@@ -33,6 +33,19 @@ def test_clip_box_removes_geometry(studio):
     assert ys and max(ys) <= 101.5         # nothing can be picked in the part that was clipped away
 
 
+
+@pytest.mark.parametrize("cut, k", [("all", 30), ("above", 5)])
+def test_clip_box_floor_applies_in_every_cut_mode(studio, cut, k):
+    """F-07: below the box's lower z face nothing is drawn, also when the slice does not hide it."""
+    spec = tr.default_spec(studio.ds); spec["style"]["legend"] = False
+    spec["clip"] = dict(z=[20, 47], fit=False)
+    f = dict(_overview(studio, spec), cut=cut, k=k, slice=0.0)
+    studio.ren.draw(f, spec, (640, 360))
+    hits = [studio.ren.pick(x, y) for x in np.linspace(0.05, 0.95, 19) for y in np.linspace(0.1, 0.9, 9)]
+    zs = [h[1][2] for h in hits if h]
+    assert zs and min(zs) >= 19.4
+
+
 def test_short_movie_is_written(studio, tmp_path):
     spec = tr.default_spec(studio.ds)
     for s in spec["shots"]:
@@ -44,7 +57,7 @@ def test_short_movie_is_written(studio, tmp_path):
     assert os.path.exists(str(tmp_path / "test_poster.png"))
 
 
-def test_window_opens_and_loads_demo(demo):
+def test_window_opens_and_loads_demo(demo, needs_3d):
     QtCore = pytest.importorskip("PySide6.QtCore")
     import argparse
     from tomoreveal.gui import build_gui
@@ -53,8 +66,7 @@ def test_window_opens_and_loads_demo(demo):
     win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     for _ in range(40):
         app.processEvents()
-    if not win.st.can_show or win.st.ren is None:
-        win.close(); pytest.skip("3D rendering is not available here")
+    assert win.st.can_show and win.st.ren is not None, "the demo did not load and draw"
     assert win.tabs.isTabVisible(win.TAB_STRUCT) and win.clip_s["z"].mx == 47
     win._clip_changed("z", 10, 30)
     assert win.spec["clip"]["z"] == [10, 30]
@@ -63,7 +75,7 @@ def test_window_opens_and_loads_demo(demo):
     win.close()
 
 
-def test_structure_list_follows_each_new_segmentation(demo, tmp_path):
+def test_structure_list_follows_each_new_segmentation(demo, tmp_path, needs_3d):
     """F1 regression: the Structures list follows what is switched on, every time it is rebuilt (3.1.0 kept the first list)."""
     QtCore = pytest.importorskip("PySide6.QtCore")
     import argparse
@@ -91,8 +103,7 @@ def test_structure_list_follows_each_new_segmentation(demo, tmp_path):
     first_key, other_key = "labels:" + win.st._norm(demo["labels"]), "labels:" + win.st._norm(other)
     try:
         first = wait(lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
-        if not win.st.can_show or win.st.ren is None:
-            pytest.skip("3D rendering is not available here")
+        assert win.st.can_show and win.st.ren is not None, "the demo did not load and draw"
         assert first == ["membrane", "vesicles", "filaments", "particles"]
         assert wait(lambda: win.load(paths=[other])) == first + ["alpha", "beta"]  # added to what is loaded
         for _ in range(2):  # every rebuild of a list is tested at least twice

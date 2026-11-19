@@ -1,9 +1,12 @@
 """Off-screen 3D drawing of one frame, and writing movies."""
+import glob
 import os
+import re
+import sys
 
 import numpy as np
 
-from .common import hex2rgb
+from .common import UserError, hex2rgb
 from .storyboard import Framer, build_timeline, class_spec, clip_box, state_key
 
 
@@ -25,9 +28,21 @@ def get_font(px):
         return ImageFont.load_default()
 
 
+def software_rendering_available():
+    """True where VTK's OSMesa window can start. Elsewhere (Windows, macOS, no mesalib) it crashes the
+    whole process on the first draw, so headless rendering falls back to the normal off-screen window."""
+    if not sys.platform.startswith("linux"):
+        return False
+    import vtk
+    if not hasattr(vtk, "vtkOSOpenGLRenderWindow"):
+        return False
+    import ctypes.util
+    return bool(ctypes.util.find_library("OSMesa") or glob.glob(os.path.join(sys.prefix, "lib", "libOSMesa*")))
+
+
 class Renderer:
     def __init__(self, ds, headless=False):
-        if headless:
+        if headless and software_rendering_available():
             os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = "vtkOSOpenGLRenderWindow"
         import pyvista as pv, vtk
         self.pv, self.vtk, self.ds = pv, vtk, ds
@@ -39,7 +54,7 @@ class Renderer:
         self.slice_actor = self.pl.add_mesh(self.img, scalars="I", cmap="gray", clim=(0, 255), lighting=False,
                                             show_scalar_bar=False, pickable=False)
         self.plane = vtk.vtkPlane(); self.plane.SetNormal(0, 0, 1)
-        # clip box: x-, x+, y-, y+, z+ (the lower z face is the slice itself); with the reveal plane that is the 6 OpenGL allows
+        # clip box: x-, x+, y-, y+, z+ (the reveal plane is never below the lower z face); that is the 6 OpenGL allows
         self.cplanes = []
         for nrm in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, -1)):
             p = vtk.vtkPlane(); p.SetNormal(*nrm); self.cplanes.append(p)
@@ -98,9 +113,9 @@ class Renderer:
         self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
         # the cutting plane keeps what lies above it: structures above the slice, all of them, or none
         cut = s.get("cut") or ("above" if s["reveal"] else "none")
-        self.plane.SetOrigin(0, 0, {"above": k + 0.5, "all": -10.0}.get(cut, self.shape[0] + 10))
         cb = clip_box(spec, self.shape); far = 1e9
-        (x0, y0, _), (x1, y1, z1) = cb if cb else ((-far, -far, 0), (far, far, far))
+        (x0, y0, z0), (x1, y1, z1) = cb if cb else ((-far, -far, -far), (far, far, far))
+        self.plane.SetOrigin(0, 0, max({"above": k + 0.5, "all": -10.0}.get(cut, self.shape[0] + 10), z0 - 0.5))
         for p, o in zip(self.cplanes, ((x0 - 0.5, 0, 0), (x1 + 0.5, 0, 0), (0, y0 - 0.5, 0), (0, y1 + 0.5, 0), (0, 0, z1 + 0.5))):
             p.SetOrigin(*o)
         # structures
@@ -203,8 +218,42 @@ class Renderer:
             pass
 
 
+def poster_path(out):
+    return os.path.splitext(out)[0] + "_poster.png"
+
+
+def _part(path):
+    stem, ext = os.path.splitext(path)
+    return stem + ".part" + ext
+
+
+def _discard(*paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _publish(out, part, poster_part):
+    """Put the finished movie, then its poster, in place of the old ones."""
+    try:
+        os.replace(part, out)
+    except OSError as exc:
+        kept = " and ".join(os.path.basename(p) for p in (part, poster_part) if os.path.exists(p))
+        raise UserError(f"could not replace {os.path.basename(out)} (is it open in another program?); "
+                        f"the new movie is saved as {kept}") from exc
+    if os.path.exists(poster_part):
+        try:
+            os.replace(poster_part, poster_path(out))
+        except OSError as exc:
+            raise UserError(f"could not replace {os.path.basename(poster_path(out))} (is it open in another program?); "
+                            f"the new poster is saved as {os.path.basename(poster_part)}") from exc
+
+
 def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True):
-    """Render a movie frame by frame; yields (frames done, total, last image). Closing the generator stops it."""
+    """Render a movie frame by frame; yields (frames done, total, last image). Closing the generator stops it.
+    The movie and poster are written to .part files and replace the old ones only when the render has finished."""
     import imageio.v2 as imageio
     frames, _ = build_timeline(spec, ren.ds)
     o = spec.get("output", {}); size = o.get("size", [1920, 1080]); fps = int(o.get("fps", 30))
@@ -212,7 +261,12 @@ def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     if frames_dir:
         os.makedirs(frames_dir, exist_ok=True)
-    w = imageio.get_writer(out, fps=fps, codec="libx264", quality=None, macro_block_size=2, pixelformat="yuv420p",
+        beyond = sorted(f for f in os.listdir(frames_dir) if re.fullmatch(r"frame_\d{5}\.png", f) and int(f[6:11]) >= len(frames))
+        if beyond:  # lower numbers are overwritten by this run; these would stay mixed in
+            raise UserError(f"{frames_dir} already holds frames up to {beyond[-1]} from a longer movie; "
+                            f"this one has {len(frames)} frames. Choose an empty folder, or remove the old frames.")
+    part, poster_part = _part(out), _part(poster_path(out))
+    w = imageio.get_writer(part, fps=fps, codec="libx264", quality=None, macro_block_size=2, pixelformat="yuv420p",
                            output_params=["-crf", str(int(o.get("crf", 20))), "-preset", "medium", "-movflags", "+faststart"])
     # poster: a frame from the main phase of a slide that shows structures (else an overview), never a close-up
     reveal_idx = [i for i, s in enumerate(frames) if s.get("type") == "slide" and s["reveal"] and s["phase"] == "main" and s["e"] == 0] \
@@ -224,14 +278,23 @@ def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True
             key = state_key(s)
             if key != last_key:
                 img = ren.draw(s, spec, size, aa=bool(o.get("aa", True)), transparent=transparent and bool(frames_dir)); last_key = key
-                if frames_dir:
-                    imageio.imwrite(os.path.join(frames_dir, f"frame_{i:05d}.png"), img)
+            if frames_dir:  # one PNG per frame, also while the picture holds still
+                imageio.imwrite(os.path.join(frames_dir, f"frame_{i:05d}.png"), img)
             if i == poster_i:
-                imageio.imwrite(os.path.splitext(out)[0] + "_poster.png", img[..., :3])
+                imageio.imwrite(poster_part, img[..., :3])
             w.append_data(np.ascontiguousarray(img[..., :3]))
             yield i + 1, len(frames), img
-    finally:
+    except BaseException:  # a failure, or the generator closed by Cancel: only this run's files go
+        try:
+            w.close()
+        except Exception:
+            pass
+        _discard(part, poster_part); raise
+    try:
         w.close()
+    except Exception:
+        _discard(part, poster_part); raise
+    _publish(out, part, poster_part)
 
 
 def render_movie(ren, spec, out, frames_dir=None, transparent=False, progress=None, cancelled=None, poster=True):

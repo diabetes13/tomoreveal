@@ -9,15 +9,14 @@ from PySide6 import QtGui, QtTest  # noqa: E402
 
 
 @pytest.fixture
-def window(tmp_path, demo):
+def window(tmp_path, demo, needs_3d):
     from tomoreveal.gui import build_gui
     app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
     win.resize(1400, 900)
     errors = []; old = sys.excepthook; sys.excepthook = lambda t, v, tb: errors.append(v)
     loop = QtCore.QEventLoop(); win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     pump(app)
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     win.do_preview(); pump(app)
     yield app, win, errors
     sys.excepthook = old; win.close()

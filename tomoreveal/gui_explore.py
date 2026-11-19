@@ -203,7 +203,8 @@ class ExplorePanel(QtW.QWidget):
 
     def image_2d(self, spec):
         key = (self.k, self.overlay_cb.currentData(), self.alpha_s.value(),
-               json.dumps([spec.get("classes"), spec.get("style"), spec.get("z_range"), spec.get("clip")], sort_keys=True))
+               json.dumps([spec.get("classes"), spec.get("style"), spec.get("z_range"), spec.get("clip")], sort_keys=True),
+               tuple((k, c.get("threshold")) for k, c in self.st.ds.classes.items()))
         if key not in self._cache:
             self._cache[key] = slice_image(self.st.ds, spec, self.k, self.overlay_cb.currentData(), self.alpha_s.value() / 100)
             while len(self._cache) > 48:
@@ -220,7 +221,7 @@ class ExplorePanel(QtW.QWidget):
 
     def refresh(self):
         spec = self.get_spec()
-        if spec is None or not self.st.can_show:
+        if spec is None or not self.st.can_show or not self.page.isEnabled():  # disabled while files are loading
             return
         if self.mode_3d.isChecked():
             if self.st.ren is None:

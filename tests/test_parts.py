@@ -155,6 +155,21 @@ def test_closeup_of_unloaded_structure_is_skipped_and_comes_back(demo, tmp_path)
     assert part["id"] not in plan.problems and any(f["part"] == part["id"] for f in plan.frames)
 
 
+
+def test_untick_and_tick_again_keeps_name_and_colour(demo, tmp_path):
+    """F-23: the settings of a segmentation that is switched off are kept for when it is switched on again."""
+    lab, vox = load_volume(demo["labels"])
+    other = str(tmp_path / "other.mrc"); write_mrc(other, (lab == 2).astype("int8"), vox)
+    s = tr.Studio(headless=True)
+    info = s.add_files([demo["tomogram"], demo["labels"], other], log=quiet, make_renderer=False)
+    spec = info["spec"]; okey = [c["key"] for c in info["structures"] if c["key"].startswith("labels:" + s._norm(other))][0]
+    spec["classes"][okey].update(name="my vesicle", color="#123456")
+    for on in (False, True):
+        info = s.set_segmentation_enabled("labels:" + s._norm(other), on, log=quiet, make_renderer=False)
+        tr.merge_settings(spec, info["spec"])
+    assert spec["classes"][okey]["name"] == "my vesicle" and spec["classes"][okey]["color"] == "#123456"
+
+
 def test_history(st):
     spec = tr.default_spec(st.ds); h = sb.History()
     h.push(spec); gone = spec["shots"][1]["id"]

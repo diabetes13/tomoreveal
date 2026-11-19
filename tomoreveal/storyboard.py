@@ -204,9 +204,10 @@ def default_spec(ds):
 def merge_settings(spec, new, same_grid=True):
     """Keep the user's settings (spec) when what is loaded changes; new is default_spec() of the new data.
     Every structure that is still there keeps its name, colour and visibility (they are keyed by its stable key);
-    new structures get their defaults. Close-ups of structures that are gone stay in the movie, marked and skipped,
-    until the structure is back."""
-    spec["classes"] = {k: spec["classes"].get(k) or v for k, v in new["classes"].items()}
+    new structures get their defaults. Close-ups and settings of structures that are gone stay, the close-ups marked
+    and skipped, until the structure is back."""
+    old = spec["classes"]
+    spec["classes"] = {k: old.get(k) or v for k, v in new["classes"].items()} | {k: v for k, v in old.items() if k not in new["classes"]}
     migrate_spec(spec)
     if not same_grid:  # the slice range and the clip box belonged to the old grid
         spec["clip"] = None; spec["z_range"] = None
@@ -390,8 +391,10 @@ def build_plan(spec, ds):
                 continue  # nothing to see: no tomogram to slide through, or no segmentation to reveal
             start_fade(part)
             a, b = slice_no(part.get("from"), st["k"]), slice_no(part.get("to"), st["k"])
-            t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
-            go_to(ov(), a, t, slice_to=(target_of(part) if st["e"] > 0 else None))
+            t = part.get("transition"); back = st["e"] > 0; t = (CLOSEUP_TRANSITION if back else OTHER_TRANSITION) if t is None else float(t)
+            go_to(ov(), a, t, slice_to=(target_of(part) if back else None))
+            if back:
+                start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
             if show == "none":
                 st.update(reveal=False, cut=None)
             elif show == "above":
@@ -456,6 +459,7 @@ def build_plan(spec, ds):
                 label = None
             else:
                 st.update(fly(1.0)); pose[0] = p1; label = cap or "Focus"
+            start_fade(part, fade=0)  # the fly-in already faded the tomogram
             m, ang = part.get("motion", "orbit"), float(part.get("angle", 30))
             emit(n, lambda u, fp=fp, m=m, ang=ang: dict(pose=fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)),
                  "main", label)

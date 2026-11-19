@@ -21,6 +21,19 @@ class UserError(Exception):
     """A problem the user can fix; shown as a plain message."""
 
 
+def label_dtype(max_label):
+    """The smallest signed integer type that holds label numbers up to max_label (int8, int16 or int32)."""
+    import numpy as np
+    return np.int8 if max_label <= 127 else np.int16 if max_label <= 32767 else np.int32
+
+
+def read_json(path):
+    """A JSON file as UTF-8, with or without a byte-order mark (never the Windows code page)."""
+    import json
+    with open(path, encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
 def hex2rgb(c):
     from PIL import ImageColor
     return tuple(v / 255.0 for v in ImageColor.getrgb(c)[:3])

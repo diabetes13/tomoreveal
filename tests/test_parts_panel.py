@@ -22,14 +22,13 @@ def open_window(tmp_path, paths):
     win.resize(1400, 900)
     loop = QtCore.QEventLoop(); win.load(paths=paths); win.worker.finished.connect(loop.quit); loop.exec()
     pump(app)
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     win.tabs.setCurrentIndex(win.TAB_MOVIE); win.do_preview(); pump(app)
     return app, win
 
 
 @pytest.fixture
-def window(tmp_path, demo):
+def window(tmp_path, demo, needs_3d):
     errors = []; old = sys.excepthook; sys.excepthook = lambda t, v, tb: errors.append(v)
     app, win = open_window(tmp_path, [demo["tomogram"], demo["labels"]])
     yield app, win, errors
@@ -78,6 +77,26 @@ def test_settings_change_the_part_in_place(window):
     assert not errors, errors
 
 
+
+def field(panel, pid, label):
+    form = panel.rows[pid]["form"]
+    for i in range(form.rowCount()):
+        lab = form.itemAt(i, QtWidgets.QFormLayout.LabelRole)
+        if lab is not None and lab.widget().text() == label:
+            return form.itemAt(i, QtWidgets.QFormLayout.FieldRole).widget()
+
+
+def test_open_duration_box_follows_a_timeline_resize(window):
+    """F-27: after a resize on the timeline, the open part's Duration box kept the old value; the next step wrote old + step."""
+    app, win, errors = window
+    panel = win.parts_panel; b = ids(win)[1]; panel.open(b); pump(app)
+    before = field(panel, b, "Duration").value()
+    win.editor.resized(b, before + 5.0); win.do_preview(); pump(app)
+    box = field(panel, b, "Duration"); box.stepUp(); pump(app)
+    assert win.spec["shots"][1]["seconds"] == pytest.approx(before + 5.0 + box.singleStep())
+    assert not errors, errors
+
+
 def test_closeup_structure_dropdown(window):
     app, win, errors = window
     ds = win.st.ds
@@ -111,7 +130,7 @@ def test_rebuilding_three_times(window):
     assert not errors, errors
 
 
-def test_threshold_change_keeps_single_object_closeups(tmp_path, demo):
+def test_threshold_change_keeps_single_object_closeups(tmp_path, demo, needs_3d):
     lab, vox = load_volume(demo["labels"])
     feat = str(tmp_path / "demo_tomogram__vesicles.mrc"); write_mrc(feat, (lab == 2).astype("float32"), vox)
     errors = []; old = sys.excepthook; sys.excepthook = lambda t, v, tb: errors.append(v)

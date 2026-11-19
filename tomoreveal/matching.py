@@ -30,16 +30,26 @@ def _rescale(vol, s):
     return zoom(vol.astype(np.float32), s, order=1)
 
 
-def apply_match(vol, tf, ref_shape):
-    """Apply a transform found by match_volume to a volume on the original file's grid."""
+def apply_match(vol, tf, ref_shape, labels=False):
+    """Apply a transform found by match_volume to a volume on the original file's grid.
+    labels: keep whole label numbers and their type (every b-th voxel, or nearest neighbour) instead of averaging."""
     rs = np.array(ref_shape)
-    v = vol if tf["s"] == 1.0 else _rescale(vol, tf["s"])
+    v = vol if tf["s"] == 1.0 else _rescale_labels(vol, tf["s"]) if labels else _rescale(vol, tf["s"])
     if np.any(np.array(v.shape) < rs):  # off by a voxel or two from rounding
         v = np.pad(v, [(0, max(0, int(r - x))) for r, x in zip(rs, v.shape)], mode="edge")
     if tf["flip"]:
         v = np.flip(v, tf["flip"])
     off = np.clip(np.array(tf["off"]), 0, np.array(v.shape) - rs)
     return v[off[0]:off[0] + rs[0], off[1]:off[1] + rs[1], off[2]:off[2] + rs[2]]
+
+
+def _rescale_labels(vol, s):
+    b = 1.0 / s
+    if abs(b - round(b)) < 0.02 and round(b) >= 2:
+        b = int(round(b))
+        return vol[b // 2::b, b // 2::b, b // 2::b]
+    from scipy.ndimage import zoom
+    return zoom(vol, s, order=0)
 
 
 def match_volume(vol, vox, ref, ref_vox, log=print):

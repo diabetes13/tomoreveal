@@ -9,7 +9,7 @@ from PySide6 import QtWidgets  # noqa: E402
 
 
 @pytest.fixture
-def window(tmp_path):
+def window(tmp_path, needs_3d):
     from tomoreveal.gui import build_gui
     app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
     errors = []
@@ -60,8 +60,7 @@ def test_tomogram_first_then_segmentation(window, demo):
     assert is_empty(win)
     for _ in range(2):  # every rebuild of the lists, twice
         wait(app, win, lambda: win.data.add_tomogram([demo["tomogram"]]))
-        if win.st.ren is None:
-            pytest.skip("3D rendering is not available here")
+        assert win.st.ren is not None, "the 3D renderer did not start after loading"
         assert tabs_shown(win) == [True, True, True, True, True]
         assert structure_names(win) == [] and not win.struct_note.isHidden()
         assert "No segmentation loaded" in win.struct_note.text()
@@ -86,8 +85,7 @@ def test_segmentation_only_then_none(window, demo):
     app, win, errors = window
     for _ in range(2):
         wait(app, win, lambda: win.data.add_segmentation([demo["labels"]]))
-        if win.st.ren is None:
-            pytest.skip("3D rendering is not available here")
+        assert win.st.ren is not None, "the 3D renderer did not start after loading"
         assert structure_names(win) == ["membrane", "vesicles", "filaments", "particles"]
         assert row(win, 0)["note"].text().startswith("needs a tomogram")
         assert row(win, 1)["note"].isHidden() and win.pick_btn.isEnabled()
@@ -103,8 +101,7 @@ def test_segmentation_only_then_none(window, demo):
 def test_a_file_can_be_used_as_the_other_kind(window, demo):
     app, win, errors = window
     wait(app, win, lambda: win.data.add_tomogram([demo["labels"]]))  # the label file, forced to be a tomogram
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     assert win.data.info["tomogram"] == "file:" + win.st._norm(demo["labels"]) and seg_ticks(win) == []
     wait(app, win, lambda: win.data.add_segmentation([demo["labels"]]))  # "Use as segmentation"
     assert win.data.info["tomogram"] is None and len(seg_ticks(win)) == 1 and len(structure_names(win)) == 4
@@ -114,8 +111,7 @@ def test_a_file_can_be_used_as_the_other_kind(window, demo):
 def test_tomogram_opacity_controls(window, demo):
     app, win, errors = window
     wait(app, win, lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     assert win.tslice_group.isEnabled() and win.tshow_cb.isChecked() and win.topac_s.value() == 100
     win.topac_s.setValue(40)
     assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)
@@ -134,3 +130,21 @@ def test_tomogram_opacity_controls(window, demo):
     assert not win.tslice_group.isEnabled() and not row(win, 2)["tomo"].isEnabled()  # no tomogram
     assert win.spec["style"]["tomogram"]["opacity"] == pytest.approx(0.4)  # settings kept
     assert not errors, errors
+
+
+def test_preview_error_does_not_switch_to_software_rendering_where_it_cannot_start(window, demo, monkeypatch):
+    """F-01: the fallback asked for OSMesa after any preview error, which hard-crashes the app on Windows."""
+    import tomoreveal.gui as gui
+    app, win, errors = window
+    wait(app, win, lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
+    win.tabs.setCurrentIndex(win.TAB_MOVIE)
+    monkeypatch.setattr(gui, "software_rendering_available", lambda: False, raising=False)
+    win.st.headless = False
+
+    def broken(*a, **k):
+        raise RuntimeError("graphics driver problem")
+    monkeypatch.setattr(win.st.ren, "draw", broken)
+    win.do_preview()
+    assert win.st.headless is False
+    assert "Preview failed: graphics driver problem" in win.msg_lbl.text()
+    assert "software rendering is not available" in win.msg_lbl.text()

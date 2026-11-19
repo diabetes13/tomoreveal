@@ -1,5 +1,7 @@
 """Phase 1: tomogram only, segmentation only, both, several sources, sources on another grid, settings by stable key."""
 import json
+import os
+import sys
 
 import numpy as np
 import pytest
@@ -52,7 +54,7 @@ def test_tomogram_only(demo):
     json.dumps(info["spec"])
 
 
-def test_segmentation_only_renders(demo):
+def test_segmentation_only_renders(demo, needs_3d):
     st = tr.Studio(headless=True)
     info = st.add_files([demo["labels"]], log=quiet, make_renderer=False)
     assert info["can_show"] and not info["has_tomogram"] and info["dims"] == [256, 320, 48]
@@ -60,11 +62,8 @@ def test_segmentation_only_renders(demo):
     frames, marks = plan(st)
     assert "Slices" not in marks and marks[0] == "Reveal"
     assert all(f["slice"] == 0 for f in frames)
-    try:
-        st.ensure_renderer()
-        img = st.ren.draw(frames[-1], info["spec"], (320, 180))
-    except Exception as exc:
-        pytest.skip(f"3D rendering is not available here: {exc}")
+    st.ensure_renderer()
+    img = st.ren.draw(frames[-1], info["spec"], (320, 180))
     rgb = img.reshape(-1, 3).astype(int)
     assert ((np.abs(rgb[:, 0] - rgb[:, 1]) > 40) | (np.abs(rgb[:, 1] - rgb[:, 2]) > 40)).mean() > 0.01
     st._drop_renderer()
@@ -100,7 +99,7 @@ def test_two_label_sources_on_one_grid(demo, extra):
 def test_source_on_another_grid_is_listed_but_unusable(demo, extra):
     st = tr.Studio(headless=True)
     info = st.add_files([demo["tomogram"], demo["labels"], extra["small"]], log=quiet, make_renderer=False)
-    src = {s["key"].split("/")[-1]: s for s in info["segmentation_sources"]}
+    src = {os.path.basename(s["key"].split(":", 1)[1]): s for s in info["segmentation_sources"]}  # keys are "<kind>:<path>"
     bad = src["small_labels.mrc"]
     assert not bad["usable"] and "100 × 100 × 48" in bad["reason"] and "256 × 320 × 48" in bad["reason"]
     assert src["demo_labels.mrc"]["usable"] and names(info) == ["membrane", "vesicles", "filaments", "particles"]
@@ -145,3 +144,14 @@ def test_start_over_and_old_load_interface(demo, extra):
     assert [s["label"] for s in info["segmentation_sources"] if s["enabled"]] == ["training data"]
     info = st.reset()
     assert not info["can_show"] and info["segmentation_sources"] == [] and len(info["tomogram_choices"]) == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows file names ignore letter case")
+def test_one_file_under_two_spellings_is_loaded_once(demo, tmp_path):
+    """F-33: the same file typed in other letter case is one source, labelled with the case on disk."""
+    lab, vox = load_volume(demo["labels"]); p = str(tmp_path / "Mixed_Labels.mrc"); write_mrc(p, lab, vox)
+    st = tr.Studio(headless=True)
+    st.add_files([demo["tomogram"], p], log=quiet, make_renderer=False)
+    st.add_files([p.lower(), p.upper()], log=quiet, make_renderer=False)
+    assert [s["group"] for s in st.seg_sources] == ["Mixed_Labels.mrc"]
+

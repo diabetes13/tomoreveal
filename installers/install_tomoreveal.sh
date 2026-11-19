@@ -24,11 +24,12 @@ fi
 if [ ! -x "$APP/env/bin/python" ]; then
   echo "[2/3] Installing Python, Qt and the 3D/video libraries into $APP/env (about 4 GB, several minutes) ..."
   "$MM" create -y -q -r "$APP/mamba-root" -p "$APP/env" -f "$ROOT/environment.yml"
-  if [ "$(uname -s)" = "Linux" ]; then   # software renderer, used when the graphics driver cannot be used (Linux only)
-    "$MM" install -y -q -r "$APP/mamba-root" -p "$APP/env" -c conda-forge mesalib
-  fi
-else
-  echo "[2/3] Libraries already installed (delete $APP/env to install them again)."
+else  # an update, or a first install that was stopped part way: bring the libraries to what this version needs
+  echo "[2/3] Updating the libraries in $APP/env to what this version needs ..."
+  "$MM" install -y -q -r "$APP/mamba-root" -p "$APP/env" -f "$ROOT/environment.yml"
+fi
+if [ "$(uname -s)" = "Linux" ]; then   # software renderer, used when the graphics driver cannot be used (Linux only)
+  "$MM" install -y -q -r "$APP/mamba-root" -p "$APP/env" -c conda-forge mesalib
 fi
 echo "[3/3] Installing the program and its launcher ..."
 "$APP/env/bin/python" -m pip install -q --no-deps --upgrade --force-reinstall "$ROOT"

@@ -1,6 +1,8 @@
 """Program state shared by the desktop window, the browser version and the command line."""
 import atexit
 import base64
+import contextlib
+import functools
 import io
 import os
 import queue
@@ -18,7 +20,34 @@ from .dragonfly import OrsSession, guess_roi
 from .matching import apply_match, match_volume
 from .render import Renderer, render_movie
 from .storyboard import build_plan, build_timeline, class_spec, default_spec
-from .volumes import Dataset, load_volume, looks_like_labels, looks_like_scores, regrid, score_scale, sidecar_classes
+from .volumes import Dataset, clean_labels, guess_kind, load_volume, looks_like_scores, regrid, score_scale, sidecar_classes
+
+# what _init_sources creates: the whole state of the loaded sources, which a failed change puts back
+_SOURCE_STATE = ("ds", "sessions", "tomo_files", "seg_sources", "hidden", "tomo_source", "_tomo_auto", "_tomo_loaded",
+                 "_seg_loaded", "_matches", "_stale", "match_note")
+
+
+def _atomic(method):
+    """A change of the loaded sources: if it fails, everything is left as it was and the error is raised unchanged.
+    The renderer is made afterwards, outside the rollback, so a graphics problem never undoes a load."""
+    @functools.wraps(method)
+    def run(self, *a, make_renderer=True, **k):
+        with self._rollback():
+            info = method(self, *a, make_renderer=False, **k)
+        if make_renderer:
+            self.ensure_renderer()
+        return info
+    return run
+
+
+def _keep(v):
+    return v, (v.copy() if isinstance(v, (dict, list)) else None)
+
+
+def _put_back(v, saved):
+    if saved is not None:  # in place, so everything that refers to this dict or list sees the old contents
+        v.clear(); (v.update if isinstance(v, dict) else v.extend)(saved)
+    return v
 
 
 class Studio:
@@ -35,7 +64,9 @@ class Studio:
     # Segmentation sources (self.seg_sources, in order): "dragonfly:<path>:<object title>", "labels:<path>", "scores:<path>".
     @staticmethod
     def _norm(p):
-        return os.path.abspath(os.path.expanduser(str(p).strip().strip('"')))
+        """The absolute path, with the letter case on disk (but mapped and subst drives kept as typed)."""
+        a = os.path.abspath(os.path.expanduser(str(p).strip().strip('"'))); r = os.path.realpath(a)
+        return r if os.path.normcase(r) == os.path.normcase(a) else a
 
     @property
     def has_tomogram(self):
@@ -73,26 +104,25 @@ class Studio:
                                          path=p, group=os.path.basename(p), obj=o, roi=o["kind"] == "ROI", enabled=on,
                                          native=(nz, ny, nx), vox=o["voxel"], preview=ses.preview_classes(o)))
 
-    def _add_volume(self, p, as_features, as_segmentation, as_tomogram, nvol):
+    def _add_volume(self, p, as_features, as_segmentation, as_tomogram, as_labels, nvol):
         a, vox = load_volume(p); stem = os.path.splitext(os.path.basename(p))[0]
-        scores, labels = looks_like_scores(a), looks_like_labels(a)
-        have_tomo = bool(self.tomo_files) or any(s.images() for s in self.sessions.values())
-        if p in as_tomogram:
+        if p in as_tomogram:  # a role you give always wins over the guess
             kind = "tomogram"
-        elif p in as_features or (scores and "__" in stem) or (scores and not labels and (have_tomo or nvol > 1)):
-            kind = "scores"
-        elif labels:
+        elif p in as_labels:
             kind = "labels"
-        elif p in as_segmentation:
-            kind = "scores" if scores else "labels"
+        elif p in as_features:
+            kind = "scores"
         else:
-            kind = "tomogram"
+            have_tomo = bool(self.tomo_files) or any(s.images() for s in self.sessions.values())
+            kind = guess_kind(a, stem, have_tomo, nvol)
+            if p in as_segmentation and kind == "tomogram":  # "Add segmentation": anything but a tomogram
+                kind = "scores" if looks_like_scores(a) else "labels"
+        if kind == "labels":
+            a = clean_labels(a, p)
         for other in ("file:", "labels:", "scores:"):  # the same file dropped again, perhaps as something else
             self._drop(other + p)
         if kind == "tomogram":
             self.tomo_files[p] = dict(arr=a, vox=vox)
-            if self._tomo_auto:
-                self.tomo_source = "file:" + p
             return
         src = dict(key=f"{kind}:{p}", kind=kind, path=p, group=os.path.basename(p), enabled=True, native=tuple(a.shape), vox=vox, raw=a)
         if kind == "labels":
@@ -114,9 +144,10 @@ class Studio:
         if s is not None:
             self.seg_sources.remove(s); self.ds.forget(key)
 
-    def _register(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), log=print):
+    def _register(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), as_labels=(), log=print):
         paths = [self._norm(p) for p in paths if p]
-        as_features, as_segmentation, as_tomogram = ({self._norm(p) for p in x if p} for x in (as_features, as_segmentation, as_tomogram))
+        as_features, as_segmentation, as_tomogram, as_labels = ({self._norm(p) for p in x if p}
+                                                                for x in (as_features, as_segmentation, as_tomogram, as_labels))
         for p in paths:
             if not os.path.isfile(p):
                 raise UserError(f"file not found: {p}")
@@ -125,13 +156,15 @@ class Studio:
             if p.lower().endswith(".orssession"):
                 self._add_session(p, log)
             else:
-                self._add_volume(p, as_features, as_segmentation, as_tomogram, nvol)
+                self._add_volume(p, as_features, as_segmentation, as_tomogram, as_labels, nvol)
 
-    def add_files(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), log=print, make_renderer=True):
+    @_atomic
+    def add_files(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), as_labels=(), log=print, make_renderer=True):
         """Add files to what is loaded. Sessions and segmentation files add segmentation sources; tomograms add tomogram choices."""
-        self._register(paths, as_features, as_segmentation, as_tomogram, log)
+        self._register(paths, as_features, as_segmentation, as_tomogram, as_labels, log)
         return self._update(log, make_renderer)
 
+    @_atomic
     def set_tomogram_source(self, key, log=print, make_renderer=True):
         key = key or None
         if key not in [c["key"] for c in self._tomogram_choices()]:
@@ -139,6 +172,7 @@ class Studio:
         self.tomo_source = key; self._tomo_auto = False
         return self._update(log, make_renderer)
 
+    @_atomic
     def set_segmentation_enabled(self, key, on, log=print, make_renderer=True):
         s = self._source(key)
         if s is None:
@@ -146,6 +180,7 @@ class Studio:
         s["enabled"] = bool(on)
         return self._update(log, make_renderer)
 
+    @_atomic
     def remove_source(self, key, log=print, make_renderer=True):
         """Remove a tomogram file ("file:..."), a whole session ("session:<path>") or one segmentation source."""
         if key.startswith("session:") and key[8:] in self.sessions:
@@ -160,11 +195,12 @@ class Studio:
             self._drop(key)
         return self._update(log, make_renderer)
 
-    def load(self, paths=(), roi=None, image=None, log=print, as_features=(), make_renderer=True):
+    @_atomic
+    def load(self, paths=(), roi=None, image=None, log=print, as_features=(), as_tomogram=(), as_labels=(), make_renderer=True):
         """Older interface (command line, browser version): add files, then optionally choose a segmentation and an image.
         roi: a multi-ROI / ROI title (or a unique part of it) or "__all_rois__", in the session loaded last.
         image: "file", "s<N>" (image N of that session), "none", or a tomogram source key."""
-        self._register(paths, as_features, log=log)
+        self._register(paths, as_features, as_tomogram=as_tomogram, as_labels=as_labels, log=log)
         if self.sessions and roi:
             p = list(self.sessions)[-1]; ses = self.sessions[p]
             mine = [s for s in self.seg_sources if s["kind"] == "dragonfly" and s["path"] == p]
@@ -290,14 +326,19 @@ class Studio:
                 s.update(arr=lab, classes=classes, _stats=None)
             return
         raw = s["raw"]; key = (tuple(ref), (tf["s"], tf["flip"], tf["off"]) if tf else None)
+        if tf and tf["flip"] and s["kind"] == "labels" and raw.shape == tuple(ref) == tuple(tf["src_shape"]):
+            self.match_note = (f"{self.match_note} {s['group']}: used as it is, on Dragonfly's grid. If it was made from your "
+                               "original tomogram file, it is mirrored.").strip()
         if s.get("placed") == key:
             return
-        if raw.shape == tuple(ref):
-            arr = raw
-        elif s["kind"] == "scores" and tf and raw.shape == tuple(tf["src_shape"]):
-            # made from the original tomogram file: apply the same flip / binning / crop as for that file
+        # Made from your original tomogram file: the same flip / binning / crop as for that file. Score files always are;
+        # a label file on Dragonfly's own grid may be a Dragonfly export instead, so it is used as it is, with a note.
+        from_file = bool(tf) and raw.shape == tuple(tf["src_shape"]) and (s["kind"] == "scores" or raw.shape != tuple(ref))
+        if from_file:
             log(f"{s['group']}: lined up with the Dragonfly grid in the same way as your tomogram file")
-            arr = np.ascontiguousarray(apply_match(raw, tf, ref))
+            arr = np.ascontiguousarray(apply_match(raw, tf, ref, labels=s["kind"] == "labels"))
+        elif raw.shape == tuple(ref):
+            arr = raw
         elif s["kind"] == "scores":
             try:
                 arr = regrid(raw, ref, s["group"], log)
@@ -371,6 +412,22 @@ class Studio:
     def _drop_renderer(self):
         if self.ren is not None:
             self.ren.close(); self.ren = None
+
+    @contextlib.contextmanager
+    def _rollback(self):
+        """Snapshot by reference (no arrays are copied) of the sources, each source dict and the dataset."""
+        state = {n: _keep(getattr(self, n)) for n in _SOURCE_STATE}
+        sources = [_keep(s) for s in self.seg_sources]
+        ds = {n: _keep(v) for n, v in self.ds.__dict__.items()}
+        try:
+            yield
+        except BaseException:
+            for n, kept in state.items():
+                setattr(self, n, _put_back(*kept))
+            for kept in sources:
+                _put_back(*kept)
+            self.ds.__dict__.clear(); self.ds.__dict__.update({n: _put_back(*kept) for n, kept in ds.items()})
+            raise
 
     def _init_sources(self):
         self.ds = Dataset(self.smooth, self.step)
@@ -496,12 +553,8 @@ class Studio:
                 self.thumb = b.getvalue()
         try:
             res = render_movie(self.ren, spec, job["path"], progress=prog, cancelled=lambda: self._cancel)
-            if res is None:
+            if res is None:  # the unfinished files are already gone, and the old movie is kept
                 job.update(state="cancelled", message="cancelled")
-                try:
-                    os.remove(job["path"])
-                except OSError:
-                    pass
             else:
                 job.update(state="done", seconds=round(res[1], 1), mb=round(os.path.getsize(job["path"]) / 1e6, 1),
                            elapsed=round(time.time() - job["t0"]))

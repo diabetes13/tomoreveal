@@ -49,6 +49,20 @@ def test_old_closeup_setting_hide_still_hides(both):
     assert frames[-1]["slice"] == 1.0  # back to the default after returning to the overview
 
 
+
+def test_fade_longer_than_the_flight_never_jumps_back(both):
+    """F-22: a fade that the fly-in (or the flight back from a close-up) already did is not started again."""
+    spec = tr.default_spec(both.ds)
+    shot = tr.focus_shot({"class": both.ds.key_of(2)}, "vesicles", seconds=2)
+    shot["tomogram"] = dict(mode="hidden", opacity=0.4, fade=4.0)
+    spec["shots"].append(shot)
+    spec["shots"].append(dict(id="s-after", type="slide", **{"from": "first", "to": "last"}, seconds=2,
+                              tomogram=dict(mode="shown", opacity=0.4, fade=4.0)))
+    down, up = slices(spec, both, 3), slices(spec, both, 4)
+    assert all(a >= b for a, b in zip(down, down[1:])) and down[-1] == 0
+    assert all(a <= b for a, b in zip(up, up[1:])) and up[-1] == 1.0
+
+
 def test_no_tomogram_means_no_slice(demo):
     st = tr.Studio(headless=True)
     st.add_files([demo["labels"]], log=lambda *a: None, make_renderer=False)

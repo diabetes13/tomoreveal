@@ -13,15 +13,14 @@ from tomoreveal import storyboard as sb  # noqa: E402
 
 
 @pytest.fixture
-def window(tmp_path, demo):
+def window(tmp_path, demo, needs_3d):
     from tomoreveal.gui import build_gui
     app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
     win.resize(1400, 900)
     errors = []; old = sys.excepthook; sys.excepthook = lambda t, v, tb: errors.append(v)
     loop = QtCore.QEventLoop(); win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     pump(app)
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     refresh(app, win)
     yield app, win, errors
     sys.excepthook = old; win.close()
@@ -154,3 +153,34 @@ def test_movie_after_edits_has_the_planned_frames(window, tmp_path):
     import imageio.v2 as imageio
     assert imageio.get_reader(out).count_frames() == n_plan
     assert not errors, errors
+
+
+def test_undo_right_after_a_setting_change_undoes_only_that_change(window):
+    """F-09: a change still waiting for the 600 ms history timer was skipped, and Undo took back the edit before it too."""
+    app, win, errors = window
+    first = ids(win)
+    win.editor.delete(first[0]); refresh(app, win)                     # an edit, recorded at once
+    before = win.spec["style"]["tomogram"]["opacity"]
+    win.spec["style"]["tomogram"]["opacity"] = 0.25; win.editor.changed()  # a slider: recorded once things settle
+    win.editor.undo()                                                     # within 600 ms
+    assert ids(win) == first[1:] and win.spec["style"]["tomogram"]["opacity"] == before
+    win.editor.redo()
+    assert win.spec["style"]["tomogram"]["opacity"] == 0.25
+    assert not errors, errors
+
+
+@pytest.mark.parametrize("remove", ["undo", "delete"])
+def test_closeup_still_added_when_its_place_is_gone(window, remove):
+    """F-26: "+ Click a structure" remembered the part to insert after; if that part went away first, the click failed."""
+    app, win, errors = window
+    a = ids(win)[1]; put_playhead_in(app, win, a)
+    win.editor.add("hold"); refresh(app, win); hold = ids(win)[2]
+    win.editor.pick_closeup(after=hold)
+    win.editor.undo() if remove == "undo" else win.editor.delete(hold)
+    refresh(app, win)
+    assert hold not in ids(win) and win.pick_btn.isChecked()
+    win.st.pick = lambda *a, **k: dict(found=True, **{"class": win.st.ds.key_of(2)}, component=None, name="vesicles", voxels=1)
+    win.on_click(0.5, 0.5)
+    assert [p["type"] for p in win.spec["shots"]].count("focus") == 1
+    assert not errors, errors
+

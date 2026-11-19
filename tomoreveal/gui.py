@@ -11,7 +11,7 @@ import numpy as np
 
 from .common import UserError, VIEWS
 from .demo import make_demo
-from .render import movie_frames
+from .render import movie_frames, poster_path, software_rendering_available
 from .storyboard import focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
@@ -182,7 +182,7 @@ def build_gui(args):
     class Main(QtW.QMainWindow):
         def __init__(self):
             super().__init__()
-            self.settings = QtC.QSettings("TomoReveal", "TomoReveal")
+            self.settings = QtC.QSettings()  # organisation and application names are set in build_gui
             outdir = args.outdir or self.settings.value("outdir", "") or os.path.join(os.path.expanduser("~"), "TomoReveal movies")
             self.st = Studio(headless=args.headless, outdir=outdir)
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
@@ -467,11 +467,11 @@ def build_gui(args):
         def set_busy(self, flag, msg=None):
             """While files are read: the Data tab shows a progress line and the other tabs are disabled."""
             self.busy = flag; self.go_btn.setEnabled(not flag and self.st.can_show)
-            for i, page in enumerate(self.pages):
-                if i != self.TAB_DATA:
-                    page.setEnabled(not flag)
+            for w in [p for i, p in enumerate(self.pages) if i != self.TAB_DATA] + [self.timeline, self.play_btn, self.explore.page]:
+                w.setEnabled(not flag)  # nothing may use Studio or the renderer while the worker replaces them
             self.data.set_busy(flag, msg or "")
             if flag:
+                self.stop_play(); self.pick_btn.setChecked(False)
                 QtW.QApplication.setOverrideCursor(QtC.Qt.BusyCursor); self.say(msg)
             else:
                 QtW.QApplication.restoreOverrideCursor()
@@ -807,12 +807,12 @@ def build_gui(args):
             try:
                 img = self.st.ren.draw(frames[i], spec, size, aa=False)
             except Exception as exc:
-                traceback.print_exc()
-                if not self.st.headless:
+                traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
+                if not self.st.headless and soft:
                     self.st.headless = True; self.st._stale = True; self.st.ensure_renderer(); self.req = req
                     self.say("Graphics problem: switched to software rendering (slower).", "err")
                     return self.do_preview(quick)
-                self.say(f"Preview failed: {exc}", "err"); return
+                self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
@@ -856,7 +856,7 @@ def build_gui(args):
                 self.say("Click the structure you want a close-up of.")
 
         def on_click(self, fx, fy):
-            if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:
+            if not self.pick_mode or not self.st.has_segmentation or self.gen is not None or self.busy:
                 return
             try:
                 p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy})
@@ -938,8 +938,9 @@ def build_gui(args):
             if not name.lower().endswith(".mp4"):
                 name += ".mp4"
             path = os.path.join(folder, name)
-            if os.path.exists(path):
-                r = QtW.QMessageBox.question(self, "TomoReveal", f"{name} already exists in that folder. Replace it?")
+            old = [os.path.basename(p) for p in (path, poster_path(path)) if os.path.exists(p)]
+            if old:  # the poster is replaced as well
+                r = QtW.QMessageBox.question(self, "TomoReveal", f"{' and '.join(old)} already exist{'s' * (len(old) == 1)} in that folder. Replace {'them' if len(old) > 1 else 'it'}?")
                 if r != QtW.QMessageBox.Yes:
                     return
             try:
@@ -986,12 +987,7 @@ def build_gui(args):
             self._rendering(False)
 
         def cancel_render(self):
-            self._render_stop()
-            for p in (self.render_path, os.path.splitext(self.render_path)[0] + "_poster.png"):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            self._render_stop()  # closing the generator removes this run's unfinished files; the old movie stays
             self.status_lbl.setText("Cancelled."); self.schedule(0)
 
         def _render_done(self):
@@ -1019,7 +1015,7 @@ def build_gui(args):
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])
     app.setApplicationName("TomoReveal"); app.setOrganizationName("TomoReveal")
     app.setWindowIcon(QtG.QIcon(QtG.QPixmap.fromImage(to_qimage(np.asarray(make_icon(256))))))
-    apply_theme(app, QtC.QSettings("TomoReveal", "TomoReveal").value("theme", "system"))  # before the window is made
+    apply_theme(app, QtC.QSettings().value("theme", "system"))  # before the window is made
     win = Main(); win.show()
     if getattr(args, "files", None):
         QtC.QTimer.singleShot(300, lambda: win.load(paths=args.files))

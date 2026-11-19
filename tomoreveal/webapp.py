@@ -40,7 +40,19 @@ def make_handler(studio):
             except Exception as exc:
                 self._send(500, dict(error=f"{type(exc).__name__}: {exc}"))
 
+        def _allowed(self):
+            """Only TomoReveal's own page: Host is this server, and Origin (when sent) is this server too."""
+            own = (f"127.0.0.1:{self.server.server_address[1]}", f"localhost:{self.server.server_address[1]}")
+            origin = self.headers.get("Origin")
+            if self.headers.get("Host") in own and (origin is None or origin in tuple("http://" + h for h in own)):
+                return True
+            self.close_connection = True  # the unread body must never be taken as a second request
+            self._send(403, dict(error="refused: this request did not come from TomoReveal's own page"), extra={"Connection": "close"})
+            return False
+
         def do_GET(self):
+            if not self._allowed():
+                return
             u = urlparse(self.path)
             if u.path in ("/", "/index.html"):
                 return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -83,6 +95,8 @@ def make_handler(studio):
                     left -= len(chunk)
 
         def do_POST(self):
+            if not self._allowed():
+                return
             u = urlparse(self.path)
             if u.path == "/api/upload":
                 name = os.path.basename(unquote(parse_qs(u.query).get("name", ["upload.bin"])[0])) or "upload.bin"
@@ -95,7 +109,12 @@ def make_handler(studio):
                                 break
                             f.write(chunk); n -= len(chunk)
                 except OSError as exc:
+                    if os.path.exists(dest):
+                        os.remove(dest)
                     return self._send(500, dict(error=f"could not store the file: {exc}"))
+                if n > 0:  # the browser stopped sending before the end
+                    os.remove(dest); self.close_connection = True
+                    return self._send(400, dict(error="the upload was cut off"), extra={"Connection": "close"})
                 return self._send(200, dict(path=dest))
             body = self._json()
             busy = studio.job.get("state") == "rendering"
@@ -136,16 +155,24 @@ def make_handler(studio):
     return Handler
 
 
-def cmd_app(args):
+def _bind(handler, port):
+    """A server on the first free port from `port` on (30 tries) -> (server, port), or (None, None)."""
     from http.server import ThreadingHTTPServer
-    import webbrowser
-    studio = Studio(headless=args.headless, outdir=args.outdir)
-    httpd = None
-    for port in range(args.port, args.port + 30):
+
+    class Server(ThreadingHTTPServer):
+        allow_reuse_address = sys.platform != "win32"  # on Windows it lets a second server take a busy port
+    for p in range(port, port + 30):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(studio)); break
+            return Server(("127.0.0.1", p), handler), p
         except OSError:
             continue
+    return None, None
+
+
+def cmd_app(args):
+    import webbrowser
+    studio = Studio(headless=args.headless, outdir=args.outdir)
+    httpd, port = _bind(make_handler(studio), args.port)
     if httpd is None:
         sys.exit("tomoreveal: no free port found")
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -292,7 +319,7 @@ function applyInfo(info){
     if(String(prev.dims)!==String(info.dims)){S.spec.clip=null;S.spec.z_range=null;}
     const keys=new Set(info.structures.map(c=>c.key));const merged={};
     for(const [k,v] of Object.entries(info.spec.classes))merged[k]=S.spec.classes[k]||v;
-    S.spec.classes=merged;S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||keys.has(s.target.class));}
+    S.spec.classes={...S.spec.classes,...merged};S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||keys.has(s.target.class));}
   say('Loaded. Adjust anything on the left; the preview updates as you go.','ok');
   for(const id of ['datacard','classcard','viewcard','storycard','lookcard','rendercard','scrubwrap'])$('#'+id).classList.remove('hidden');
   $('#hint').classList.add('hidden');

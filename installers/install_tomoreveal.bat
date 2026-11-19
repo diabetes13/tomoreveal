@@ -18,7 +18,9 @@ if not exist "%APP%\env\python.exe" (
   echo [2/3] Installing Python, Qt and the 3D/video libraries ^(about 4 GB, several minutes^) ...
   "%APP%\micromamba.exe" create -y -q -r "%APP%\mamba-root" -p "%APP%\env" -f "%ROOT%\environment.yml" || goto :fail
 ) else (
-  echo [2/3] Libraries already installed.
+  rem an update, or a first install that was stopped part way: bring the libraries to what this version needs
+  echo [2/3] Updating the libraries to what this version needs ...
+  "%APP%\micromamba.exe" install -y -q -r "%APP%\mamba-root" -p "%APP%\env" -f "%ROOT%\environment.yml" || goto :fail
 )
 echo [3/3] Installing the program and shortcuts ...
 "%APP%\env\python.exe" -m pip install -q --no-deps --upgrade --force-reinstall "%ROOT%" || goto :fail

@@ -124,6 +124,8 @@ class MovieEditor(QtC.QObject):
     def insert(self, part, after=None):
         if self.spec is None:
             return
+        if after not in (None, "start") and after not in [p["id"] for p in self.spec["shots"]]:
+            after = None  # that part was undone or deleted since: put it at the playhead instead
         after = after or self.anchor()
         sb.insert_part(self.spec, part, after=after)
         self.commit(select=part["id"], show=part["id"])
@@ -187,10 +189,15 @@ class MovieEditor(QtC.QObject):
         self.win.say("The movie is back to the three default parts. Undo brings your parts back.", "ok")
 
     def undo(self):
-        self._restore(self.history.undo())
+        self._record_pending(); self._restore(self.history.undo())
 
     def redo(self):
-        self._restore(self.history.redo())
+        self._record_pending(); self._restore(self.history.redo())
+
+    def _record_pending(self):
+        """A change still waiting for the history timer is one undo step of its own."""
+        if self.hist_timer.isActive():
+            self.hist_timer.stop(); self.record()
 
     def _restore(self, spec):
         if spec is None:
@@ -344,6 +351,8 @@ class PartsPanel(QtW.QWidget):
         else:
             for pid in self.rows:
                 self.refresh_line(pid)
+            if self.open_id in self.rows:  # its boxes may show values that a timeline drag, undo or threshold changed
+                self.fill_details(self.open_id)
         sel = self.win.selected_part
         if sel in self.rows and sel != self.open_id:
             self.open(sel, select=False)

@@ -86,10 +86,10 @@ TEXTS = {
     "text:Add point by clicking in the preview": "Click a structure or the slice; the camera will pass near it, looking at it.",
     "label:Camera": "Distance from the path, the side the camera looks from, and its height.",
     "label:Looks": "Look at the path or a little ahead, and the speed along it.",
-    "text:show the path in the preview (never in the movie)": "Draw the camera's path in the preview while this part is selected.",
+    "text:show the path in the preview": "Draw the camera's path in the preview while this part is selected. It is never in the movie.",
     "text:push in": "The camera moves slowly closer during the close-up.",
     "text:move the tomogram slice with the cut": "The slice follows the cut, so you see the density inside the object.",
-    "text:blur the background": "Blur what is nearer or further away than the objects in focus.",
+    "text:blur": "Blur what is nearer or further away than the objects in focus.",
     "text:+ Click objects in the preview": "Click objects to add them; click again to take one out; Shift-click adds the whole structure. Esc ends.",
     # Look tab
     "text:Show the tomogram slice": "Show the grey tomogram slice in the preview and the movie.",

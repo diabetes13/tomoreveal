@@ -28,11 +28,11 @@ PRORES_NOTE = "The two ProRes .mov files ignore the file size and codec choices.
 class ExportControls(QtC.QObject):
     def __init__(self, win, grid, row):
         super().__init__(win); self.win = win
-        box = QtW.QWidget(); h = QtW.QHBoxLayout(box); h.setContentsMargins(0, 0, 0, 0); self.fmt = {}
-        for f in encode.FORMATS:
+        box = QtW.QWidget(); h = QtW.QGridLayout(box); h.setContentsMargins(0, 0, 0, 0); self.fmt = {}
+        for i, f in enumerate(encode.FORMATS):  # two rows of two, so the box fits the left side
             cb = QtW.QCheckBox(FORMAT_NAMES[f]); cb.setToolTip(FORMAT_TIPS[f]); cb.toggled.connect(self.formats_changed)
-            h.addWidget(cb); self.fmt[f] = cb
-        h.addStretch(1)
+            h.addWidget(cb, i // 2, i % 2); self.fmt[f] = cb
+        h.setColumnStretch(2, 1)
         grid.addWidget(QtW.QLabel("Save as"), row, 0); grid.addWidget(box, row, 1, 1, 4)
         self.size_cb = QtW.QComboBox(); self.codec_cb = QtW.QComboBox()
         for t, d in SIZES:

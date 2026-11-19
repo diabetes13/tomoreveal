@@ -157,7 +157,7 @@ def part_overlay_row(win, pid, p):
     w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
     cur = p.get("overlays") or {}
     for name, text in PART_ITEMS:
-        cb = QtW.QComboBox(); cb.setToolTip(f"The {text} during this part")
+        cb = QtW.QComboBox(); cb.setToolTip(f"The {text} during this part"); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
         for t, d in ((f"{text}: as default", "default"), (f"{text}: show", "show"), (f"{text}: hide", "hide")):
             cb.addItem(t, d)
         cb.setCurrentIndex(max(0, cb.findData(cur.get(name, "default"))))

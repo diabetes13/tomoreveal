@@ -11,7 +11,7 @@ SPEEDS = (("even", "even"), ("slow at the ends", "ease"))
 
 
 def _combo(items, cur, fn):
-    cb = QtW.QComboBox()
+    cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
     for t, d in items:
         cb.addItem(t, d)
     cb.setCurrentIndex(max(0, cb.findData(cur)))
@@ -89,9 +89,11 @@ def path_rows(panel, pid, p, form):
         wps = p.get("waypoints") or []
         for i, w in enumerate(wps):
             what = "view" if w.get("pos") is not None else "point"
-            lab = QtW.QLabel(f"{i + 1}: {'camera position' if what == 'view' else 'looks at a clicked point'}")
+            lab = QtW.QLabel(f"{i + 1}: {'a view' if what == 'view' else 'a point'}")
+            lab.setToolTip("A camera position stored with 'Add point at the current view'" if what == "view" else
+                           "A point you clicked; the camera passes near it, looking at it")
             pause = _spin(0, 30, float(w.get("pause", 0) or 0), lambda v, i=i: (part()["waypoints"][i].update(pause=float(v)), panel.set(pid, "waypoints", part()["waypoints"])),
-                          step=0.5, suffix=" s", decimals=1, prefix="pause ")
+                          step=0.5, suffix=" s", decimals=1, prefix="stop ")
             pause.setToolTip("The camera stops here for this long")
 
             def move(d, i=i):
@@ -119,7 +121,7 @@ def path_rows(panel, pid, p, form):
         click = QtW.QPushButton("Add point by clicking in the preview"); click.setCheckable(True); click.setChecked(win.waypoint_pick == pid)
         click.setToolTip("Click a structure or the slice; the camera will pass near it, looking at it. Esc ends.")
         click.toggled.connect(lambda on: win.start_waypoint_pick(pid) if on else win.end_waypoint_pick())
-        form.addRow("" if wps else "Points", _row(here, click))
+        form.addRow("" if wps else "Points", _row(here)); form.addRow("", _row(click))
         tip = QtW.QLabel("In the preview, drag a numbered point to move it on the slice; right-click it to delete it.")
         tip.setStyleSheet(DIM); tip.setWordWrap(True); form.addRow("", tip)
     cam = dict(sb.PATH_CAMERA, **(p.get("camera") or {}))
@@ -137,5 +139,5 @@ def path_rows(panel, pid, p, form):
     op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo))
     op.valueChanged.connect(lambda v: panel.set(pid, "others", dict(colour=sb.others_of(part().get("others"))[0], opacity=v / 100)))
     form.addRow("Other structures", _row(col, op))
-    show = QtW.QCheckBox("show the path in the preview (never in the movie)"); show.setChecked(bool(p.get("show_path_in_preview", True)))
+    show = QtW.QCheckBox("show the path in the preview"); show.setChecked(bool(p.get("show_path_in_preview", True)))
     show.toggled.connect(lambda v: panel.set(pid, "show_path_in_preview", bool(v))); form.addRow("", show)

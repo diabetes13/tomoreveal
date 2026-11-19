@@ -323,7 +323,7 @@ def build_gui(args):
 
         def _tab(self, name):
             """A scrollable page of the tab widget; returns its layout."""
-            scroll = QtW.QScrollArea(); scroll.setWidgetResizable(True); scroll.setHorizontalScrollBarPolicy(QtC.Qt.ScrollBarAlwaysOff)
+            scroll = QtW.QScrollArea(); scroll.setWidgetResizable(True); scroll.setHorizontalScrollBarPolicy(QtC.Qt.ScrollBarAsNeeded)
             page = QtW.QWidget(); lay = QtW.QVBoxLayout(page); scroll.setWidget(page)
             lay.setSizeConstraint(QtW.QLayout.SetMinimumSize)  # grow and scroll rather than squash rows together
             self.tabs.addTab(scroll, name); self.pages.append(page)
@@ -467,6 +467,7 @@ def build_gui(args):
             for t, wh in QUALITY:
                 self.quality_cb.addItem(t, wh)
             self.quality_cb.setCurrentIndex(1); self.quality_cb.currentIndexChanged.connect(lambda _: self.schedule())
+            self.quality_cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); self.quality_cb.setMinimumContentsLength(16)
             self.folder_le = QtW.QLineEdit(self.st.outdir); self.folder_le.setMinimumWidth(120); fb = QtW.QPushButton("Choose..."); fb.clicked.connect(self.choose_folder)
             self.name_le = QtW.QLineEdit("tomogram_reveal")
             grid.addWidget(QtW.QLabel("Quality"), 0, 0); grid.addWidget(self.quality_cb, 0, 1); grid.addWidget(QtW.QLabel("Name"), 0, 2); grid.addWidget(self.name_le, 0, 3, 1, 2)
@@ -489,7 +490,7 @@ def build_gui(args):
             self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 8, 0, 1, 5)
             self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 9, 0, 1, 5)
             mk.addWidget(g); mk.addStretch(1)
-            split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([520, 960])
+            split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([560, 920])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)
 
         # ---------- messages and state ----------
@@ -561,6 +562,10 @@ def build_gui(args):
             """Tooltips for every control (texts in help_texts.py); called after lists are rebuilt."""
             from .help_texts import apply
             apply(self)
+            for page in self.pages:  # drop-down lists may shrink (long entries end in "..."), so rows fit the left side
+                for cb in page.findChildren(QtW.QComboBox):
+                    if cb.sizeAdjustPolicy() != QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon:
+                        cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(6)
 
         def _help_menu(self):
             h = self.project.help_menu; h.addSeparator()
@@ -579,7 +584,7 @@ def build_gui(args):
             while p is not None and not isinstance(p, QtW.QScrollArea):
                 p = p.parentWidget()
             if p is not None:
-                p.ensureWidgetVisible(w, 0, 20)
+                p.ensureWidgetVisible(w, 0, 20); p.horizontalScrollBar().setValue(0)
 
         def _tab_changed(self, i):
             """The Explore tab shows its own slice view on the right; every other tab shows the movie preview."""

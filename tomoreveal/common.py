@@ -1,7 +1,7 @@
 """Shared constants and small helpers."""
 
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"
 
 
 ZMAGIC = b"\x28\xb5\x2f\xfd"

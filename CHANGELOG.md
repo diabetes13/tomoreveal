@@ -1,5 +1,25 @@
 # Change log
 
+## 3.4.0
+
+- **Projects and crash safety (R3).** File > Save / Save as / Open / Open recent / Revert. A project (`.tomoreveal`) stores where the data files are and every setting, not the data. Moved data folders are found again; missing or changed files are listed in one dialog (Locate, Skip, Use it anyway). Your work is autosaved a few seconds after each change; after a crash TomoReveal offers to restore it. Movies are written in pieces, so a movie interrupted by a crash can be continued instead of started again. Errors are written to a log (Help > Show log folder).
+- **Legend and slice number on or off (R1)**, also for one part only, and the title and captions too.
+- **Move and resize the legend and the other items (R2)** by dragging them in the preview, with snapping to the edges and the centre, and a corner handle for their size. Legend title, one or two columns, box on or off.
+- **Scale bar (R8)** from the voxel size of the data (or a value you type when the file header is wrong): flat on the picture, or lying on the slice, where it is exact in every view. Its length is a round number chosen for each part.
+- **Title and end cards (R9)** with text, logos and pictures, a colour, gradient or picture background, fades, and a dissolve into the movie.
+- **Opacity, threshold, speck removal and smoothing (R6)** for each structure, in the structure's settings (the button next to it), and an opacity for all structures together.
+- **Lighting, shadows, smooth edges (R13).** Lighting presets (Simple, Soft, Full, Flat), the light's direction (drag a lit ball) and amounts; structures cast soft shadows on the tomogram slice, with a strength slider; anti-aliasing modes for the preview and the movie. Shadows between structures need a graphics card and are offered only where a self-test passes.
+- **Surface styles (R16):** cartoon with outlines, dots, glossy (shiny, metallic, glass). Soft shadows in creases (ambient occlusion) are the Soft lighting preset.
+- **Several objects in one close-up (R17):** tick structures or click objects in the preview; "Make a close-up for each" turns them into a quick tour.
+- **The other structures during a close-up (R5):** their colour (grey, darker, unchanged) and their opacity; a vignette around the objects in focus, and an optional background blur.
+- **Close-up animations (R7):** wiggle, slow push-in, pulsing highlight or glowing outline, a cross-section that sweeps through the objects (with the tomogram slice moving along), and a grow-in reveal.
+- **Camera paths (R10):** the camera glides along a structure such as a membrane, or flies through points you set (with pauses). The path is shown in the preview only.
+- **MP4 and MOV, transparent MOV, editing MOV (R11)** from one render. The transparent MOV (ProRes 4444) keeps the background see-through for slides and video editing.
+- **Smaller files at full resolution (R4):** file size Balanced / Larger / Smaller, and H.265 as an option (about half the size; plays in fewer programs). H.264 stays the default.
+- **File size before you make the movie (R12):** estimated from a few frames of your movie, for every quality and format.
+- **Tooltips everywhere (R14):** every control explains itself; Help > What is this?, and Help > Show tips on hover to switch them off.
+- **Short file names (R15)** in the Data tab: only the part that differs is shown, the shared part once above; right-click to rename a file inside TomoReveal.
+
 ## 3.3.0
 
 - **Timeline (T1).** The slider under the preview is now a timeline, as in a video editor. Each part of the movie is a block with its duration; transitions and pauses are shown between them. Add parts where the playhead is (slide up, reveal, overview, close-up, hold) with **+ Add part** or the **+** on the playhead; change durations by dragging the edge of a block; reorder by dragging blocks; split a slide or a hold at the playhead. Parts can come in any order: the camera and the slice fly automatically from one part to the next.

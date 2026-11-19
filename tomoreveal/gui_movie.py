@@ -314,7 +314,7 @@ class ClickableHeader(QtW.QWidget):
 
 def _combo(items, current, on_change):
     """A drop-down list of (text, value); on_change(value) when the user picks one."""
-    cb = QtW.QComboBox()
+    cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
     for t, d in items:
         cb.addItem(t, d)
     i = cb.findData(current)
@@ -416,7 +416,7 @@ class PartsPanel(QtW.QWidget):
             arrow.clicked.connect(lambda _=False, pid=pid: self.toggle(pid)); head.clicked.connect(lambda pid=pid: self.toggle(pid))
             tick.toggled.connect(lambda on, pid=pid: self.set_on(pid, on))
             note = QtW.QLabel(""); note.setStyleSheet(DIM); note.setWordWrap(True); note.setContentsMargins(46, 0, 0, 0)
-            details = QtW.QWidget(); details.setVisible(False); dl = QtW.QFormLayout(details); dl.setContentsMargins(46, 2, 0, 4)
+            details = QtW.QWidget(); details.setVisible(False); dl = QtW.QFormLayout(details); dl.setContentsMargins(24, 2, 0, 4)
             v.addWidget(head); v.addWidget(note); v.addWidget(details)
             self.lay.addWidget(box)
             self.rows[pid] = dict(box=box, head=head, arrow=arrow, on=tick, num=num, name=name, dur=dur, note=note,
@@ -471,7 +471,7 @@ class PartsPanel(QtW.QWidget):
         while w is not None and not isinstance(w, QtW.QScrollArea):
             w = w.parentWidget()
         if r and w is not None:
-            w.ensureWidgetVisible(r["box"], 0, 20)
+            w.ensureWidgetVisible(r["box"], 0, 20); w.horizontalScrollBar().setValue(0)
 
     # ---- settings ----
     def set_on(self, pid, on):
@@ -713,7 +713,7 @@ class PartsPanel(QtW.QWidget):
         if v is not None and v.get("on", True):
             st = QtW.QSpinBox(); st.setRange(0, 100); st.setSuffix(" %"); st.setPrefix("strength "); st.setValue(round(100 * float(v.get("strength", 0.6))))
             st.valueChanged.connect(lambda x: self.set(pid, "vignette", dict(self.part(pid)["vignette"], strength=x / 100)))
-            bl = QtW.QCheckBox("blur the background"); bl.setChecked(bool((v.get("blur") or {}).get("on")))
+            bl = QtW.QCheckBox("blur"); bl.setChecked(bool((v.get("blur") or {}).get("on")))
             bl.setToolTip("Things nearer or further away than the objects in focus are blurred (depth of field)")
             bl.toggled.connect(lambda on: self.set(pid, "vignette", dict(self.part(pid)["vignette"],
                                                                          blur=dict((self.part(pid)["vignette"].get("blur") or {}), on=bool(on), strength=0.5))))

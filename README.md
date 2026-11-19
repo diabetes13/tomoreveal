@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.3.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.4.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -164,7 +164,14 @@ The **Structures** tab lists the structures with the names and colours that are 
 - remove the tick to hide it.
 - click the coloured box to change the colour.
 - change the name. The legend uses this name.
-- move the **threshold** bar (easymode and Ais structures only). The surface is drawn where the score of the network is above the threshold.
+- click the **⚙** button to open the structure's settings:
+  - **Opacity**: 100 % is solid; lower values let you see through it.
+  - **Threshold** (easymode and Ais structures only): the surface is drawn where the score of the network is above it.
+  - **Remove specks smaller than** a number of voxels: leaves out small separate bits of a noisy segmentation.
+  - **Smoothing**: how round the surface is; 0 shows the raw voxel steps.
+  - **Style**: Normal, Cartoon (flat colour with dark outlines), Dots, or Glossy (shiny, metallic or glass). **Apply to all** gives every structure this style.
+
+**All structures** in the Look tab fades every structure together, for a "ghost" look.
 
 Structures that are hidden in Dragonfly, and the background, are listed in grey with the tick removed. Tick them to show them anyway. A structure that has no name in the session is shown as "label 3 (no name in the session)".
 
@@ -202,7 +209,7 @@ The strip under the preview is the **timeline**. Each part of the movie is a col
 
 The default movie has three parts: **Slide up through the slices**, **Slide back, revealing the segmentation**, and **Overview**. You can change all of it:
 
-- **Add a part** with **+ Add part** under the timeline, or with the small **+** on the playhead. The new part goes directly after the part under the playhead. Choose from: Slide up through the slices, Slide back revealing the segmentation, Overview, View from here, **Close-up of** a structure (or of "an object I click in the preview"), and Hold (a pause).
+- **Add a part** with **+ Add part** under the timeline, or with the small **+** on the playhead. The new part goes directly after the part under the playhead. Choose from: Slide up through the slices, Slide back revealing the segmentation, Overview, View from here, **Close-up of** a structure (or of "an object I click in the preview"), Hold (a pause), **Camera path along** a structure or **through points**, and **Title card**, **End card** or **Blank card**.
 - **Remove a part** with **Delete** (or the Delete key). Any part can be removed, also the default ones. **Undo** brings it back. **Reset to the default movie** (Movie tab) starts again from the three default parts.
 - **Make a part longer or shorter**: drag the right edge of its block.
 - **Move a part**: drag its block to another place.
@@ -242,8 +249,12 @@ The **Movie** tab lists the same parts, one line each. Click a line to open its 
 |---|---|
 | Slide | From (first slice, last slice, where the slice is, a slice number), To, Structures (hidden, above the slice, all, leave as they are), Pause before, Pause after |
 | Overview | Camera movement (rock, full spin, still), Rock angle, View (main view or own view) |
-| Close-up | Structure (a list of the loaded structures with their colours), Object (whole structure, the object you picked, or "pick an object in the preview..."), Other structures (grey, hidden, unchanged), Camera movement (orbit, rock, still), Zoom, Tilt |
+| Close-up | Structure and Object (or Objects in focus), Other structures (colour and opacity), Camera movement (orbit, rock, wiggle, still), Camera push-in, Highlight, Object effect, Zoom, Tilt, Vignette |
 | Hold | only the common settings |
+| Card | Background, text and picture blocks, Fades (see [Title and end cards](#9-title-and-end-cards)) |
+| Camera path | What the camera follows, or its points; Camera, Looks, Other structures (see [Camera paths](#camera-paths)) |
+
+Every part also has **On the picture**: show or hide the legend, slice number and scale bar during this part only.
 
 ![A close-up open in the Movie tab](docs/images/04-closeup.png)
 
@@ -253,10 +264,35 @@ The **Movie** tab lists the same parts, one line each. Click a line to open its 
 - Click **+ Click a structure in the preview** (or choose "an object I click in the preview"), then click one object (one vesicle, one filament) to add a close-up of that object only.
 - To change what a close-up shows, open it and choose another **Structure** or **Object** from the lists. The caption follows the structure unless you typed your own.
 - A close-up of a structure that you switched off in the Data tab stays in the list, marked "structure not loaded", and is left out of the movie until the structure is back.
+- **Several objects together**: open the close-up, tick whole structures under **Structures in focus**, or click **+ Click objects in the preview** and click objects one by one (click again to take one out, Shift-click for the whole structure, Esc when done). The camera frames all of them; each keeps its colour. **Make a close-up for each** (in the part's ⋮ menu) turns them into one close-up each, a quick tour.
+- **Other structures**: their colour (grey, darker, unchanged) and their opacity (0 % hides them).
+- **Vignette**: darker edges around the objects in focus, as set in the Look tab or for this close-up only, with an optional **blur** of what is nearer or further away.
+
+#### Close-up animations
+
+They can be combined:
+
+- **Camera movement: wiggle**: the camera circles slightly around the object, so its 3D shape shows while it stays in place.
+- **Camera push-in**: the camera moves slowly closer (it never goes so close that the objects leave the picture).
+- **Highlight**: the objects pulse brighter, or get a glowing outline.
+- **Object effect: cross-section sweep**: a cut moves through the objects and shows their inside, for example the lumen of a vesicle. With **move the tomogram slice with the cut**, the slice follows the cut, so you see the density inside the object exactly where it is cut. The cut can also come from the viewer's side or run along the object's longest axis.
+- **Object effect: grow in**: the objects build up from the bottom or from the slice, or fade in.
+
+![A cross-section through a vesicle](docs/images/14-cross-section.png)
 
 #### View from here
 
 **+ Add part > View from here** adds a still view with its own camera position, taken from the main view. While that part is selected and the playhead is inside it, dragging and scrolling in the preview change the view of this part only (the preview says "Changing the view of part 4"); its line in the Movie tab also has Tilt, Rotate and Zoom bars. Two of these parts in a row make the camera fly from one position to the other.
+
+#### Camera paths
+
+**+ Add part > Camera path along** a structure makes the camera glide along it, for example along a membrane. TomoReveal finds the middle line of the structure (or of the object you click); **Reverse direction** starts from the other end. If the object is too small or round to follow, it says so: use points instead.
+
+**+ Add part > Camera path through points** makes the camera fly through points that you set: **Add point at the current view** stores where the camera is in the preview; **Add point by clicking in the preview** picks a spot on a structure or on the slice, which the camera passes looking at it. Each point can **stop** the camera for some seconds. In the preview, drag a numbered point to move it, or right-click it to delete it.
+
+For both: **Camera** sets the distance and the side the camera looks from, **Looks** whether it looks at the path or a little ahead and whether it moves at even speed or slows down at the ends. The path is drawn in the preview while the part is selected, never in the movie.
+
+![A camera path through three points](docs/images/15-camera-path.png)
 
 ### 7. Show, fade or hide the tomogram
 
@@ -273,13 +309,55 @@ The change happens at the start of the part, over the **fade** time (0.5 s unles
 
 ![The tomogram choice for each part](docs/images/07-tomogram.png)
 
-### 8. Make the movie
+### 8. On the picture: legend, slice number, scale bar
 
-At the end of the **Movie** tab, select the quality, the name and the folder. Click **Make movie**. The movie is exactly what the timeline shows. A bar shows the progress and the time that remains. When the movie is complete, click **Play movie** to open it in your video player, or **Show folder**.
+The Look tab group **On the picture**, and the buttons above the preview, switch the **legend**, the **slice number**, the **scale bar**, the **title** and the **captions** on or off. Each part can override this for itself (Movie tab, **On the picture**).
 
-![The movie is saved](docs/images/05-movie-saved.png)
+- **Move** an item by dragging it in the preview; drag its corner handle to make it bigger or smaller (hold Shift for steps of 0.1). It snaps to the edges and the centre lines. Right-click an item for Hide, Reset position, Bigger, Smaller, and, for the legend, one or two columns and the box. **Layout boxes** shows all items, also hidden ones, as dashed boxes.
+- The positions are kept as fractions of the picture, so they stay in place at every quality (Draft, HD, 4K, square, portrait).
+- **Scale bar**: its length comes from the voxel size of the data, shown in the Data tab. Many files say 1 Å or 0 by mistake; then the Data tab warns you, and you can type the real voxel size there. With **automatic length**, a round number (1, 2 or 5 × 10ⁿ nm) is chosen for each part. **Flat on the picture**, the bar is exact at the centre of the view (switch on Orthographic view for an exact bar everywhere); **lying on the slice**, it is exact in every view.
+
+![Moving the legend; the scale bar](docs/images/11-overlays.png)
+
+### 9. Title and end cards
+
+**+ Add part > Title card** puts a card with the tomogram's name at the start; **End card (thank you)** puts one at the end; **Blank card** puts one at the playhead. Open the card in the Movie tab to set its **background** (a colour, a gradient, a picture, or see-through), its **blocks** of text (with line breaks, size, colour, bold) and pictures (logos with their transparency), and its **fades**: fade in from black, fade out, or dissolve into the next part. Drag the blocks in the preview to place them. Cards hide the legend, slice number and scale bar unless you switch them on for the card.
+
+![A title card](docs/images/12-title-card.png)
+
+### 10. Lighting, shadows and smooth edges
+
+In the Look tab:
+
+- **Lighting**: the **Preset** Default is the lighting of earlier versions. Simple uses one light; Soft adds soft shadows in creases (ambient occlusion; it works on the whole picture); Full adds slice shadows; Flat shows colours only. Set the **direction** with the sliders or by dragging on the ball, and **Brightness**, **Fill light**, **Ambient** and **Shininess**. **Light moves with the camera** keeps the light where the viewer is; without it, the light stays in place and highlights move when the camera turns.
+- **Shadows**: **Structures cast shadows on the tomogram slice**, with **Strength** and **Softness**, lit from the direction above. **Shadows between structures** needs a graphics card and is offered only where TomoReveal's test of the graphics card passes.
+- **Smooth edges** for the preview (Off or Fast). The movie has its own choice in Make the movie (Best is the default).
+
+![Cartoon membranes and vesicles with slice shadows](docs/images/13-cartoon-shadows.png)
+
+### 11. Make the movie
+
+At the end of the **Movie** tab, select the quality, the name and the folder.
+
+- **Save as**: tick any of **MP4** (plays everywhere), **MOV** (the same video in a QuickTime file), **Transparent MOV** (see-through background, for putting the movie over a coloured slide or another video; the tomogram slice stays opaque), and **Editing MOV** (large, high quality, for video editing programs). One render makes all ticked files: `name.mp4`, `name.mov`, `name_transparent.mov`, `name_prores.mov`.
+- **File size**: Balanced, Larger (best quality) or Smaller (about a quarter smaller at nearly the same quality). The resolution never changes.
+- **Codec**: H.264 plays everywhere. **H.265** gives about half the file size at the same quality; it plays on recent Macs, iPhones and in VLC, but Windows may need the HEVC extension and some PowerPoint versions cannot play it. Check before a talk.
+- Transparent backgrounds work in Keynote, Final Cut, Premiere and DaVinci Resolve. Check your presentation program before relying on it.
+- The **estimated file sizes** for every quality and ticked format appear under these choices a few seconds after you stop changing settings. They come from a few frames of your movie; "rough" ones are scaled from HD.
+
+Click **Make movie**. The movie is exactly what the timeline shows. A bar shows the progress and the time that remains. When the movie is complete, the real sizes appear next to the estimates; click **Play movie** to open it in your video player, or **Show folder**.
+
+![The size estimates and the finished movie](docs/images/16-size-table.png)
 
 Save the movies in a folder that is not your data folder.
+
+## Save your work
+
+- **File > Save** (Ctrl+S) saves a project file (`.tomoreveal`). It records where your data files are, which tomogram and segmentations are switched on, and every setting of the movie. It does not copy the data. **File > Open project** (or dropping the project file on the window) brings everything back. The window title shows the project's name, with a * when there are unsaved changes; opening another project, starting over or quitting asks whether to save first.
+- If you move the data and the project together, the project still finds the files. If a file is missing or has changed, one dialog lists them: **Locate...**, **Skip**, or **Use it anyway**. Skipped files are left out; their structures and close-ups come back when you locate the file later.
+- **If TomoReveal crashes**: your tomograms, sessions and segmentation files are only ever read, so a crash cannot damage them. Your settings are autosaved a few seconds after each change and just before a movie starts; when you start TomoReveal again, it offers to **Restore** your work.
+- **If a movie is interrupted** (a crash, a power cut), start TomoReveal, restore or open your project, and press **Make movie** with the same name: it offers to **continue** the movie from where it stopped, as long as the settings are the same. A movie is renamed to its final name only when it is complete, so a half-written file never looks like a finished movie.
+- **Help > Show log folder** opens the folder with error logs, useful when reporting a problem.
 
 ## Dark mode
 
@@ -388,17 +466,18 @@ tomoreveal list    session.ORSSession
 tomoreveal inspect session.ORSSession
 tomoreveal movie   tomogram.mrc --session session.ORSSession --view oblique,top --focus "vesicles" -o movie.mp4
 tomoreveal movie   tomogram.mrc --features tomogram__membrane.mrc --threshold 0.5 --clip 0,400,0,600,10,50
+tomoreveal movie   tomogram.mrc --session session.ORSSession --format mp4,mov-transparent --file-size smaller --scale-bar
 tomoreveal extract session.ORSSession --masks -o segmentation_out
 tomoreveal --help
 ~~~
 
-On a Linux computer without a display, add `--headless` to the `movie` command.
+On a Linux computer without a display, add `--headless` to the `movie` command. `--format` takes `mp4`, `mov`, `mov-transparent` and `mov-prores`; `--codec h265` and `--file-size larger|balanced|smaller` set the file size (`--crf` overrides it); `--scale-bar` adds a scale bar (`auto` or a length in nm) and `--voxel-nm` sets the voxel size when the file's header is wrong. `--frames-dir` also saves every frame as a PNG picture.
 
 `tomoreveal extract` writes the selected Dragonfly segmentation as `labels.mrc` with the names and colours in `classes.json`.
 
 `tomoreveal inspect` prints what TomoReveal reads from a session; see [The structure names are not the ones in Dragonfly](#the-structure-names-are-not-the-ones-in-dragonfly).
 
-`tomoreveal app` shows the controls in a web browser tab on this computer in place of the window. This older interface does not have the clip bars, the Explore tab, the tomogram controls or dark mode.
+`tomoreveal app` shows the controls in a web browser tab on this computer in place of the window. This older interface does not have the clip bars, the Explore tab, the tomogram controls, dark mode, or the features added in 3.4 (projects, overlays, cards, lighting, close-up animations, camera paths, file formats).
 
 ## Scope and data safety
 
@@ -426,6 +505,13 @@ The source code is in the `tomoreveal` folder:
 | `gui_theme.py` | Light and dark themes |
 | `gui_timeline.py` | The timeline under the preview |
 | `gui_movie.py` | Editing the movie (add, delete, split, undo) and the parts list of the Movie tab |
+| `project.py`, `gui_project.py` | Project files, finding moved data, autosave, crash log; the File menu |
+| `encode.py`, `estimate.py`, `gui_export.py` | Writing movies through FFmpeg in chunks (several formats at once), file size estimates |
+| `overlays.py`, `gui_overlays.py` | Legend, slice number, scale bar, title and caption; dragging them in the preview |
+| `cards.py`, `gui_cards.py` | Title and end cards |
+| `look.py`, `gui_look.py` | Lighting, shadows, anti-aliasing, vignette, surface styles |
+| `paths.py`, `gui_paths.py` | Camera paths along structures and through points |
+| `names.py`, `help_texts.py` | Short file names; every tooltip |
 | `cli.py`, `webapp.py`, `demo.py` | Commands, browser interface, demo data |
 
 To run the tests:

@@ -20,7 +20,10 @@ DEFAULTS = {
                      ambient=0.25, specular=0.2, ssao_radius=0.03, ssao_strength=1.0),
     "shadows": dict(slice=dict(on=False, strength=0.5, softness=3.0), real=dict(on=False, strength=0.6)),
     "aa": dict(preview="off", movie=None),  # movie None: from output.aa (True = "ssaa", as before)
+    "vignette": dict(when="never", strength=0.6, size=0.55, softness=0.35, colour="black", shape="round",
+                     blur=dict(on=False, strength=0.5)),
 }
+VIGNETTE_WHEN = (("never", "never"), ("in close-ups", "closeups"), ("always", "always"))
 STYLE_DEFAULTS = dict(kind="normal", outline_width=2, outline_color="black", point_size=4, gloss="shiny")
 
 
@@ -30,6 +33,8 @@ def look_settings(spec):
     sh = own.get("shadows") or {}
     out["shadows"]["slice"].update(sh.get("slice") or {}); out["shadows"]["real"].update(sh.get("real") or {})
     out["aa"].update(own.get("aa") or {})
+    vg = own.get("vignette") or {}
+    out["vignette"].update({k: v for k, v in vg.items() if k != "blur"}); out["vignette"]["blur"].update(vg.get("blur") or {})
     if out["aa"]["movie"] is None:
         out["aa"]["movie"] = "ssaa" if spec.get("output", {}).get("aa", True) else "off"
     return out
@@ -38,7 +43,7 @@ def look_settings(spec):
 def ensure(spec):
     """spec["look"] filled in, for the window, which edits it in place."""
     lk = look_settings(spec); own = spec.setdefault("look", {})
-    for k in ("lighting", "shadows", "aa"):
+    for k in ("lighting", "shadows", "aa", "vignette"):
         own[k] = lk[k]
     return own
 
@@ -107,3 +112,14 @@ def shadow_mask(points_list, k, light_to, shape, softness=3.0, q=4, clip=None):
     full = ndimage.zoom(m, (ny / gy, nx / gx), order=1)[:ny, :nx]
     out = np.zeros((ny, nx), np.float32); out[:full.shape[0], :full.shape[1]] = full
     return np.clip(out, 0, 1)
+
+
+def vignette_weight(W, H, cx, cy, size, softness, shape="round"):
+    """0 in the clear centre, rising smoothly to 1 towards the edges. cx, cy: centre in pixels."""
+    y, x = np.mgrid[0:H, 0:W].astype(np.float32)
+    if shape == "frame":  # follows the frame's proportions
+        r = np.sqrt(((x - cx) / (W / 2)) ** 2 + ((y - cy) / (H / 2)) ** 2) / math.sqrt(2)
+    else:
+        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / (math.hypot(W, H) / 2)
+    u = np.clip((r - float(size)) / max(1e-3, float(softness)), 0, 1)
+    return u * u * (3 - 2 * u)

@@ -4,7 +4,7 @@ import os
 import numpy as np
 
 from .common import hex2rgb
-from .storyboard import Framer, build_timeline, class_spec, clip_box, state_key
+from .storyboard import Framer, build_timeline, class_spec, clip_box, others_of, state_key, target_items
 
 
 def get_font(px, bold=False):
@@ -153,7 +153,10 @@ class Renderer:
             p.SetOrigin(*o)
         # structures
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
-        tid = ds.id_of(tgt["class"]) if tgt is not None and tgt.get("class") is not None else None
+        items = self._focus_items(tgt); whole = {k for k, c in items if c is None}
+        legacy = not isinstance(mode, dict)  # older settings (grey / hide / keep) are drawn exactly as before
+        ocol, oop = others_of(mode)
+        keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
         translucent = False
         for kk, act in self.actors.items():
@@ -161,22 +164,27 @@ class Renderer:
             if not c.get("show", True):
                 act.SetVisibility(False); continue
             op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * all_op
-            act.GetProperty().SetOpacity(op); translucent |= op < 0.999
             col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
-            is_t = tgt is not None and tid == kk and tgt.get("component") is None
-            if e <= 0 or tgt is None or mode == "keep" or is_t:
+            if e <= 0 or not items or keep or kk in whole:
                 act.SetVisibility(True)
-            else:
+            elif legacy:
                 to = (0.27, 0.27, 0.27) if mode == "grey" else bgc
                 col = tuple(a + (b - a) * e for a, b in zip(col, to))
                 act.SetVisibility(not (mode == "hide" and e >= 0.999))
+            else:  # the others: grey / darker / unchanged colour, and their own opacity, both faded in with e
+                to = (0.27, 0.27, 0.27) if ocol == "grey" else tuple(v * 0.3 for v in col) if ocol == "darken" else col
+                col = tuple(a + (b - a) * e for a, b in zip(col, to))
+                op *= 1.0 - e * (1.0 - oop); act.SetVisibility(op > 0.002)
+            act.GetProperty().SetOpacity(op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
         translucent |= self._apply_styles(spec, lk, all_op)
         for act in self.comp_actors.values():
             if act is not None:
                 act.SetVisibility(False)
-        if tid is not None and tgt.get("component") is not None and e > 0 and mode != "keep":
-            act = self._comp_actor(tid, int(tgt["component"]))
+        for tid, comp in items:  # single objects in focus: drawn over their (greyed) structure
+            if comp is None or e <= 0 or keep:
+                continue
+            act = self._comp_actor(tid, int(comp))
             if act is not None:
                 act.SetVisibility(True)
                 act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
@@ -198,15 +206,83 @@ class Renderer:
             cam.parallel_projection = False; cam.view_angle = fr.fov
         self._apply_lighting(lk)
         self._apply_slice_texture(s, spec, lk, show_slice, cb)
+        self._vig = self._vignette_state(s, spec, lk, size)
+        self._apply_blur(self._vig)
         self.pl.renderer.ResetCameraClippingRange()
         self._bar_label = self._prepare_slice_bar(s, spec, size, show_slice) if annotate else None
         if not self.shown:
             self.pl.show(auto_close=False); self.shown = True
         self.pl.render()
         fr_img = self.pl.screenshot(None, transparent_background=bool(transparent))
+        if self._vig is not None and self._vig["a"] > 0.001:
+            fr_img = self._apply_vignette(fr_img, self._vig, transparent)
         if not annotate:
             return fr_img
         return self.annotate(fr_img, s, spec, size, show_slice, transparent)
+
+    def _vignette_state(self, s, spec, lk, size):
+        """Vignette (and background blur) of this frame, or None: the close-up's own settings, else the Look tab's."""
+        part = self._part(spec, s.get("part")) or {}
+        lv = lk["vignette"]; own = part.get("vignette") if part.get("type") == "focus" and isinstance(part.get("vignette"), dict) else None
+        cfg = dict(lv); cfg["blur"] = dict(lv["blur"])
+        if own:
+            cfg.update({k: v for k, v in own.items() if k != "blur"}); cfg["blur"].update(own.get("blur") or {})
+        e = float(s["e"]); items = self._focus_items(s["target"]); in_close = bool(items) and e > 0
+        if own is not None:
+            f = e if (own.get("on", True) and in_close) else 0.0
+        elif lv["when"] == "always":
+            f = 1.0
+        elif lv["when"] == "closeups":
+            f = e if in_close else 0.0
+        else:
+            f = 0.0
+        if f <= 0:
+            return None
+        W, H = size; cx, cy = W / 2, H / 2
+        if in_close:  # centred on the focused objects, wherever they are in the frame
+            try:
+                lo, hi = self.ds.targets_box(s["target"]); c = (np.asarray(lo) + np.asarray(hi)) / 2
+                ren = self.pl.renderer; ren.SetWorldPoint(*c, 1.0); ren.WorldToDisplay(); dx, dy, _ = ren.GetDisplayPoint()
+                cx, cy = min(max(dx, 0), W), min(max(H - dy, 0), H)
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
+        col = (0, 0, 0) if cfg.get("colour", "black") == "black" else tuple(255 * v for v in hex2rgb(spec.get("style", {}).get("bg", "#000000")))
+        blur = float(cfg["blur"]["strength"]) * f if cfg["blur"].get("on") else 0.0
+        return dict(a=float(cfg["strength"]) * f, cx=cx, cy=cy, size=float(cfg["size"]), soft=float(cfg["softness"]),
+                    shape=cfg.get("shape", "round"), colour=col, blur=blur)
+
+    def _apply_vignette(self, img, v, transparent):
+        from .look import vignette_weight
+        H, W = img.shape[:2]
+        key = (W, H, round(v["cx"]), round(v["cy"]), v["size"], v["soft"], v["shape"])
+        if getattr(self, "_vig_w", (None,))[0] != key:
+            self._vig_w = (key, vignette_weight(W, H, v["cx"], v["cy"], v["size"], v["soft"], v["shape"]))
+        w = self._vig_w[1] * v["a"]
+        out = img.astype(np.float32)
+        if transparent and img.shape[2] == 4:
+            out[..., 3] *= 1 - w
+        else:
+            out[..., :3] = out[..., :3] * (1 - w[..., None]) + np.array(v["colour"], np.float32) * w[..., None]
+        return out.astype(np.uint8)
+
+    def _apply_blur(self, v):
+        """Background blur in close-ups: VTK depth of field, focused at the camera's focal point (the focused objects)."""
+        amount = v["blur"] if v else 0.0
+        on = amount > 0.001
+        if on != getattr(self, "_dof", False):
+            self.pl.enable_depth_of_field(automatic_focal_distance=True) if on else self.pl.disable_depth_of_field()
+            self._dof = on
+        if on:
+            self.pl.camera.SetFocalDisk(amount * 0.08 * max(self.shape))
+
+    def _focus_items(self, tgt):
+        """[(structure id, component or None)] of a close-up target that are loaded."""
+        out = []
+        for key, comp in target_items(tgt):
+            k = self.ds.id_of(key)
+            if k is not None:
+                out.append((k, comp))
+        return out
 
     # ---------- lighting, styles, shadows ----------
     def _apply_lighting(self, lk):
@@ -381,10 +457,11 @@ class Renderer:
         P.text_item("title", items["title"], str(style.get("title") or ""), lambda px: (round(px * 1.5), H - round(px * 2.4)),
                     shown("title", True))
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
-        tid = ds.id_of(tgt["class"]) if tgt is not None and tgt.get("class") is not None else None
+        focused = {k for k, _ in self._focus_items(tgt)}
+        keep = mode == "keep" if not isinstance(mode, dict) else others_of(mode) == ("keep", 1.0)
         rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
                 for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
-                and not (tgt is not None and e > 0.5 and mode != "keep" and tid != kk)]
+                and not (focused and e > 0.5 and not keep and kk not in focused)]
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True))

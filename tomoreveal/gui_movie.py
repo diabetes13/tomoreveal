@@ -1,4 +1,6 @@
 """Editing the movie: adding, removing, reordering, splitting parts, undo and redo, and the parts list of the Movie tab."""
+import copy
+
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import storyboard as sb
@@ -180,6 +182,20 @@ class MovieEditor(QtC.QObject):
         self.commit(select=pid)
         self.win.say("Split in two. Use + Add part to put something between the halves.", "ok")
 
+    def split_closeup(self, pid):
+        """One close-up per object in focus, in a row (a quick tour); undo brings the single close-up back."""
+        i = [p["id"] for p in self.spec["shots"]].index(pid); p = self.spec["shots"][i]
+        items = sb.target_items(p.get("target"))
+        if len(items) < 2:
+            return
+        name = self.win.parts_panel._name; new = []
+        for key, comp in items:
+            q = copy.deepcopy(p); q["id"] = sb.new_id(); q["target"] = sb.make_target([(key, comp)])
+            q["caption"] = sb.closeup_caption([(key, comp)], name); new.append(q)
+        self.spec["shots"][i:i + 1] = new
+        self.commit(select=new[0]["id"], show=new[0]["id"])
+        self.win.say(f"{len(new)} close-ups, one for each object. Undo brings the single close-up back.", "ok")
+
     def move_by(self, pid, delta):
         ids = [p["id"] for p in self.spec["shots"]]; i = ids.index(pid)
         if 0 <= i + delta < len(ids):
@@ -313,6 +329,7 @@ STRUCTURES = (("hidden", "none"), ("above the slice", "above"), ("all", "all"), 
 MOTIONS = (("rock", "rock"), ("full spin", "spin"), ("still", "none"))
 FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))
 OTHERS = (("grey", "grey"), ("hidden", "hide"), ("unchanged", "keep"))
+OTHER_COLOURS = (("grey", "grey"), ("darker", "darken"), ("unchanged colour", "keep"))
 
 
 class PartsPanel(QtW.QWidget):
@@ -380,6 +397,8 @@ class PartsPanel(QtW.QWidget):
             menu.addAction("Duplicate", lambda pid=pid: self.win.editor.duplicate(pid))
             menu.addAction("Move up", lambda pid=pid: self.win.editor.move_by(pid, -1)).setEnabled(i > 0)
             menu.addAction("Move down", lambda pid=pid: self.win.editor.move_by(pid, 1)).setEnabled(i < len(self.win.spec["shots"]) - 1)
+            if p["type"] == "focus" and len(sb.target_items(p.get("target"))) > 1:
+                menu.addAction("Make a close-up for each", lambda pid=pid: self.win.editor.split_closeup(pid))
             menu.addSeparator(); menu.addAction("Delete", lambda pid=pid: self.win.editor.delete(pid))
             for w, stretch in ((arrow, 0), (tick, 0), (num, 0), (name, 1), (dur, 0), (more, 0)):
                 h.addWidget(w, stretch)
@@ -589,6 +608,115 @@ class PartsPanel(QtW.QWidget):
 
     def _focus_rows(self, pid, p, form):
         win = self.win; ds = win.st.ds
+        tgt = p.get("target") or {}; items = sb.target_items(tgt)
+        if "items" not in tgt and len(items) <= 1:  # one structure or one object, as before
+            self._single_target_rows(pid, p, form)
+        else:
+            form.addRow("Objects in focus", self._items_list(pid, p))
+        form.addRow("", self._focus_buttons(pid, p))
+        oc, oo = sb.others_of(p.get("others", "grey"))
+        orow = QtW.QWidget(); h = QtW.QHBoxLayout(orow); h.setContentsMargins(0, 0, 0, 0)
+        col = _combo(OTHER_COLOURS, oc, lambda v: self.set(pid, "others", dict(colour=v, opacity=sb.others_of(self.part(pid).get("others"))[1])))
+        col.setToolTip("Colour of the structures that are not in focus")
+        op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo))
+        op.setToolTip("How visible the other structures stay; 0 % hides them")
+        op.valueChanged.connect(lambda v: self.set(pid, "others", dict(colour=sb.others_of(self.part(pid).get("others"))[0], opacity=v / 100)))
+        h.addWidget(col); h.addWidget(op); h.addStretch(1)
+        form.addRow("Other structures", orow)
+        form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v)))
+        form.addRow("Zoom", _spin(0.3, 4, float(p.get("zoom", 1)), lambda v: self.set(pid, "zoom", v), step=0.1, suffix=" x"))
+        form.addRow("Tilt", _spin(-1, 85, float(p["tilt"]) if p.get("tilt") is not None else -1,
+                                  lambda v: self.set(pid, "tilt", None if v < 0 else v), step=5, suffix="\u00b0", decimals=0,
+                                  special="automatic"))
+        form.addRow("Vignette", self._vignette_row(pid, p))
+
+    def _vignette_row(self, pid, p):
+        """As in the Look tab, or this close-up's own vignette (strength) and background blur."""
+        v = p.get("vignette") if isinstance(p.get("vignette"), dict) else None
+        w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+        mode = _combo((("as in the Look tab", "default"), ("on", "on"), ("off", "off")),
+                      "default" if v is None else ("on" if v.get("on", True) else "off"),
+                      lambda m: self.set(pid, "vignette", None if m == "default" else dict(self.part(pid).get("vignette") or {}, on=m == "on"),
+                                         rebuild=True))
+        mode.setToolTip("Darkens the edges of the picture around the objects in focus")
+        h.addWidget(mode)
+        if v is not None and v.get("on", True):
+            st = QtW.QSpinBox(); st.setRange(0, 100); st.setSuffix(" %"); st.setPrefix("strength "); st.setValue(round(100 * float(v.get("strength", 0.6))))
+            st.valueChanged.connect(lambda x: self.set(pid, "vignette", dict(self.part(pid)["vignette"], strength=x / 100)))
+            bl = QtW.QCheckBox("blur the background"); bl.setChecked(bool((v.get("blur") or {}).get("on")))
+            bl.setToolTip("Things nearer or further away than the objects in focus are blurred (depth of field)")
+            bl.toggled.connect(lambda on: self.set(pid, "vignette", dict(self.part(pid)["vignette"],
+                                                                         blur=dict((self.part(pid)["vignette"].get("blur") or {}), on=bool(on), strength=0.5))))
+            h.addWidget(st); h.addWidget(bl)
+        h.addStretch(1)
+        return w
+
+    def _name(self, key):
+        ds, spec = self.win.st.ds, self.win.spec; k = ds.id_of(key)
+        return spec["classes"].get(key, {}).get("name") or (ds.classes[k]["name"] if k is not None else "structure")
+
+    def set_items(self, pid, items):
+        """New objects in focus; the caption follows unless the user wrote their own."""
+        p = self.part(pid)
+        if p is None:
+            return
+        old = sb.closeup_caption(sb.target_items(p.get("target")), self._name)
+        p["target"] = sb.make_target(items)
+        if not p.get("caption") or p.get("caption") == old:
+            p["caption"] = sb.closeup_caption(items, self._name)
+        self.win.editor.commit(select=pid)
+        if self.open_id == pid:
+            self.fill_details(pid)
+
+    def _items_list(self, pid, p):
+        ds = self.win.st.ds; w = QtW.QWidget(); v = QtW.QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(1)
+        items = sb.target_items(p.get("target"))
+        for i, (key, comp) in enumerate(items):
+            k = ds.id_of(key); row = QtW.QHBoxLayout()
+            pm = QtG.QPixmap(12, 12); pm.fill(QtG.QColor(self.win.spec["classes"].get(key, {}).get("color", "#888888")))
+            sw = QtW.QLabel(); sw.setPixmap(pm); row.addWidget(sw)
+            if k is None:
+                text = f"{self._name(key)} (structure not loaded)"
+            elif comp is None:
+                text = f"{self._name(key)} (whole structure)"
+            else:
+                try:
+                    n = int(ds.components(k)[2][int(comp)])
+                except (IndexError, KeyError, TypeError):
+                    n = 0
+                text = f"one object of {self._name(key)}, {n:,} voxels"
+            lab = QtW.QLabel(text); row.addWidget(lab, 1)
+            rm = QtW.QToolButton(); rm.setText("\u2715"); rm.setToolTip("Take this out of the close-up")
+            rm.clicked.connect(lambda _=False, i=i: self.set_items(pid, [it for j, it in enumerate(sb.target_items(self.part(pid)["target"])) if j != i]))
+            row.addWidget(rm); v.addLayout(row)
+        if not items:
+            lab = QtW.QLabel("nothing yet: tick structures or click objects in the preview"); lab.setStyleSheet(DIM); v.addWidget(lab)
+        return w
+
+    def _focus_buttons(self, pid, p):
+        """'Objects in focus' check list of whole structures, and picking objects in the preview."""
+        w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+        b = QtW.QToolButton(); b.setText("Structures in focus \u25be"); b.setPopupMode(QtW.QToolButton.InstantPopup)
+        b.setToolTip("Tick whole structures to show them together in this close-up")
+        menu = QtW.QMenu(b); b.setMenu(menu)
+
+        def fill():
+            menu.clear(); items = sb.target_items(self.part(pid).get("target"))
+            for c in (self.win.info or {}).get("structures", []):
+                if not c.get("mesh"):
+                    continue
+                a = menu.addAction(self._name(c["key"])); a.setCheckable(True); a.setChecked((c["key"], None) in items)
+                a.toggled.connect(lambda on, key=c["key"]: self.set_items(pid, [it for it in sb.target_items(self.part(pid)["target"])
+                                                                                if it != (key, None)] + ([(key, None)] if on else [])))
+        menu.aboutToShow.connect(fill)
+        pick = QtW.QPushButton("+ Click objects in the preview"); pick.setCheckable(True); pick.setChecked(self.win.multi_pick == pid)
+        pick.setToolTip("Click objects to add them; click again to take one out; Shift-click adds the whole structure. Esc ends.")
+        pick.toggled.connect(lambda on: self.win.start_multi_pick(pid) if on else self.win.end_multi_pick())
+        h.addWidget(b); h.addWidget(pick); h.addStretch(1)
+        return w
+
+    def _single_target_rows(self, pid, p, form):
+        win = self.win; ds = win.st.ds
         form.addRow("Structure", self.structure_combo(pid, p))
         tgt = p.get("target") or {}; k = ds.id_of(tgt.get("class")) if tgt.get("class") is not None else None
         obj = QtW.QComboBox(); obj.addItem("whole structure", "whole")
@@ -611,9 +739,3 @@ class PartsPanel(QtW.QWidget):
                 win.start_object_pick(pid, ds.key_of(k))
         obj.activated.connect(chose)
         form.addRow("Object", obj)
-        form.addRow("Other structures", _combo(OTHERS, p.get("others", "grey"), lambda v: self.set(pid, "others", v)))
-        form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v)))
-        form.addRow("Zoom", _spin(0.3, 4, float(p.get("zoom", 1)), lambda v: self.set(pid, "zoom", v), step=0.1, suffix=" x"))
-        form.addRow("Tilt", _spin(-1, 85, float(p["tilt"]) if p.get("tilt") is not None else -1,
-                                  lambda v: self.set(pid, "tilt", None if v < 0 else v), step=5, suffix="\u00b0", decimals=0,
-                                  special="automatic"))

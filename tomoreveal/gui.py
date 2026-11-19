@@ -230,6 +230,7 @@ def build_gui(args):
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
             self.selected_part = None  # id of the part selected on the timeline
             self.pick_for = None       # (part id, structure key) while picking the object of a close-up
+            self.multi_pick = None     # part id while clicking objects for a close-up of several objects
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self._struct_open = set()  # structures whose settings are open in the Structures tab
@@ -895,9 +896,15 @@ def build_gui(args):
                     if cid in self.vox_lbl:
                         self.vox_lbl[cid].setText(f"{r['voxels']:,}")
                     # object numbers change with the threshold: those close-ups show the whole structure again
+                    from .storyboard import make_target, target_items
                     for s in self.spec["shots"]:
                         if s["type"] == "focus" and (s.get("target") or {}).get("class") == key and s["target"].get("component") is not None:
                             s["target"] = {"class": key}; reset += 1
+                        elif s["type"] == "focus" and "items" in (s.get("target") or {}):
+                            its = target_items(s["target"])
+                            if any(k2 == key and c is not None for k2, c in its):
+                                new = list(dict.fromkeys((k2, None if k2 == key else c) for k2, c in its))
+                                s["target"] = make_target(new); reset += 1
                 self.say("Threshold updated." + (f" {reset} close-up{'s' if reset > 1 else ''} of one object now show{'' if reset > 1 else 's'} "
                                                  "the whole structure, because the objects changed." if reset else ""), "ok")
             except UserError as exc:
@@ -1010,7 +1017,50 @@ def build_gui(args):
                 self.req = self._main_req(); self.schedule(0)
                 self.say("Click the structure you want a close-up of.")
 
+        def start_multi_pick(self, pid):
+            """'+ Click objects in the preview' of a close-up: each click adds or removes one object."""
+            if self.pick_mode:
+                self.pick_btn.setChecked(False)
+            self.multi_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.req = self._main_req(); self.schedule(0)
+            self.say("Click objects to add them to the close-up; click one again to take it out; Shift-click adds the whole "
+                     "structure. Press Esc when done.")
+
+        def end_multi_pick(self):
+            if self.multi_pick is None:
+                return
+            pid = self.multi_pick; self.multi_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
+            if self.parts_panel.open_id == pid:
+                self.parts_panel.fill_details(pid)
+            self.req = {"at": {"part": pid, "u": 0.5}}; self.schedule(0); self.say("")
+
+        def keyPressEvent(self, e):
+            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode):
+                self.end_multi_pick(); self.pick_btn.setChecked(False); return
+            super().keyPressEvent(e)
+
+        def _multi_click(self, fx, fy):
+            from .storyboard import target_items
+            try:
+                p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy})
+            except Exception as exc:
+                self.say(f"Could not pick: {exc}", "err"); return
+            if not p.get("found"):
+                self.say("Nothing there. Click directly on a coloured structure.", "err"); return
+            part = self.parts_panel.part(self.multi_pick)
+            if part is None:
+                self.end_multi_pick(); return
+            whole = bool(QtW.QApplication.keyboardModifiers() & QtC.Qt.ShiftModifier) or p.get("component") is None
+            it = (p["class"], None if whole else int(p["component"]))
+            items = target_items(part.get("target"))
+            items = [x for x in items if x != it] if it in items else items + [it]
+            self.parts_panel.set_items(self.multi_pick, items)
+            self.req = self._main_req(); self.schedule(0)
+            self.say(f"{len(items)} in focus. Click more, or press Esc when done.", "ok")
+
         def on_click(self, fx, fy):
+            if self.multi_pick and self.st.has_segmentation and self.gen is None:
+                return self._multi_click(fx, fy)
             if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:
                 return
             try:

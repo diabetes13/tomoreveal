@@ -73,6 +73,50 @@ def class_spec(spec, ds, k):
 TOMOGRAM_MODES = ("default", "shown", "faded", "hidden")
 
 
+# ---- close-up targets and the other structures ----
+def target_items(tgt):
+    """[(structure key, component or None)] of a close-up target: {"items": [{"structure", "component"}, ...]} (3.4),
+    or the older single {"class", "component"}."""
+    if not tgt:
+        return []
+    if isinstance(tgt.get("items"), list):
+        return [(it.get("structure"), it.get("component")) for it in tgt["items"] if it.get("structure") is not None]
+    if tgt.get("class") is not None:
+        return [(tgt["class"], tgt.get("component"))]
+    return []
+
+
+def make_target(items):
+    """A close-up target from [(structure key, component or None)]."""
+    return {"items": [{"structure": k, "component": None if c is None else int(c)} for k, c in items]}
+
+
+OTHER_COLOURS = ("keep", "grey", "darken")
+
+
+def others_of(v):
+    """(colour, opacity) of the other structures during a close-up. Older settings: grey = (grey, 1), hide = (keep, 0),
+    keep = (keep, 1)."""
+    if isinstance(v, dict):
+        c = v.get("colour", "grey")
+        return (c if c in OTHER_COLOURS else "grey"), float(min(1.0, max(0.0, v.get("opacity", 1.0))))
+    return {"grey": ("grey", 1.0), "hide": ("keep", 0.0), "keep": ("keep", 1.0)}.get(v, ("grey", 1.0))
+
+
+def closeup_caption(items, name_of):
+    """Default caption: the structure's name for one item; "A and B" for two structures; "N objects" otherwise."""
+    if not items:
+        return ""
+    keys = list(dict.fromkeys(k for k, _ in items))
+    if len(items) == 1:
+        return name_of(items[0][0])
+    if len(keys) == 2 and all(c is None for _, c in items):
+        return f"{name_of(keys[0])} and {name_of(keys[1])}"
+    if len(keys) == 1:
+        return f"{len(items)} {name_of(keys[0])} objects"
+    return f"{len(items)} objects"
+
+
 def tomogram_setting(mode="default", opacity=0.4, fade=0.5):
     """How a shot shows the tomogram slice: as the default (Look tab), shown, faded to `opacity`, or hidden;
     the change happens over `fade` seconds at the start of the shot."""
@@ -261,15 +305,18 @@ def part_name(p, spec=None, ds=None):
             return "View from here"
         return f"Overview ({ {'rock': 'rock', 'spin': 'full spin', 'none': 'still'}.get(p.get('motion'), p.get('motion')) })"
     if t == "focus":
-        tgt = p.get("target") or {}
-        name = None
-        if spec is not None and ds is not None and tgt.get("class") is not None:
-            k = ds.id_of(tgt["class"])
-            if k is not None:
-                name = class_spec(spec, ds, k).get("name", ds.classes[k]["name"])
-        if name is None:
+        items = target_items(p.get("target"))
+        names = []
+        if spec is not None and ds is not None:
+            for key, _ in items:
+                k = ds.id_of(key)
+                if k is not None:
+                    names.append(class_spec(spec, ds, k).get("name", ds.classes[k]["name"]))
+        if not names:
             return f"Close-up: {p.get('caption') or 'structure'}"
-        return f"Close-up: one object of {name}" if tgt.get("component") is not None else f"Close-up: {name}"
+        if len(items) > 1:
+            return f"Close-up: {closeup_caption(items, lambda key: names[[k for k, _ in items].index(key)])}"
+        return f"Close-up: one object of {names[0]}" if items[0][1] is not None else f"Close-up: {names[0]}"
     if t == "hold":
         return "Hold"
     if t == "card":
@@ -452,7 +499,7 @@ def build_plan(spec, ds):
         elif typ == "focus":
             tgt = part.get("target") or {}
             try:
-                blo, bhi = ds.target_box(tgt)
+                blo, bhi = ds.targets_box(tgt)
             except (KeyError, IndexError, TypeError, ValueError):
                 problems[part.get("id")] = "structure not loaded"
                 continue
@@ -668,5 +715,6 @@ class History:
 
 def state_key(s):
     p = s["pose"]
-    return (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), s["others"],
+    oth = s["others"] if not isinstance(s["others"], dict) else json.dumps(s["others"], sort_keys=True)
+    return (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), oth,
             s["caption"], tuple(np.round(p["c"], 2)), round(p["tilt"], 3), round(p["az"] % 360.0, 3), round(p["dist"], 2))

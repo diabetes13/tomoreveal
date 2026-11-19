@@ -110,6 +110,28 @@ class LookControls(QtC.QObject):
         self.real_sh.toggled.connect(lambda v: self.set_shadow("real", on=bool(v))); f.addRow(self.real_sh)
         self.real_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_shadow("real", strength=v / 100))
         f.addRow("Strength", self.real_strength)
+        # vignette
+        g = QtW.QGroupBox("Vignette (darker edges)"); self.vig_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        self.vig_when = QtW.QComboBox()
+        for t, d in lk.VIGNETTE_WHEN:
+            self.vig_when.addItem(t, d)
+        self.vig_when.setToolTip("Default for every close-up (each close-up can choose on its own), or for the whole movie")
+        self.vig_when.activated.connect(lambda j: self.set_vig(when=self.vig_when.itemData(j))); f.addRow("Use", self.vig_when)
+        self.vig_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_vig(strength=v / 100))
+        self.vig_size = _slider(20, 90, lambda v: f"{v} %", lambda v: self.set_vig(size=v / 100))
+        self.vig_size.setToolTip("Size of the clear centre")
+        self.vig_soft = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set_vig(softness=v / 100))
+        f.addRow("Strength", self.vig_strength); f.addRow("Clear centre", self.vig_size); f.addRow("Softness", self.vig_soft)
+        row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+        self.vig_col = QtW.QComboBox(); self.vig_col.addItem("black", "black"); self.vig_col.addItem("background colour", "background")
+        self.vig_col.activated.connect(lambda j: self.set_vig(colour=self.vig_col.itemData(j)))
+        self.vig_shape = QtW.QComboBox(); self.vig_shape.addItem("round", "round"); self.vig_shape.addItem("frame shaped", "frame")
+        self.vig_shape.activated.connect(lambda j: self.set_vig(shape=self.vig_shape.itemData(j)))
+        h.addWidget(self.vig_col); h.addWidget(self.vig_shape); h.addStretch(1); f.addRow("Colour and shape", row)
+        self.vig_blur = QtW.QCheckBox("Blur the background in close-ups")
+        self.vig_blur.setToolTip("Things nearer or further away than the objects in focus are blurred (depth of field)")
+        self.vig_blur.toggled.connect(lambda v: self.set_vig(blur=dict(lk.look_settings(self.win.spec)["vignette"]["blur"], on=bool(v))))
+        f.addRow(self.vig_blur)
         # anti-aliasing in the preview
         g = QtW.QGroupBox("Smooth edges (anti-aliasing)"); layout.addWidget(g); f = QtW.QFormLayout(g)
         self.aa_prev = QtW.QComboBox()
@@ -148,6 +170,11 @@ class LookControls(QtC.QObject):
         if L is not None:
             L["shadows"][which].update(kw); self.win.schedule()
 
+    def set_vig(self, **kw):
+        L = self._look()
+        if L is not None:
+            L["vignette"].update(kw); self.win.schedule()
+
     def set_aa(self, which, v):
         L = self._look()
         if L is not None:
@@ -185,6 +212,11 @@ class LookControls(QtC.QObject):
         self.real_sh.setToolTip("Structures shadow each other. Needs a lighting preset other than Default." if ok else why)
         _setv(self.real_strength, 100 * float(sh["real"]["strength"]))
         self.aa_prev.setCurrentIndex(max(0, self.aa_prev.findData(L["aa"]["preview"])))
+        v = L["vignette"]
+        self.vig_when.setCurrentIndex(max(0, self.vig_when.findData(v["when"])))
+        _setv(self.vig_strength, 100 * float(v["strength"])); _setv(self.vig_size, 100 * float(v["size"])); _setv(self.vig_soft, 100 * float(v["softness"]))
+        self.vig_col.setCurrentIndex(1 if v.get("colour") == "background" else 0); self.vig_shape.setCurrentIndex(1 if v.get("shape") == "frame" else 0)
+        _quiet(self.vig_blur, lambda: self.vig_blur.setChecked(bool(v["blur"].get("on"))))
 
 
 def style_rows(win, form, key):

@@ -307,6 +307,15 @@ class Dataset:
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
         return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1)
 
+    def targets_box(self, tgt):
+        """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""
+        from .storyboard import target_items
+        items = target_items(tgt)
+        if not items:
+            raise KeyError("no target")
+        boxes = [self.target_box({"class": k, "component": c}) for k, c in items]
+        return np.min([b[0] for b in boxes], axis=0), np.max([b[1] for b in boxes], axis=0)
+
     def target_box(self, tgt):
         """Padded (lo, hi) box in (x,y,z) voxels around a structure or one of its connected objects."""
         k = self.id_of(tgt["class"])

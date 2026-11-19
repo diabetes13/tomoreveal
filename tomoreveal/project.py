@@ -126,12 +126,28 @@ def studio_sources(st, project_path=None, fingerprints=True):
     return out
 
 
+def card_pictures(spec):
+    """Paths of the pictures used on cards (backgrounds and picture blocks)."""
+    out = []
+    for p in (spec or {}).get("shots", []):
+        if p.get("type") != "card":
+            continue
+        bg = p.get("background") or {}
+        if bg.get("kind") == "image" and bg.get("image"):
+            out.append(bg["image"])
+        out += [b["path"] for b in p.get("blocks", []) if b.get("kind") == "image" and b.get("path")]
+    return list(dict.fromkeys(out))
+
+
 def make_project(st, spec, ui=None, project_path=None, fingerprints=True, extra=None):
     """Project data for what a Studio has loaded plus the movie settings. `extra`: unknown keys read earlier, kept."""
     data = dict(extra or {})
     data.update(format=FORMAT, schema=SCHEMA, app_version=__version__,
                 saved=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                sources=studio_sources(st, project_path, fingerprints), tomogram_source=st.tomo_source,
+                sources=studio_sources(st, project_path, fingerprints) + [
+                    (file_entry if fingerprints else (lambda k, kind, p, pp: dict(key=k, kind=kind, path=p)))("image:" + p, "image", p, project_path)
+                    for p in card_pictures(spec)],
+                tomogram_source=st.tomo_source,
                 tomogram_auto=bool(st._tomo_auto),
                 segmentation_enabled={s["key"]: bool(s["enabled"]) for s in st.seg_sources},
                 spec=copy.deepcopy(spec), ui=dict(ui or {}))
@@ -230,7 +246,7 @@ def load_into(st, data, resolved, log=print):
     """Load the found sources of a project into an empty Studio and switch on what was switched on.
     resolved: resolve_sources() after the user's choices; entries with path None are skipped. Returns st.info()."""
     mapping = path_mapping(resolved)
-    use = [r for r in resolved if r.get("path")]
+    use = [r for r in resolved if r.get("path") and r["entry"].get("kind") != "image"]
     paths = [os.path.abspath(r["path"]) for r in use]
     kinds = {os.path.abspath(r["path"]): r["entry"].get("kind") for r in use}
     st._register(paths, as_features=[p for p in paths if kinds[p] == "scores"],
@@ -253,7 +269,18 @@ def load_into(st, data, resolved, log=print):
 
 def project_spec(data, resolved):
     """The project's movie settings with keys rewritten for files found elsewhere."""
-    return remap(copy.deepcopy(data.get("spec")), path_mapping(resolved)) if data.get("spec") else None
+    if not data.get("spec"):
+        return None
+    m = path_mapping(resolved); sp = remap(copy.deepcopy(data["spec"]), m)
+    for p in sp.get("shots", []):  # pictures on cards that were found somewhere else
+        if p.get("type") == "card":
+            bg = p.get("background") or {}
+            if bg.get("image") in m:
+                bg["image"] = m[bg["image"]]
+            for b in p.get("blocks", []):
+                if b.get("path") in m:
+                    b["path"] = m[b["path"]]
+    return sp
 
 
 # ---------------------------------------------------------------------------------------------------------------

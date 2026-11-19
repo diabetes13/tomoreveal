@@ -104,8 +104,17 @@ def default_opacity(spec, has_tomo=True):
 #   hold      nothing moves
 # Never address a part by its position in the list: use its id.
 # ---------------------------------------------------------------------------------------------------------------
-PART_TYPES = ("slide", "overview", "focus", "hold")
-PRESETS = ("slide_up", "reveal", "overview", "view", "focus", "hold")
+PART_TYPES = ("slide", "overview", "focus", "hold", "card")
+PRESETS = ("slide_up", "reveal", "overview", "view", "focus", "hold", "title_card", "end_card", "card")
+CARD_TRANSITIONS = ("fade", "dissolve", "cut")
+
+
+def text_block(text, role="text", size=1.2, x=0.5, y=0.5, anchor="middle-center", color="#ffffff", bold=False, align="center"):
+    return dict(kind="text", text=text, role=role, size=size, x=x, y=y, anchor=anchor, color=color, bold=bold, align=align)
+
+
+def image_block(path, height=0.12, x=0.97, y=0.95, anchor="bottom-right"):
+    return dict(kind="image", path=path, height=height, x=x, y=y, anchor=anchor)
 VIEW_TRANSITION = 1.5  # seconds of camera flight into a "View from here" part
 CLOSEUP_TRANSITION = 1.3  # seconds of camera flight into and out of a close-up
 OTHER_TRANSITION = 0.5
@@ -139,6 +148,17 @@ def new_part(kind, **fields):
         p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30)
     elif kind == "hold":
         p = _common(type="hold", seconds=2)
+    elif kind in ("card", "title_card", "end_card"):
+        title = fields.pop("title", None)
+        if kind == "title_card":
+            blocks = [text_block(title or "Title", "title", 2.6, 0.5, 0.42, bold=True), text_block("", "subtitle", 1.2, 0.5, 0.55)]
+        elif kind == "end_card":
+            blocks = [text_block(title or "Thank you", "title", 2.6, 0.5, 0.42, bold=True),
+                      text_block("", "subtitle", 1.0, 0.5, 0.56)]
+        else:
+            blocks = []
+        p = _common(type="card", seconds=4, background=dict(kind="color", color="#000000", color2="#1c1f26", image=None),
+                    blocks=blocks, fade_in=0.6, fade_out=0.6, transition_to_next="fade")
     else:
         raise ValueError(f"unknown kind of part: {kind}")
     p.update(fields)
@@ -187,6 +207,9 @@ def migrate_spec(spec):
             p.setdefault("others", "grey"); p.setdefault("motion", "orbit"); p.setdefault("zoom", 1.0); p.setdefault("angle", 30)
         elif p["type"] == "slide":
             p.setdefault("from", "first"); p.setdefault("to", "last"); p.setdefault("structures", "keep")
+        elif p["type"] == "card":
+            p.setdefault("background", dict(kind="color", color="#000000", color2="#1c1f26", image=None)); p.setdefault("blocks", [])
+            p.setdefault("fade_in", 0.6); p.setdefault("fade_out", 0.6); p.setdefault("transition_to_next", "fade")
     return spec
 
 
@@ -249,6 +272,9 @@ def part_name(p, spec=None, ds=None):
         return f"Close-up: one object of {name}" if tgt.get("component") is not None else f"Close-up: {name}"
     if t == "hold":
         return "Hold"
+    if t == "card":
+        first = next((b.get("text", "").strip().splitlines()[0] for b in p.get("blocks", []) if b.get("kind") == "text" and b.get("text", "").strip()), "")
+        return f"Card: {first}" if first else "Card (empty)"
     return str(t)
 
 
@@ -257,7 +283,7 @@ def _mark_label(p):
     if t == "slide":
         f, to, s = p.get("from"), p.get("to"), p.get("structures")
         return "Slices" if s == "none" else "Reveal" if s in ("above", "all") and (f, to) == ("last", "first") else "Slide"
-    return {"overview": "Overview", "hold": "Hold"}.get(t) or p.get("caption") or "Focus"
+    return {"overview": "Overview", "hold": "Hold", "card": "Card"}.get(t) or p.get("caption") or "Focus"
 
 
 def _pause_frames(fps, seconds):
@@ -325,7 +351,7 @@ def build_plan(spec, ds):
         return int(min(nz - 1, max(0, int(x))))
 
     frames, marks, segments, problems = [], [], [], {}
-    st = dict(k=z0, reveal=False, cut=None, slice=base, e=0.0, target=None, others="grey", caption="")
+    st = dict(k=z0, reveal=False, cut=None, slice=base, e=0.0, target=None, others="grey", caption="", card=None)
     pose = [ov()]
     ramp = {}  # the tomogram fade at the start of the current part
     cur = dict(id=None, index=-1, type=None)
@@ -467,6 +493,29 @@ def build_plan(spec, ds):
             start_fade(part)
             st["caption"] = part.get("caption", "")
             emit(n, lambda u: {}, "main", _mark_label(part))
+        elif typ == "card":
+            ramp.clear()
+            fi = max(0, round(fps * float(part.get("fade_in", 0.6) or 0))); fo = max(0, round(fps * float(part.get("fade_out", 0.6) or 0)))
+            how = part.get("transition_to_next", "fade")
+            fo = 0 if how == "cut" else fo
+            pid = part.get("id"); cap = part.get("caption", "")
+
+            def card(u, n=n, fi=fi, fo=fo, how=how, pid=pid, cap=cap):
+                i = int(round(u * (n - 1))) if n > 1 else 0
+                a = 1.0
+                if fi and i < fi:
+                    a = (i + 1) / (fi + 1)
+                d = dict(card=pid, card_fade=1.0, dissolve=0.0, caption=cap)
+                if fo and i >= n - fo:
+                    q = (i - (n - fo) + 1) / (fo + 1)
+                    if how == "dissolve":
+                        d["dissolve"] = q
+                    else:
+                        a = min(a, 1 - q)
+                d["card_fade"] = a
+                return d
+            emit(n, card, "main", _mark_label(part))
+            st.update(card=None, card_fade=1.0, dissolve=0.0, caption="")
     if st["e"] > 0 and spec.get("return_to_overview", True):
         ramp.clear(); cur.update(index=len(shots))  # the flight back belongs to the last part shown
         p0, e0, s0 = pose[0], st["e"], st["slice"]
@@ -479,6 +528,12 @@ def build_plan(spec, ds):
         if has_seg:
             need_structures()
         emit(1, lambda u: {}, "main")
+    for i, f in enumerate(frames):  # a dissolve blends a card with the first frame after it
+        if f.get("dissolve"):
+            j = i + 1
+            while j < len(frames) and frames[j].get("card") == f["card"]:
+                j += 1
+            f["dissolve_to"] = frames[j] if j < len(frames) else None
     from .overlays import add_bar_lengths
     add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
     return Plan(frames, segments, marks, fps, problems)

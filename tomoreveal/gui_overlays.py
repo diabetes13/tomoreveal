@@ -175,6 +175,32 @@ class OverlayDrag(QtC.QObject):
     def __init__(self, win):
         super().__init__(win); self.win = win; self.drag = None; self.hover_name = None; self.guides = []
 
+    # ---- items: overlay items, and the text / picture blocks of the card under the playhead ----
+    def card(self):
+        w = self.win; plan = w.timeline.canvas.plan
+        if w.spec is None or plan is None or not (0 <= w.frame < len(plan.frames)):
+            return None
+        pid = plan.frames[w.frame].get("card")
+        return next((p for p in w.spec["shots"] if p["id"] == pid), None) if pid else None
+
+    def item(self, name):
+        if name.startswith("block:"):
+            c = self.card(); i = int(name[6:])
+            return c["blocks"][i] if c and i < len(c.get("blocks", [])) else None
+        return ov.overlay_settings(self.win.spec)[name]
+
+    def update(self, name, **kw):
+        if name.startswith("block:"):
+            it = self.item(name)
+            if it is not None:
+                it.update(kw)
+        else:
+            ov.set_item(self.win.spec, name, **kw)
+
+    @staticmethod
+    def size_field(item):
+        return "height" if item.get("kind") == "image" else "size"
+
     # ---- geometry ----
     def image_size(self):
         img = self.win.prev._img
@@ -192,9 +218,10 @@ class OverlayDrag(QtC.QObject):
     def hit(self, f):
         if f is None:
             return None
-        show_all = self.win.toolbar.boxes.isChecked()
-        for n in ("caption", "scale_bar", "title", "slice_label", "legend"):
-            r = self.rects().get(n)
+        show_all = self.win.toolbar.boxes.isChecked(); rects = self.rects()
+        blocks = sorted((n for n in rects if n.startswith("block:")), key=lambda n: -int(n[6:])) if self.card() else []
+        for n in blocks + ["caption", "scale_bar", "title", "slice_label", "legend"]:
+            r = rects.get(n)
             if r and (r[1] or show_all):
                 x0, y0, x1, y1 = r[0]
                 if x0 <= f[0] <= x1 and y0 <= f[1] <= y1:
@@ -206,7 +233,10 @@ class OverlayDrag(QtC.QObject):
         r = self.rects().get(name)
         if not r:
             return None
-        x0, y0, x1, y1 = r[0]; a = ov.overlay_settings(self.win.spec)[name].get("anchor", "top-left")
+        it = self.item(name)
+        if it is None:
+            return None
+        x0, y0, x1, y1 = r[0]; a = it.get("anchor") or "top-left"
         v, hz = a.split("-")
         return (x0 if hz == "right" else x1, y0 if v == "bottom" else y1)
 
@@ -223,23 +253,26 @@ class OverlayDrag(QtC.QObject):
         if w.spec is None or w.pick_mode or w.gen is not None or w.busy or f is None:
             return False
         name = self.hit(f)
-        hs = [n for n in self.rects() if self.on_handle(n, f) and (self.rects()[n][1] or w.toolbar.boxes.isChecked())]
+        hs = [n for n in self.rects() if (not n.startswith("block:") or self.card()) and self.on_handle(n, f)
+              and (self.rects()[n][1] or w.toolbar.boxes.isChecked())]
         if hs:
             name = hs[0]; mode = "resize"
         elif name:
             mode = "move"
         else:
             return False
-        box = self.rects()[name][0]; item = ov.overlay_settings(w.spec)[name]
-        if item.get("x") is None:  # at its default place: give it an explicit position first (nothing moves)
+        box = self.rects()[name][0]; item = self.item(name)
+        if item is None:
+            return False
+        if item.get("x") is None or item.get("y") is None:  # at its default place: give it an explicit position (nothing moves)
             sz = self.image_size(); anchor, ax, ay = ov.anchor_for([box[0] * sz[0], box[1] * sz[1], box[2] * sz[0], box[3] * sz[1]], *sz)
-            ov.set_item(w.spec, name, x=ax, y=ay, anchor=anchor if mode == "move" else item.get("anchor", anchor))
+            self.update(name, x=ax, y=ay, anchor=anchor if mode == "move" else item.get("anchor") or anchor)
             if mode == "resize":  # keep the anchor where it is, so the box grows away from it
-                v, hz = item.get("anchor", anchor).split("-")
-                ov.set_item(w.spec, name, x={"left": box[0], "center": (box[0] + box[2]) / 2, "right": box[2]}[hz],
+                v, hz = (item.get("anchor") or anchor).split("-")
+                self.update(name, x={"left": box[0], "center": (box[0] + box[2]) / 2, "right": box[2]}[hz],
                             y={"top": box[1], "middle": (box[1] + box[3]) / 2, "bottom": box[3]}[v])
-        item = ov.overlay_settings(w.spec)[name]
-        self.drag = dict(name=name, mode=mode, f0=f, box0=box, size0=float(item.get("size", 1.0)),
+        item = self.item(name); fld = self.size_field(item)
+        self.drag = dict(name=name, mode=mode, f0=f, box0=box, size0=float(item.get(fld, 1.0)), field=fld,
                          anchor_pt=(float(item["x"]), float(item["y"])))
         return True
 
@@ -254,15 +287,16 @@ class OverlayDrag(QtC.QObject):
             nx0, ny0, self.guides = self.snap(nx0, ny0, bw, bh)
             sz = self.image_size()
             anchor, ax, ay = ov.anchor_for([nx0 * sz[0], ny0 * sz[1], (nx0 + bw) * sz[0], (ny0 + bh) * sz[1]], *sz)
-            ov.set_item(w.spec, d["name"], x=ax, y=ay, anchor=anchor)
+            self.update(d["name"], x=ax, y=ay, anchor=anchor)
         else:
             ax, ay = d["anchor_pt"]; sz = self.image_size()
             d0 = max(1e-6, ((d["f0"][0] - ax) * sz[0]) ** 2 + ((d["f0"][1] - ay) * sz[1]) ** 2) ** 0.5
             d1 = (((f[0] - ax) * sz[0]) ** 2 + ((f[1] - ay) * sz[1]) ** 2) ** 0.5
-            s = min(ov.SIZE_RANGE[1], max(ov.SIZE_RANGE[0], d["size0"] * d1 / d0))
+            lo, hi = {"size": ov.SIZE_RANGE if not d["name"].startswith("block:") else (0.3, 3.3), "height": (0.02, 1.0)}[d["field"]]
+            s = min(hi, max(lo, d["size0"] * d1 / d0))
             if mods & QtC.Qt.ShiftModifier:
-                s = round(s * 10) / 10
-            ov.set_item(w.spec, d["name"], size=s)
+                s = round(s * (10 if d["field"] == "size" else 100)) / (10 if d["field"] == "size" else 100)
+            self.update(d["name"], **{d["field"]: s})
         w.req = {"frame": w.frame}; w.do_preview(quick=True); w.prev.update()
 
     def snap(self, x0, y0, bw, bh):
@@ -284,8 +318,11 @@ class OverlayDrag(QtC.QObject):
     def release(self):
         if self.drag is None:
             return
-        self.drag = None; self.guides = []
+        name = self.drag["name"]; self.drag = None; self.guides = []
         w = self.win; w.overlay_controls.sync(); w.editor.record(); w.schedule(0); w.prev.update()
+        c = self.card() if name.startswith("block:") else None
+        if c is not None and w.parts_panel.open_id == c["id"]:
+            w.parts_panel.fill_details(c["id"])
 
     def hover(self, f):
         name = self.hit(f) if self.drag is None else self.drag["name"]
@@ -300,10 +337,20 @@ class OverlayDrag(QtC.QObject):
         name = self.hit(f); w = self.win
         if name is None or w.spec is None:
             return False
-        m = QtW.QMenu(w); item = ov.overlay_settings(w.spec)[name]
+        m = QtW.QMenu(w); item = self.item(name)
 
         def act(fn):
             fn(); w.overlay_controls.sync(); w.toolbar.sync(); w.editor.record(); w.schedule(0)
+        if name.startswith("block:"):
+            c = self.card(); i = int(name[6:]); fld = self.size_field(item); val = float(item.get(fld, 1.0))
+            hi = 1.0 if fld == "height" else 3.3
+            m.addAction("Bigger", lambda: act(lambda: item.update({fld: min(hi, val * 1.2)})))
+            m.addAction("Smaller", lambda: act(lambda: item.update({fld: val / 1.2})))
+            m.addSeparator(); m.addAction("Delete", lambda: act(lambda: c["blocks"].pop(i)))
+            m.exec(gpos)
+            if w.parts_panel.open_id == c["id"]:
+                w.parts_panel.fill_details(c["id"])
+            return True
         m.addAction("Hide", lambda: act(lambda: ov.set_show(w.spec, name, False)))
         m.addAction("Reset position", lambda: act(lambda: ov.reset_position(w.spec, name)))
         m.addAction("Bigger", lambda: act(lambda: ov.set_item(w.spec, name, size=min(3.0, float(item.get("size", 1)) * 1.2))))
@@ -318,9 +365,13 @@ class OverlayDrag(QtC.QObject):
         return True
 
     def double(self, f):
-        if self.hit(f) is None:
+        name = self.hit(f)
+        if name is None:
             return False
-        w = self.win; w.tabs.setCurrentIndex(w.TAB_LOOK)
+        w = self.win
+        if name.startswith("block:"):
+            w.open_part(self.card()["id"]); return True
+        w.tabs.setCurrentIndex(w.TAB_LOOK)
         QtC.QTimer.singleShot(0, lambda: w._scroll_to(w.overlay_controls.group))
         return True
 

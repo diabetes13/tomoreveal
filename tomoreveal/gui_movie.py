@@ -8,6 +8,7 @@ from .gui_theme import DIM
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
                ("Overview", "overview"), ("View from here", "view"), ("Hold (pause)", "hold"))
+CARD_ENTRIES = (("Title card", "title_card"), ("End card (thank you)", "end_card"), ("Blank card", "card"))
 
 
 class MovieEditor(QtC.QObject):
@@ -129,7 +130,13 @@ class MovieEditor(QtC.QObject):
         self.commit(select=part["id"], show=part["id"])
 
     def add(self, kind, after=None):
-        if kind == "view":  # the camera position of the main view as it is now
+        if kind == "title_card":  # at the start, with the tomogram's name as the title
+            import re as _re
+            name = _re.sub(r"\.[^.]+$", "", (self.win.info or {}).get("tomo_name") or "") or "Title"
+            self.insert(sb.new_part("title_card", title=name), "start")
+        elif kind == "end_card":  # at the end
+            self.insert(sb.new_part("end_card"), self.spec["shots"][-1]["id"] if self.spec["shots"] else "start")
+        elif kind == "view":  # the camera position of the main view as it is now
             v = self.spec["view"]
             self.insert(sb.new_part("view", view=dict(tilt=float(v["tilt"]), az=float(v["az"]), zoom=float(v["zoom"]))), after)
         else:
@@ -237,6 +244,12 @@ class MovieEditor(QtC.QObject):
             if kind == "overview":
                 sub = menu.addMenu("Close-up of"); sub.setEnabled(has_s); sub.setToolTip("" if has_s else "needs a segmentation")
                 self._fill_closeups(sub, after)
+        menu.addSeparator()
+        for text, kind in CARD_ENTRIES:
+            a = menu.addAction(text, lambda kind=kind: self.add(kind, after))
+            a.setToolTip({"title_card": "A card with a title at the start of the movie",
+                          "end_card": "A 'Thank you' card at the end of the movie",
+                          "card": "An empty card at the playhead, for any text or pictures"}[kind])
         menu.setToolTipsVisible(True)
 
     def _fill_closeups(self, sub, after):
@@ -459,12 +472,18 @@ class PartsPanel(QtW.QWidget):
             self._view_rows(pid, p, form)
         elif t == "focus":
             self._focus_rows(pid, p, form)
+        elif t == "card":
+            from .gui_cards import card_rows
+            card_rows(self, pid, p, form)
         add("Duration", _spin(0.2, 120, float(p.get("seconds", 5)), lambda v: self.set(pid, "seconds", v)))
         cap = QtW.QLineEdit(p.get("caption", "")); cap.setPlaceholderText("text shown at the bottom while this part plays")
         cap.textChanged.connect(lambda txt: self.set(pid, "caption", txt)); add("Caption", cap); r["caption"] = cap
-        tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
         from .gui_overlays import part_overlay_row
-        ovr = part_overlay_row(self.win, pid, p); add("On the picture", ovr); r["overlays"] = ovr
+        ovr = part_overlay_row(self.win, pid, p); r["overlays"] = ovr
+        if t == "card":
+            add("On the picture", ovr); return
+        tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
+        add("On the picture", ovr)
         tr = p.get("transition")
         add("Transition in", _spin(-0.1, 10, -0.1 if tr is None else float(tr), lambda v: self.set(pid, "transition", None if v < 0 else v),
                                    step=0.1, special="automatic"))

@@ -7,16 +7,18 @@ from .common import hex2rgb
 from .storyboard import Framer, build_timeline, class_spec, clip_box, state_key
 
 
-def get_font(px):
+def get_font(px, bold=False):
     from PIL import ImageFont
-    for cand in ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "/System/Library/Fonts/Helvetica.ttc"):
+    cands = ("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf") if bold else ()
+    for cand in cands + ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "/System/Library/Fonts/Helvetica.ttc"):
         try:
             return ImageFont.truetype(cand, px)
         except OSError:
             pass
     try:
         import matplotlib
-        return ImageFont.truetype(os.path.join(os.path.dirname(matplotlib.__file__), "mpl-data/fonts/ttf/DejaVuSans.ttf"), px)
+        name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        return ImageFont.truetype(os.path.join(os.path.dirname(matplotlib.__file__), "mpl-data/fonts/ttf", name), px)
     except Exception:
         pass
     try:
@@ -47,6 +49,7 @@ class Renderer:
             self.slice_actor.mapper.AddClippingPlane(p)
         self.actors, self.comp_actors, self._fonts = {}, {}, {}
         self.bar_actor, self.last_rects = None, {}
+        self._card_cache, self._next_cache = {}, {}
         for k, m in ds.meshes.items():
             self.actors[k] = self._add(m)
 
@@ -67,15 +70,47 @@ class Renderer:
             self.comp_actors[key] = self._add(m, front=True) if m is not None else None
         return self.comp_actors[key]
 
-    def _font(self, px):
-        if px not in self._fonts:
-            self._fonts[px] = get_font(px)
-        return self._fonts[px]
+    def _font(self, px, bold=False):
+        if (px, bold) not in self._fonts:
+            self._fonts[(px, bold)] = get_font(px, bold)
+        return self._fonts[(px, bold)]
+
+    def _part(self, spec, pid):
+        return next((p for p in spec.get("shots", []) if p.get("id") == pid), None)
+
+    def draw_card(self, s, spec, size, aa=False, transparent=False, annotate=True):
+        """A card frame: the card image (cached per part and size), faded, or dissolving into the next frame."""
+        import json as _json
+        from .cards import card_frame
+        part = self._part(spec, s["card"]) or {}
+        key = (_json.dumps(part, sort_keys=True, default=str), tuple(size), round(float(s.get("card_fade", 1.0)), 4), bool(transparent))
+        if self._card_cache.get("key") != key:
+            a, rects = card_frame(part, size, self._font, float(s.get("card_fade", 1.0)), transparent)
+            self._card_cache = dict(key=key, img=a, rects=rects)
+        a, rects = self._card_cache["img"], self._card_cache["rects"]
+        q = float(s.get("dissolve", 0.0) or 0.0)
+        if q > 0 and s.get("dissolve_to") is not None:
+            nxt = s["dissolve_to"]; nk = (state_key(nxt), nxt.get("part"), tuple(size), bool(transparent))
+            if self._next_cache.get("key") != nk:
+                self._next_cache = dict(key=nk, img=self.draw(nxt, spec, size, aa=aa, transparent=True).astype(np.float32))
+            b = self._next_cache["img"]
+            a = a * (1 - q) + b * q
+        out = np.clip(a, 0, 255).astype(np.uint8)
+        if not transparent:
+            al = out[..., 3:4].astype(np.float32) / 255.0
+            bgc = np.array(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) * 255
+            out = (out[..., :3] * al + bgc * (1 - al)).astype(np.uint8)
+        if not annotate:
+            self.last_rects = dict(rects); return out
+        img = self.annotate(out, s, spec, size, False, transparent)
+        self.last_rects.update(rects)
+        return img
 
     def draw(self, s, spec, size, aa=False, transparent=False, annotate=True):
-        from PIL import Image, ImageDraw
         ds, style = self.ds, spec.get("style", {})
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
+        if s.get("card"):
+            return self.draw_card(s, spec, size, aa, transparent, annotate)
         if size != self.size:
             self.pl.window_size = list(size); self.size = size
         if aa != self.aa:
@@ -322,7 +357,8 @@ class MovieJob:
             raise StopIteration
         try:
             i, s = self.i, self.frames[self.i]
-            key = (state_key(s), s.get("part"), s.get("bar_nm"))  # overlays may differ per part
+            key = (state_key(s), s.get("part"), s.get("bar_nm"), s.get("card"), round(float(s.get("card_fade", 1)), 4),
+                   round(float(s.get("dissolve", 0) or 0), 4))  # overlays may differ per part
             if key != self.last_key:
                 self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=self.transparent and bool(self.frames_dir))
                 self.last_key = key

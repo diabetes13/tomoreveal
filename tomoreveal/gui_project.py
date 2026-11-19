@@ -321,7 +321,7 @@ class ProjectManager(QtC.QObject):
         self.path, self.extra = path, {k: v for k, v in data.items() if k not in known}
         self.pending = (data, resolved, dirty)
         skipped = [os.path.basename(r["entry"]["path"]) for r in resolved if not r.get("path")]
-        if not any(r.get("path") for r in resolved):
+        if not any(r.get("path") for r in resolved if r["entry"].get("kind") != "image"):
             self.pending = None; self.saved_core = None; self.refresh()
             w.say("None of the project's data files could be used." if resolved else "The project has no data files.", "err")
             return False

@@ -148,8 +148,9 @@ def default_opacity(spec, has_tomo=True):
 #   hold      nothing moves
 # Never address a part by its position in the list: use its id.
 # ---------------------------------------------------------------------------------------------------------------
-PART_TYPES = ("slide", "overview", "focus", "hold", "card")
-PRESETS = ("slide_up", "reveal", "overview", "view", "focus", "hold", "title_card", "end_card", "card")
+PART_TYPES = ("slide", "overview", "focus", "hold", "card", "path")
+PRESETS = ("slide_up", "reveal", "overview", "view", "focus", "hold", "title_card", "end_card", "card", "path")
+PATH_CAMERA = dict(distance=1.0, side="above", height=30.0, look="at_path", lead=0.05)
 CARD_TRANSITIONS = ("fade", "dissolve", "cut")
 
 
@@ -192,6 +193,9 @@ def new_part(kind, **fields):
         p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30)
     elif kind == "hold":
         p = _common(type="hold", seconds=2)
+    elif kind == "path":
+        p = _common(type="path", seconds=10, source=dict(kind="follow", items=[]), waypoints=[], camera=dict(PATH_CAMERA),
+                    speed="even", ease=True, reverse=False, others=dict(colour="keep", opacity=1.0), show_path_in_preview=True)
     elif kind in ("card", "title_card", "end_card"):
         title = fields.pop("title", None)
         if kind == "title_card":
@@ -251,6 +255,10 @@ def migrate_spec(spec):
             p.setdefault("others", "grey"); p.setdefault("motion", "orbit"); p.setdefault("zoom", 1.0); p.setdefault("angle", 30)
         elif p["type"] == "slide":
             p.setdefault("from", "first"); p.setdefault("to", "last"); p.setdefault("structures", "keep")
+        elif p["type"] == "path":
+            p.setdefault("source", dict(kind="follow", items=[])); p.setdefault("waypoints", [])
+            p["camera"] = dict(PATH_CAMERA, **(p.get("camera") or {})); p.setdefault("speed", "even"); p.setdefault("reverse", False)
+            p.setdefault("others", dict(colour="keep", opacity=1.0)); p.setdefault("show_path_in_preview", True)
         elif p["type"] == "card":
             p.setdefault("background", dict(kind="color", color="#000000", color2="#1c1f26", image=None)); p.setdefault("blocks", [])
             p.setdefault("fade_in", 0.6); p.setdefault("fade_out", 0.6); p.setdefault("transition_to_next", "fade")
@@ -319,6 +327,18 @@ def part_name(p, spec=None, ds=None):
         return f"Close-up: one object of {names[0]}" if items[0][1] is not None else f"Close-up: {names[0]}"
     if t == "hold":
         return "Hold"
+    if t == "path":
+        src = p.get("source") or {}
+        if src.get("kind") == "points":
+            n = len(p.get("waypoints") or [])
+            return f"Camera path through {n} point{'s' if n != 1 else ''}"
+        names = []
+        if spec is not None and ds is not None:
+            for key, _ in [(it.get("structure"), it.get("component")) for it in src.get("items", [])]:
+                k = ds.id_of(key)
+                if k is not None:
+                    names.append(class_spec(spec, ds, k).get("name", ds.classes[k]["name"]))
+        return f"Camera path along {' and '.join(dict.fromkeys(names))}" if names else "Camera path"
     if t == "card":
         first = next((b.get("text", "").strip().splitlines()[0] for b in p.get("blocks", []) if b.get("kind") == "text" and b.get("text", "").strip()), "")
         return f"Card: {first}" if first else "Card (empty)"
@@ -330,7 +350,7 @@ def _mark_label(p):
     if t == "slide":
         f, to, s = p.get("from"), p.get("to"), p.get("structures")
         return "Slices" if s == "none" else "Reveal" if s in ("above", "all") and (f, to) == ("last", "first") else "Slide"
-    return {"overview": "Overview", "hold": "Hold", "card": "Card"}.get(t) or p.get("caption") or "Focus"
+    return {"overview": "Overview", "hold": "Hold", "card": "Card", "path": "Path"}.get(t) or p.get("caption") or "Focus"
 
 
 def _pause_frames(fps, seconds):
@@ -546,6 +566,29 @@ def build_plan(spec, ds):
             start_fade(part)
             st["caption"] = part.get("caption", "")
             emit(n, lambda u: {}, "main", _mark_label(part))
+        elif typ == "path":
+            try:
+                poses = path_poses(part, ds, fr, spec, n, fps, cb)
+            except PathPending:
+                problems[part.get("id")] = "working out the path ..."
+                continue
+            except UserError as exc:
+                problems[part.get("id")] = str(exc)
+                continue
+            start_fade(part)
+            need_structures()
+            t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
+            go_to(poses[0], st["k"], t)
+            items = [(it.get("structure"), it.get("component")) for it in (part.get("source") or {}).get("items", [])]
+            oc, oo = others_of(part.get("others"))
+            if (part.get("source") or {}).get("kind", "follow") == "follow" and items and (oc, oo) != ("keep", 1.0):
+                st.update(target=make_target(items), others=dict(colour=oc, opacity=oo), e=1.0)
+            st["caption"] = part.get("caption", "")
+            m = len(poses)
+            emit(m, lambda u, poses=poses, m=m: dict(pose=poses[int(round(u * (m - 1)))]), "main", _mark_label(part))
+            pose[0] = poses[-1]
+            if st["e"] > 0:
+                st.update(e=0.0, target=None)
         elif typ == "card":
             ramp.clear()
             fi = max(0, round(fps * float(part.get("fade_in", 0.6) or 0))); fo = max(0, round(fps * float(part.get("fade_out", 0.6) or 0)))
@@ -667,6 +710,112 @@ def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
             d["fx"] = fx
         return d
     return fn
+
+
+class PathPending(Exception):
+    """The window is still working out a path (in a worker thread)."""
+
+
+def path_key(items, cb):
+    return json.dumps([list(i) for i in items]) + json.dumps(cb, default=list)
+
+
+def path_line(ds, items, cb):
+    """The centre line of the items (cached on the dataset). The window computes it in a worker (PathPending)."""
+    from .paths import centre_line
+    key = path_key(items, cb)
+    if key not in ds.path_cache:
+        if ds.path_async:
+            raise PathPending(key)
+        try:
+            ds.path_cache[key] = centre_line(ds, items, cb)
+        except UserError as exc:
+            ds.path_cache[key] = exc
+    r = ds.path_cache[key]
+    if isinstance(r, Exception):
+        raise r
+    return r
+
+
+def _ease_or_even(part, u):
+    return smooth01(u) if part.get("speed") == "ease" else u
+
+
+def _pose(fr, pos, focal, up):
+    from .paths import tilt_az
+    pos, focal = np.asarray(pos, float), np.asarray(focal, float)
+    d = pos - focal; dist = float(np.linalg.norm(d)) or 1.0
+    t, a = tilt_az(d, fr.u)
+    return dict(c=focal, tilt=float(t), az=float(a), dist=dist, scale=dist * math.tan(math.radians(fr.fov) / 2),
+                pos=pos, up=np.asarray(up, float))
+
+
+def path_poses(part, ds, fr, spec, n, fps, cb):
+    """Camera poses of a path part: along the centre line of a structure ("follow"), or through waypoints ("points")."""
+    from .paths import arclength, catmull_rom, sample, stable_up
+    src = part.get("source") or {}; cam = dict(PATH_CAMERA, **(part.get("camera") or {}))
+    v = spec.get("view", {}); main_dir, main_up = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
+    if src.get("kind", "follow") == "follow":
+        items = [(it.get("structure"), it.get("component")) for it in src.get("items", []) if it.get("structure") is not None]
+        if not items:
+            raise UserError("Choose the structure the camera should follow.")
+        line = path_line(ds, items, cb)
+        if part.get("reverse"):
+            line = line[::-1]
+        cum = arclength(line); L = float(cum[-1]); D = float(cam["distance"]) * max(30.0, 0.3 * L)
+        z = np.array([0.0, 0.0, 1.0]); h = math.radians(float(cam.get("height", 30)))
+        pos, foc, dirs = [], [], []
+        for i in range(n):
+            d = _ease_or_even(part, i / max(1, n - 1)) * L
+            P = sample(line, cum, d); T = sample(line, cum, d + 2) - sample(line, cum, d - 2); T /= np.linalg.norm(T) or 1.0
+            upp = z - T * float(z @ T); upp = upp / (np.linalg.norm(upp) or 1.0)
+            side = cam.get("side", "above")
+            if side == "free":
+                off = np.asarray(main_dir, float)
+            elif side == "above":
+                off = upp
+            else:
+                sv = np.cross(T, z); sv = sv / (np.linalg.norm(sv) or 1.0) * (1 if side == "left" else -1)
+                off = math.cos(h) * sv + math.sin(h) * upp
+            C = P + D * off; C[2] = max(C[2], 1.0)  # never below the tomogram
+            F = sample(line, cum, d + float(cam.get("lead", 0.05)) * L) if cam.get("look") == "ahead" else P
+            pos.append(C); foc.append(F); dirs.append(F - C)
+        ups = stable_up(dirs, z if cam.get("side") not in ("above",) else (sample(line, cum, L) - sample(line, cum, 0)))
+        return [_pose(fr, p, f, u) for p, f, u in zip(pos, foc, ups)]
+    wps = part.get("waypoints") or []
+    if len(wps) < 2:
+        raise UserError("Add at least two points for the camera to move through.")
+    D = 60.0 * float(cam["distance"])
+    P, F = [], []
+    for w in wps:
+        if w.get("pos") is not None:
+            P.append(np.asarray(w["pos"], float)); F.append(np.asarray(w.get("focal", w["pos"]), float))
+        else:  # a point clicked in the preview: the camera passes near it, looking at it
+            q = np.asarray(w["point"], float); F.append(q); P.append(q + D * np.asarray(main_dir, float))
+    curve, at = catmull_rom(P); fcurve, _ = catmull_rom(F)
+    cum = arclength(curve); L = float(cum[-1])
+    if L < 1e-6:  # only the looking direction changes: move by index
+        cum = np.arange(len(curve), dtype=float); L = float(cum[-1])
+    knots = [float(cum[i]) for i in at]
+    pauses = {i: max(0, round(fps * float(w.get("pause", 0) or 0))) for i, w in enumerate(wps)}
+    poses = []; done = set()
+    for j in range(n):
+        d = _ease_or_even(part, j / max(1, n - 1)) * L
+        for i, kd in enumerate(knots):
+            if i not in done and d >= kd - 1e-9:
+                done.add(i)
+                exact = (P[i], F[i])
+                for _ in range(pauses[i]):
+                    poses.append(("x",) + exact)
+        poses.append((d,))
+    out_pos, out_foc = [], []
+    for e in poses:
+        if e[0] == "x":
+            out_pos.append(e[1]); out_foc.append(e[2])
+        else:
+            out_pos.append(sample(curve, cum, e[0])); out_foc.append(sample(fcurve, cum, e[0]))
+    ups = stable_up([f - p for p, f in zip(out_pos, out_foc)], np.asarray(main_up, float))
+    return [_pose(fr, p, f, u) for p, f, u in zip(out_pos, out_foc, ups)]
 
 
 def build_timeline(spec, ds):

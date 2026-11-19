@@ -111,6 +111,8 @@ class Dataset:
         self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing) -> surface, kept while sources change
         self.smooth, self.step = smooth, step
         self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations} (the user's choices)
+        self.path_cache = {}   # camera paths along structures (paths.centre_line), computed once per change
+        self.path_async = False  # the window computes missing paths in a worker thread instead of in build_plan
 
     @property
     def shape(self):
@@ -164,6 +166,7 @@ class Dataset:
              dict(kind="scores", key, title, arr, scale, thr, name, color) for one easymode / Ais score volume.
         A label source may carry "_stats" = label_stats(arr); it is computed and stored there when missing."""
         self._comp, self.meshes, self.classes, self.bbox, self.scores, self._labels = {}, {}, {}, {}, {}, {}
+        self.path_cache = {}
         self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
         self.seg_name = ", ".join(s.get("title", "") for s in sources); self.vox = self.vox or vox
         k = 0
@@ -212,7 +215,7 @@ class Dataset:
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
         key = self.classes[k]["key"]; before = self._cache_key(k)
         cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing")})
-        self.params[key] = cur
+        self.params[key] = cur; self.path_cache = {}
         if self._cache_key(k) == before:
             return False
         had = self.meshes.pop(k, None) is not None
@@ -239,7 +242,7 @@ class Dataset:
         m = self.mask(k); n = int(m.sum())
         self.classes[k]["voxels"] = n
         self.bbox[k] = ndimage.find_objects(m.astype(np.uint8))[0] if n else None
-        self._comp.pop(k, None); self.meshes.pop(k, None)
+        self._comp.pop(k, None); self.meshes.pop(k, None); self.path_cache = {}
 
     def set_threshold(self, k, thr):
         thr = min(0.99, max(0.01, float(thr)))

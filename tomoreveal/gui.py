@@ -231,6 +231,9 @@ def build_gui(args):
             self.selected_part = None  # id of the part selected on the timeline
             self.pick_for = None       # (part id, structure key) while picking the object of a close-up
             self.multi_pick = None     # part id while clicking objects for a close-up of several objects
+            self.waypoint_pick = None  # part id while clicking points for a camera path
+            self.path_pick = None      # part id while clicking the object a camera path follows
+            self._path_worker = None
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self._struct_open = set()  # structures whose settings are open in the Structures tab
@@ -966,8 +969,9 @@ def build_gui(args):
             spec = self.spec_for(); req = self.req or {"t": self.frame / max(1, self.total - 1)}; self.req = None
             plan, i = self.st.plan_frame(spec, req); frames = plan.frames
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
+            self.st.ren.preview_part = self.selected_part; self.st.ds.path_async = True
             try:
-                img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"])
+                img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc()
                 if not self.st.headless:
@@ -988,6 +992,33 @@ def build_gui(args):
             if empty:
                 self.say("The movie has no parts. Add one with + Add part under the timeline.")
             self.editor.refresh_buttons()
+            if any(v == "working out the path ..." for v in plan.problems.values()):
+                self._compute_paths(spec)
+
+        def _compute_paths(self, spec):
+            """Centre lines of camera paths are worked out in a worker thread (a large membrane can take seconds)."""
+            if self._path_worker is not None and self._path_worker.isRunning():
+                return
+            from .storyboard import clip_box, path_key
+            from .paths import centre_line
+            ds = self.st.ds; cb = clip_box(spec, ds.shape); todo = []
+            for p in spec["shots"]:
+                if p.get("type") == "path" and (p.get("source") or {}).get("kind", "follow") == "follow":
+                    items = [(it.get("structure"), it.get("component")) for it in p["source"].get("items", [])]
+                    if items and path_key(items, cb) not in ds.path_cache:
+                        todo.append(items)
+
+            def work(log):
+                for items in todo:
+                    log("working out the camera path ...")
+                    try:
+                        ds.path_cache[path_key(items, cb)] = centre_line(ds, items, cb)
+                    except UserError as exc:
+                        ds.path_cache[path_key(items, cb)] = exc
+                return True
+            self._path_worker = Worker(work); self._path_worker.log.connect(self.say)
+            self._path_worker.done.connect(lambda _r: (self.say(""), self.parts_panel.sync(force=True), self.schedule(0)))
+            self._path_worker.start()
 
         def select_part(self, pid):
             """A block clicked on the timeline: its line opens in the Movie tab."""
@@ -1034,9 +1065,23 @@ def build_gui(args):
                 self.parts_panel.fill_details(pid)
             self.req = {"at": {"part": pid, "u": 0.5}}; self.schedule(0); self.say("")
 
+        def start_waypoint_pick(self, pid):
+            self.end_multi_pick(); self.waypoint_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.say("Click a structure or the slice to add a point. Press Esc when done.")
+
+        def end_waypoint_pick(self):
+            pid, self.waypoint_pick = self.waypoint_pick, None; self.prev.setCursor(QtC.Qt.ArrowCursor)
+            if pid and self.parts_panel.open_id == pid:
+                self.parts_panel.fill_details(pid)
+
+        def start_path_pick(self, pid):
+            self.end_multi_pick(); self.path_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.req = self._main_req(); self.schedule(0)
+            self.say("Click the object the camera should follow.")
+
         def keyPressEvent(self, e):
-            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode):
-                self.end_multi_pick(); self.pick_btn.setChecked(False); return
+            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick):
+                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.pick_btn.setChecked(False); return
             super().keyPressEvent(e)
 
         def _multi_click(self, fx, fy):
@@ -1059,6 +1104,21 @@ def build_gui(args):
             self.say(f"{len(items)} in focus. Click more, or press Esc when done.", "ok")
 
         def on_click(self, fx, fy):
+            if self.waypoint_pick and self.gen is None:
+                pt = self.st.ren.pick_point(fx, fy) if self.st.ren is not None else None
+                part = self.parts_panel.part(self.waypoint_pick)
+                if pt is None or part is None:
+                    self.say("Nothing there. Click on a structure or on the slice.", "err"); return
+                ws = list(part.get("waypoints") or []); ws.append(dict(point=[float(v) for v in pt], pause=0.0))
+                part["waypoints"] = ws; self.editor.commit(select=self.waypoint_pick)
+                self.say(f"Point {len(ws)} added. Click more, or press Esc when done.", "ok"); return
+            if self.path_pick and self.st.has_segmentation and self.gen is None:
+                p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy}); part = self.parts_panel.part(self.path_pick)
+                if not p.get("found") or part is None:
+                    self.say("Nothing there. Click directly on a coloured structure.", "err"); return
+                part["source"] = dict(kind="follow", items=[{"structure": p["class"], "component": p.get("component")}])
+                pid, self.path_pick = self.path_pick, None; self.prev.setCursor(QtC.Qt.ArrowCursor)
+                self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
             if self.multi_pick and self.st.has_segmentation and self.gen is None:
                 return self._multi_click(fx, fy)
             if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:

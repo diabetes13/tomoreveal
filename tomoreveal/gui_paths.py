@@ -1,0 +1,141 @@
+"""Settings of a camera path part in the Movie tab: what to follow or which points, and how the camera moves."""
+import numpy as np
+from PySide6 import QtWidgets as QtW
+
+from . import storyboard as sb
+from .gui_theme import DIM
+
+SIDES = (("above", "above"), ("from the left", "left"), ("from the right", "right"), ("as the main view", "free"))
+LOOKS = (("at the path", "at_path"), ("a little ahead", "ahead"))
+SPEEDS = (("even", "even"), ("slow at the ends", "ease"))
+
+
+def _combo(items, cur, fn):
+    cb = QtW.QComboBox()
+    for t, d in items:
+        cb.addItem(t, d)
+    cb.setCurrentIndex(max(0, cb.findData(cur)))
+    cb.activated.connect(lambda j: fn(cb.itemData(j)))
+    return cb
+
+
+def _row(*ws):
+    w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+    for x in ws:
+        h.addWidget(x)
+    h.addStretch(1)
+    return w
+
+
+def _spin(lo, hi, v, fn, step=0.1, suffix="", decimals=2, prefix=""):
+    sp = QtW.QDoubleSpinBox(); sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(decimals); sp.setSuffix(suffix); sp.setPrefix(prefix)
+    sp.setValue(float(v)); sp.valueChanged.connect(fn)
+    return sp
+
+
+def current_view(win):
+    """(camera position, focal point) of the frame shown in the preview."""
+    plan = win.timeline.canvas.plan
+    if plan is None or not (0 <= win.frame < len(plan.frames)):
+        return None
+    p = plan.frames[win.frame]["pose"]
+    if p.get("pos") is not None:
+        return np.asarray(p["pos"], float), np.asarray(p["c"], float)
+    style = win.spec.get("style", {}); w, h = win.spec_for()["output"]["size"]
+    fr = sb.Framer(win.st.ds.shape, w / h, float(style.get("fov", 30)), bool(style.get("ortho", False)))
+    d, _ = fr.axes(p["tilt"], p["az"])
+    return np.asarray(p["c"], float) + p["dist"] * np.asarray(d), np.asarray(p["c"], float)
+
+
+def path_rows(panel, pid, p, form):
+    win = panel.win
+
+    def part():
+        return panel.part(pid)
+
+    def setcam(**kw):
+        q = part()
+        if q is not None:
+            panel.set(pid, "camera", dict(sb.PATH_CAMERA, **(q.get("camera") or {}), **kw))
+    src = p.get("source") or {}; kind = src.get("kind", "follow")
+    form.addRow("The camera", _combo((("follows a structure", "follow"), ("moves through points", "points")), kind,
+                                     lambda v: panel.set(pid, "source", dict(part().get("source") or {}, kind=v), rebuild=True)))
+    if kind == "follow":
+        items = [(it.get("structure"), it.get("component")) for it in src.get("items", [])]
+        names = []
+        for key, comp in items:
+            names.append(panel._name(key) if comp is None else f"one object of {panel._name(key)}")
+        lab = QtW.QLabel(", ".join(names) if names else "nothing chosen yet"); lab.setWordWrap(True)
+        b = QtW.QToolButton(); b.setText("Structure ▾"); b.setPopupMode(QtW.QToolButton.InstantPopup); menu = QtW.QMenu(b); b.setMenu(menu)
+
+        def fill():
+            menu.clear()
+            for c in (win.info or {}).get("structures", []):
+                if c.get("mesh"):
+                    menu.addAction(panel._name(c["key"]), lambda key=c["key"]: set_items([(key, None)]))
+            menu.addSeparator(); menu.addAction("one object I click in the preview...", lambda: win.start_path_pick(pid))
+        menu.aboutToShow.connect(fill)
+
+        def set_items(its):
+            q = part(); q["source"] = dict(q.get("source") or {}, kind="follow", items=[{"structure": k, "component": c} for k, c in its])
+            win.editor.commit(select=pid); panel.fill_details(pid)
+        rev = QtW.QPushButton("Reverse direction"); rev.setToolTip("Glide from the other end")
+        rev.clicked.connect(lambda: panel.set(pid, "reverse", not part().get("reverse", False)))
+        form.addRow("Follow", _row(lab, b, rev))
+        why = (win.timeline.canvas.plan.problems if win.timeline.canvas.plan else {}).get(pid)
+        if why:
+            n = QtW.QLabel(why); n.setStyleSheet(DIM); n.setWordWrap(True); form.addRow("", n)
+    else:
+        wps = p.get("waypoints") or []
+        for i, w in enumerate(wps):
+            what = "view" if w.get("pos") is not None else "point"
+            lab = QtW.QLabel(f"{i + 1}: {'camera position' if what == 'view' else 'looks at a clicked point'}")
+            pause = _spin(0, 30, float(w.get("pause", 0) or 0), lambda v, i=i: (part()["waypoints"][i].update(pause=float(v)), panel.set(pid, "waypoints", part()["waypoints"])),
+                          step=0.5, suffix=" s", decimals=1, prefix="pause ")
+            pause.setToolTip("The camera stops here for this long")
+
+            def move(d, i=i):
+                ws = part()["waypoints"]
+                if 0 <= i + d < len(ws):
+                    ws[i], ws[i + d] = ws[i + d], ws[i]; panel.set(pid, "waypoints", ws, rebuild=True)
+
+            def delete(i=i):
+                ws = part()["waypoints"]; del ws[i]; panel.set(pid, "waypoints", ws, rebuild=True)
+            btns = []
+            for text, tip, fn in (("↑", "Move up", lambda _=False, m=move: m(-1)), ("↓", "Move down", lambda _=False, m=move: m(1)),
+                                  ("✕", "Delete this point", lambda _=False, d=delete: d())):
+                tb = QtW.QToolButton(); tb.setText(text); tb.setToolTip(tip); tb.clicked.connect(fn); btns.append(tb)
+            form.addRow("Points" if i == 0 else "", _row(lab, pause, *btns))
+        here = QtW.QPushButton("Add point at the current view")
+        here.setToolTip("Stores where the camera is now in the preview")
+
+        def add_here():
+            v = current_view(win)
+            if v is None:
+                return
+            ws = list(part().get("waypoints") or []); ws.append(dict(pos=[float(x) for x in v[0]], focal=[float(x) for x in v[1]], pause=0.0))
+            panel.set(pid, "waypoints", ws, rebuild=True); win.editor.record()
+        here.clicked.connect(add_here)
+        click = QtW.QPushButton("Add point by clicking in the preview"); click.setCheckable(True); click.setChecked(win.waypoint_pick == pid)
+        click.setToolTip("Click a structure or the slice; the camera will pass near it, looking at it. Esc ends.")
+        click.toggled.connect(lambda on: win.start_waypoint_pick(pid) if on else win.end_waypoint_pick())
+        form.addRow("" if wps else "Points", _row(here, click))
+        tip = QtW.QLabel("In the preview, drag a numbered point to move it on the slice; right-click it to delete it.")
+        tip.setStyleSheet(DIM); tip.setWordWrap(True); form.addRow("", tip)
+    cam = dict(sb.PATH_CAMERA, **(p.get("camera") or {}))
+    dist = _spin(0.2, 5, cam["distance"], lambda v: setcam(distance=float(v)), suffix=" x")
+    dist.setToolTip("How far the camera stays from the path, relative to the size of what is followed")
+    side = _combo(SIDES, cam.get("side", "above"), lambda v: setcam(side=v))
+    height = _spin(0, 85, cam.get("height", 30), lambda v: setcam(height=float(v)), step=5, suffix="°", decimals=0, prefix="height ")
+    form.addRow("Camera", _row(dist, side, height))
+    look = _combo(LOOKS, cam.get("look", "at_path"), lambda v: setcam(look=v))
+    speed = _combo(SPEEDS, p.get("speed", "even"), lambda v: panel.set(pid, "speed", v))
+    form.addRow("Looks", _row(look, QtW.QLabel("speed"), speed))
+    oc, oo = sb.others_of(p.get("others"))
+    col = _combo((("unchanged", "keep"), ("grey", "grey"), ("darker", "darken")), oc,
+                 lambda v: panel.set(pid, "others", dict(colour=v, opacity=sb.others_of(part().get("others"))[1])))
+    op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo))
+    op.valueChanged.connect(lambda v: panel.set(pid, "others", dict(colour=sb.others_of(part().get("others"))[0], opacity=v / 100)))
+    form.addRow("Other structures", _row(col, op))
+    show = QtW.QCheckBox("show the path in the preview (never in the movie)"); show.setChecked(bool(p.get("show_path_in_preview", True)))
+    show.toggled.connect(lambda v: panel.set(pid, "show_path_in_preview", bool(v))); form.addRow("", show)

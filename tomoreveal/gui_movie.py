@@ -260,6 +260,13 @@ class MovieEditor(QtC.QObject):
             if kind == "overview":
                 sub = menu.addMenu("Close-up of"); sub.setEnabled(has_s); sub.setToolTip("" if has_s else "needs a segmentation")
                 self._fill_closeups(sub, after)
+        sub = menu.addMenu("Camera path along"); sub.setEnabled(has_s)
+        sub.setToolTip("The camera glides along a structure, such as a membrane" if has_s else "needs a segmentation")
+        for c in [c for c in info.get("structures", []) if c.get("mesh")]:
+            sub.addAction(self.win.parts_panel._name(c["key"]),
+                          lambda key=c["key"]: self.insert(sb.new_part("path", source=dict(kind="follow", items=[{"structure": key, "component": None}])), after))
+        a = menu.addAction("Camera path through points", lambda: self.insert(sb.new_part("path", source=dict(kind="points", items=[])), after))
+        a.setToolTip("The camera flies through points you set")
         menu.addSeparator()
         for text, kind in CARD_ENTRIES:
             a = menu.addAction(text, lambda kind=kind: self.add(kind, after))
@@ -498,6 +505,9 @@ class PartsPanel(QtW.QWidget):
         elif t == "card":
             from .gui_cards import card_rows
             card_rows(self, pid, p, form)
+        elif t == "path":
+            from .gui_paths import path_rows
+            path_rows(self, pid, p, form)
         add("Duration", _spin(0.2, 120, float(p.get("seconds", 5)), lambda v: self.set(pid, "seconds", v)))
         cap = QtW.QLineEdit(p.get("caption", "")); cap.setPlaceholderText("text shown at the bottom while this part plays")
         cap.textChanged.connect(lambda txt: self.set(pid, "caption", txt)); add("Caption", cap); r["caption"] = cap

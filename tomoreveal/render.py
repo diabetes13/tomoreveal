@@ -37,6 +37,7 @@ class Renderer:
         self._light_key, self._ssao, self._real_shadows, self.real_shadows_ok = ("default",), False, False, False
         self.sil_actors, self._dots = {}, {}  # cartoon outlines and thinned-out meshes for dots, per structure
         self.glow_actors, self.cut_actors, self._cut_cache, self._fx_meshes = {}, {}, {}, {}  # close-up animations
+        self._markers, self._path_actors, self.preview_part = [], [], None
         self._slice_grey, self._shadow_key = None, None
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -110,7 +111,8 @@ class Renderer:
         self.last_rects.update(rects)
         return img
 
-    def draw(self, s, spec, size, aa=False, transparent=False, annotate=True):
+    def draw(self, s, spec, size, aa=False, transparent=False, annotate=True, preview=False):
+        """One frame. preview=True also shows helpers that never go into a movie (the path of a camera path part)."""
         ds, style = self.ds, spec.get("style", {})
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
         if s.get("card"):
@@ -201,11 +203,15 @@ class Renderer:
         # camera
         p = s["pose"]; fr = Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
         d, up = fr.axes(p["tilt"], p["az"]); cam = self.pl.camera
-        cam.focal_point = tuple(p["c"]); cam.position = tuple(p["c"] + p["dist"] * d); cam.up = tuple(up)
+        if p.get("pos") is not None:  # camera paths give the position and the up direction themselves
+            cam.focal_point = tuple(p["c"]); cam.position = tuple(np.asarray(p["pos"], float)); cam.up = tuple(np.asarray(p["up"], float))
+        else:
+            cam.focal_point = tuple(p["c"]); cam.position = tuple(p["c"] + p["dist"] * d); cam.up = tuple(up)
         if fr.ortho:
             cam.parallel_projection = True; cam.parallel_scale = p["scale"]
         else:
             cam.parallel_projection = False; cam.view_angle = fr.fov
+        self._show_path(s, spec, preview)
         self._apply_lighting(lk)
         self._apply_slice_texture(s, spec, lk, show_slice, cb)
         self._vig = self._vignette_state(s, spec, lk, size)
@@ -220,7 +226,10 @@ class Renderer:
             fr_img = self._apply_vignette(fr_img, self._vig, transparent)
         if not annotate:
             return fr_img
-        return self.annotate(fr_img, s, spec, size, show_slice, transparent)
+        img = self.annotate(fr_img, s, spec, size, show_slice, transparent)
+        if self._markers:
+            img = self._draw_markers(img, size)
+        return img
 
     def _vignette_state(self, s, spec, lk, size):
         """Vignette (and background blur) of this frame, or None: the close-up's own settings, else the Look tab's."""
@@ -276,6 +285,80 @@ class Renderer:
             self._dof = on
         if on:
             self.pl.camera.SetFocalDisk(amount * 0.08 * max(self.shape))
+
+    # ---------- camera paths: drawn in the preview only ----------
+    def _show_path(self, s, spec, preview):
+        """The line of the selected camera path part as a thin tube with arrows, and numbered waypoints (preview only)."""
+        self._markers = []
+        for a in getattr(self, "_path_actors", []):
+            self.pl.renderer.RemoveActor(a)
+        self._path_actors = []
+        sel = getattr(self, "preview_part", None)
+        part = self._part(spec, sel) if preview and sel else None
+        if not part or part.get("type") != "path" or not part.get("show_path_in_preview", True):
+            return
+        from .paths import arclength, catmull_rom
+        from .storyboard import PathPending, path_line
+        pv = self.pv; pts = None; src = part.get("source") or {}
+        try:
+            if src.get("kind", "follow") == "follow":
+                items = [(it.get("structure"), it.get("component")) for it in src.get("items", [])]
+                pts = path_line(self.ds, items, clip_box(spec, self.shape)) if items else None
+                if pts is not None and part.get("reverse"):
+                    pts = pts[::-1]
+            else:
+                wps = part.get("waypoints") or []
+                foc = [np.asarray(w.get("focal") or w.get("point") or w.get("pos"), float) for w in wps]
+                self._markers = [(i + 1, f) for i, f in enumerate(foc)]
+                pts = catmull_rom(foc)[0] if len(foc) >= 2 else None
+        except (PathPending, Exception):
+            pts = None
+        r = max(0.6, 0.004 * max(self.shape))
+        cum = arclength(pts) if pts is not None and len(pts) >= 2 else [0.0]
+        if cum[-1] > 1e-3:  # a path that only turns the camera has no line to draw
+            tube = pv.Spline(pts, max(20, len(pts))).tube(radius=r)
+            self._path_actors.append(self.pl.add_mesh(tube, color="#ffd23f", lighting=False, pickable=False))
+        step = cum[-1] / 6 if cum[-1] > 1e-3 else 0
+        for d in (np.arange(step / 2, cum[-1], step) if step else []):  # arrows show the direction
+            i = int(np.searchsorted(cum, d)); i = min(max(1, i), len(pts) - 1)
+            t = pts[i] - pts[i - 1]; t /= np.linalg.norm(t) or 1.0
+            cone = pv.Cone(center=pts[i], direction=t, height=r * 8, radius=r * 3)
+            self._path_actors.append(self.pl.add_mesh(cone, color="#ffd23f", lighting=False, pickable=False))
+        for _, f in self._markers:
+            self._path_actors.append(self.pl.add_mesh(pv.Sphere(radius=r * 3, center=f), color="#ff4fa3", lighting=False, pickable=False))
+
+    def _draw_markers(self, img, size):
+        """Numbers next to the waypoints; their screen boxes go into last_rects as "marker:i" for dragging."""
+        from PIL import Image, ImageDraw
+        im = Image.fromarray(img); d = ImageDraw.Draw(im); ren = self.pl.renderer; W, H = size
+        f = self._font(max(10, round(H * 0.024)))
+        for n, p in self._markers:
+            ren.SetWorldPoint(*p, 1.0); ren.WorldToDisplay(); x, y, _ = ren.GetDisplayPoint(); y = H - y
+            d.text((x + 6, y - 18), str(n), fill=(255, 79, 163), font=f, stroke_width=2, stroke_fill=(0, 0, 0))
+            self.last_rects[f"marker:{n - 1}"] = dict(box=(x - 8, y - 8, x + 8, y + 8), shown=True)
+        return np.asarray(im)
+
+    def to_plane(self, fx, fy, z):
+        """The point on the plane at height z under a position (fractions of the last frame), or None."""
+        ren = self.pl.renderer; W, H = self.size; pts = []
+        for depth in (0.0, 1.0):
+            ren.SetDisplayPoint(fx * W, (1 - fy) * H, depth); ren.DisplayToWorld(); w = ren.GetWorldPoint()
+            pts.append(np.array(w[:3]) / (w[3] or 1.0))
+        a, b = pts; dz = b[2] - a[2]
+        if abs(dz) < 1e-9:
+            return None
+        t = (z - a[2]) / dz
+        return a + (b - a) * t
+
+    def pick_point(self, fx, fy):
+        """A 3D point on a structure or on the tomogram slice under a position (fractions), or None."""
+        pk = self.vtk.vtkCellPicker(); pk.SetTolerance(0.003)
+        self.slice_actor.SetPickable(True)
+        try:
+            ok = pk.Pick(fx * self.size[0], (1 - fy) * self.size[1], 0, self.pl.renderer)
+        finally:
+            self.slice_actor.SetPickable(False)
+        return np.array(pk.GetPickPosition()) if ok and pk.GetActor() is not None else None
 
     # ---------- close-up animations (fx) ----------
     def _fx_mesh(self, k, cid, kind="item"):

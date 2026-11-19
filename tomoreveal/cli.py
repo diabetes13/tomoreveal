@@ -116,7 +116,14 @@ def cmd_movie(args):
     if args.voxel_nm:
         spec["data"] = dict(voxel_size_nm=float(args.voxel_nm))
     spec["z_range"] = list(args.z_range) if args.z_range else None
-    spec["output"].update(fps=args.fps, crf=args.crf)
+    formats = [f.strip() for f in (args.format or "mp4").split(",") if f.strip()]
+    from .encode import FORMATS
+    bad = [f for f in formats if f not in FORMATS]
+    if bad:
+        raise UserError(f"--format: unknown {', '.join(bad)}; choose from {', '.join(FORMATS)}")
+    spec["output"].update(fps=args.fps, formats=formats, codec=args.codec, file_size=args.file_size)
+    if args.crf is not None:  # --crf overrides --file-size
+        spec["output"]["crf"] = args.crf
     for part in spec["shots"]:  # by type, never by position
         if part["type"] == "slide":
             part["seconds"] = args.sweep_seconds
@@ -278,7 +285,7 @@ def cmd_extract(args):
     print(f"wrote {args.out}/labels.mrc and classes.json" + (" and per-class masks" if args.masks else ""))
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(prog="tomoreveal", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd")
@@ -357,7 +364,11 @@ def main():
     p.add_argument("--no-legend", action="store_true"); p.add_argument("--no-slice-label", action="store_true")
     p.add_argument("--scale-bar", nargs="?", const="auto", help="draw a scale bar: 'auto' or a length in nm")
     p.add_argument("--voxel-nm", type=float, help="voxel size in nm, when the file's header is wrong")
-    p.add_argument("--title", help="text shown bottom-left"); p.add_argument("--crf", type=int, default=20, help="H.264 quality, lower = better")
+    p.add_argument("--title", help="text shown bottom-left"); p.add_argument("--crf", type=int, default=None, help="H.264 / H.265 quality, lower = better (overrides --file-size)")
+    p.add_argument("--format", default="mp4", help="comma-separated: mp4, mov, mov-transparent, mov-prores (one render writes them all)")
+    p.add_argument("--codec", choices=["h264", "h265"], default="h264", help="h265: about half the file size; plays in fewer programs")
+    p.add_argument("--file-size", choices=["balanced", "larger", "smaller"], default="balanced",
+                   help="smaller files at the same resolution (H.264 / H.265 only)")
     p.add_argument("--frames-dir", help="also save every rendered frame as PNG here")
     p.add_argument("--transparent-frames", action="store_true", help="PNG frames get a transparent background (needs --frames-dir)")
     p.add_argument("--no-poster", action="store_true")
@@ -367,7 +378,11 @@ def main():
     render_args(p)
     p.add_argument("-o", "--out", default="views_preview.png"); p.add_argument("--z", type=int, help="slice to show")
     p.set_defaults(func=cmd_preview)
+    return ap
 
+
+def main():
+    ap = build_parser()
     argv = sys.argv[1:]
     if not argv or argv[0] not in ("gui", "app", "icon", "demo", "list", "inspect", "extract", "movie", "preview", "-h", "--help", "--version"):
         argv = ["gui"] + argv  # bare "tomoreveal [files]" opens the desktop program

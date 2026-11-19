@@ -773,7 +773,9 @@ class MovieJob:
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         if frames_dir:
             os.makedirs(frames_dir, exist_ok=True)
-        formats = {"mp4": encode.video_args("mp4", crf=int(o.get("crf", 20)), preset="medium")}
+        formats = encode.output_settings(o)
+        self.alpha = any(encode.FORMATS[f][2] for f in formats)  # a transparent MOV: frames are drawn with alpha
+        self.paths = encode.output_paths(out, formats)
         self.settings = encode.settings_hash(spec, ren.ds)
         chunk = int(chunk_frames or encode.CHUNK_FRAMES); start_chunk = 0
         old = encode.read_partial(out)
@@ -783,7 +785,8 @@ class MovieJob:
         else:
             encode.remove_partial(out)
         self.start = min(len(self.frames), start_chunk * chunk)
-        self.writer = encode.ChunkedWriter(out, formats, self.size, self.fps, len(self.frames), self.settings, chunk, start_chunk)
+        bg = [255 * v for v in hex2rgb(spec.get("style", {}).get("bg", "#000000"))]
+        self.writer = encode.ChunkedWriter(out, formats, self.size, self.fps, len(self.frames), self.settings, chunk, start_chunk, bg=bg)
         # poster: a frame from the main phase of a slide that shows structures (else an overview), never a close-up
         fr = self.frames
         idx = [i for i, s in enumerate(fr) if s.get("type") == "slide" and s["reveal"] and s["phase"] == "main" and s["e"] == 0] \
@@ -799,6 +802,7 @@ class MovieJob:
 
     def __next__(self):
         import imageio.v2 as imageio
+        from . import encode
         if self.closed:
             raise StopIteration
         if self.i >= len(self.frames):
@@ -809,12 +813,14 @@ class MovieJob:
             key = (state_key(s), s.get("part"), s.get("bar_nm"), s.get("card"), round(float(s.get("card_fade", 1)), 4),
                    round(float(s.get("dissolve", 0) or 0), 4))  # overlays may differ per part
             if key != self.last_key:
-                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=self.transparent and bool(self.frames_dir))
+                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa,
+                                         transparent=self.alpha or (self.transparent and bool(self.frames_dir)))
                 self.last_key = key
                 if self.frames_dir:
                     imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)
             if i == self.poster_i:
-                imageio.imwrite(os.path.splitext(self.out)[0] + "_poster.png", self.img[..., :3])
+                rgb = encode.composite(self.img, self.writer.bg) if self.img.shape[2] == 4 else self.img
+                imageio.imwrite(os.path.splitext(self.out)[0] + "_poster.png", rgb)
             self.writer.write(self.img)
         except BaseException:
             self.close(); raise

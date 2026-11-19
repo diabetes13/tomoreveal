@@ -40,12 +40,16 @@ def mean_diff(a, b):
     return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
 
 
-def test_frames_match_the_pinned_ones(studio):
+def test_frames_match_the_pinned_ones(studio, demo):
+    # A renderer of its own: after a frame drawn with SSAA, VTK draws later frames without anti-aliasing a little
+    # smoother (seen in 3.3 too), so the shared one would make this test depend on the order of the tests.
+    st = tr.Studio(headless=True); st.load([demo["tomogram"], demo["labels"]], log=lambda *a: None)
     golden = np.load(GOLDEN)
-    for name, img in render_all(studio).items():
+    for name, img in render_all(st).items():
         assert img.shape == golden[name].shape, name
         d = mean_diff(img, golden[name])
         assert d < TOLERANCE, f"{name}: mean difference {d:.2f}"
+    st._drop_renderer()
 
 
 if __name__ == "__main__":

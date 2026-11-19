@@ -273,7 +273,7 @@ def default_spec(ds):
                    tomogram=dict(show=True, opacity=1.0)),
         shots=default_parts(),
         return_to_overview=True, z_range=None, clip=None,
-        output=dict(size=[1920, 1080], fps=30, crf=20, aa=True))
+        output=dict(size=[1920, 1080], fps=30, aa=True, formats=["mp4"], codec="h264", file_size="balanced"))
 
 
 def merge_settings(spec, new, same_grid=True):

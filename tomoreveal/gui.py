@@ -50,6 +50,8 @@ def build_gui(args):
     from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
     from .look import look_settings, AA_MOVIE, ensure as ensure_look
     from .gui_look import LookControls, style_rows
+    from .gui_export import ExportControls
+    from .encode import output_paths
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
 
@@ -447,7 +449,8 @@ def build_gui(args):
                 self.aa_movie.addItem(t, d)
             self.aa_movie.setToolTip("Smooth edges in the movie. Best (the default) looks cleanest; Off is fastest.")
             self.aa_movie.activated.connect(lambda j: self.spec is not None and (ensure_look(self.spec)["aa"].__setitem__("movie", self.aa_movie.itemData(j)), self.schedule()))
-            grid.addWidget(QtW.QLabel("Smooth edges"), 5, 0); grid.addWidget(self.aa_movie, 5, 1)
+            self.export = ExportControls(self, grid, 2)  # rows 2-5: save as, file size and codec, notes, estimates
+            grid.addWidget(QtW.QLabel("Smooth edges"), 6, 0); grid.addWidget(self.aa_movie, 6, 1)
             self.go_btn = QtW.QPushButton("Make movie"); self.go_btn.setStyleSheet("font-weight:600; padding:6px 18px"); self.go_btn.clicked.connect(self.make_movie)
             self.cancel_btn = QtW.QPushButton("Cancel"); self.cancel_btn.clicked.connect(self.cancel_render)
             self.open_btn = QtW.QPushButton("Play movie"); self.open_btn.clicked.connect(lambda: self._open(self.last_movie))
@@ -455,9 +458,9 @@ def build_gui(args):
             row = QtW.QHBoxLayout()
             for w in (self.go_btn, self.cancel_btn, self.open_btn, self.dir_btn):
                 row.addWidget(w)
-            row.addStretch(1); grid.addLayout(row, 2, 0, 1, 5)
-            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 3, 0, 1, 5)
-            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 4, 0, 1, 5)
+            row.addStretch(1); grid.addLayout(row, 7, 0, 1, 5)
+            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 8, 0, 1, 5)
+            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 9, 0, 1, 5)
             mk.addWidget(g); mk.addStretch(1)
             split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([520, 960])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)
@@ -769,7 +772,7 @@ def build_gui(args):
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
-            self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync()
+            self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync(); self.export.sync()
             self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
@@ -951,6 +954,8 @@ def build_gui(args):
 
         def schedule(self, delay=120):
             self.prev_timer.start(delay)
+            if hasattr(self, "export") and not (self.export.est_gen is not None and delay == 0 and self.export.tick.isActive()):
+                self.export.changed()
             if hasattr(self, "project"):
                 self.project.touch()
             if self.spec is not None and hasattr(self, "editor"):
@@ -1200,10 +1205,9 @@ def build_gui(args):
                 self.say("The movie has no parts. Add one with + Add part under the timeline.", "err"); return
             folder = os.path.abspath(os.path.expanduser(self.folder_le.text().strip() or self.st.outdir))
             name = re.sub(r"[^\w\-. ]+", "_", self.name_le.text().strip()).strip() or "tomogram_reveal"
-            if not name.lower().endswith(".mp4"):
-                name += ".mp4"
+            name = re.sub(r"\.(mp4|mov)$", "", name, flags=re.I) + ".mp4"
             path = os.path.join(folder, name)
-            spec = self.spec_for(); resume = False
+            spec = self.spec_for(); resume = False; outs = output_paths(path, spec["output"].get("formats") or ["mp4"])
             part = read_partial(path)
             if part and part.get("chunks_done"):
                 from .encode import settings_hash
@@ -1211,8 +1215,10 @@ def build_gui(args):
                 resume = self.ask_resume(part, same)
                 if resume is None:
                     return
-            if os.path.exists(path) and not resume:
-                r = QtW.QMessageBox.question(self, "TomoReveal", f"{name} already exists in that folder. Replace it?")
+            there = [os.path.basename(p) for p in outs.values() if os.path.exists(p)]
+            if there and not resume:  # asked once for all of them
+                r = QtW.QMessageBox.question(self, "TomoReveal", f"{', '.join(there)} already exist{'s' if len(there) == 1 else ''} in that "
+                                             f"folder. Replace {'it' if len(there) == 1 else 'them'}?")
                 if r != QtW.QMessageBox.Yes:
                     return
             try:
@@ -1220,12 +1226,12 @@ def build_gui(args):
             except OSError as exc:
                 self.say(f"Cannot use that folder: {exc}", "err"); return
             self.settings.setValue("outdir", folder)
-            self.stop_play(); self.project.autosave_now()
+            self.stop_play(); self.project.autosave_now(); self.export.stop()
             try:
                 self.gen = movie_frames(self.st.ren, spec, path, resume=resume)
             except Exception as exc:
                 traceback.print_exc(); self.say(f"Could not start the movie: {exc}", "err"); return
-            self.render_path = path; self.t0 = time.time()
+            self.render_path = path; self.gen_paths = dict(self.gen.paths); self.t0 = time.time()
             self._rendering(True); self.progress.setMaximum(len(self.gen)); self.progress.setValue(self.gen.start); self.status_lbl.setText("Starting ..." if not self.gen.start else
                                                            f"Continuing after frame {self.gen.start} ..."); self.render_timer.start()
 
@@ -1249,7 +1255,7 @@ def build_gui(args):
             for g in (self.view_group, self.clip_group, self.movie_group):
                 g.setEnabled(not on)
             self.timeline.setEnabled(not on); self.play_btn.setEnabled(not on)
-            for w in (self.quality_cb, self.name_le, self.folder_le, self.aa_movie):
+            for w in (self.quality_cb, self.name_le, self.folder_le, self.aa_movie, *self.export.fmt.values(), self.export.size_cb, self.export.codec_cb):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)
             if on:
@@ -1277,7 +1283,7 @@ def build_gui(args):
 
         def cancel_render(self):
             self._render_stop()  # deletes the partial files; a finished movie of the same name is left alone
-            if not os.path.exists(self.render_path):
+            if not any(os.path.exists(p) for p in self.gen_paths.values()):
                 try:
                     os.remove(os.path.splitext(self.render_path)[0] + "_poster.png")
                 except OSError:
@@ -1287,9 +1293,11 @@ def build_gui(args):
         def _render_done(self):
             self.render_timer.stop(); self.gen = None; self._rendering(False)
             el = time.time() - self.t0
-            mb = os.path.getsize(self.render_path) / 1e6; self.last_movie = self.render_path; self.open_btn.setEnabled(True)
+            outs = self.gen_paths if hasattr(self, "gen_paths") else {"mp4": self.render_path}
+            self.last_movie = next(iter(outs.values())); self.open_btn.setEnabled(True)
             n = self.progress.maximum(); secs = n / int(self.spec["output"].get("fps", 30))
-            self.status_lbl.setText(f"Finished in {fmt_time(el)} \u00b7 {secs:.1f} s movie \u00b7 {mb:.1f} MB \u00b7 saved as {self.render_path}")
+            sizes = self.export.log_true_size(self.quality_cb.currentIndex(), outs)
+            self.status_lbl.setText(f"Finished in {fmt_time(el)} \u00b7 {secs:.1f} s movie \u00b7 {sizes} \u00b7 saved in {os.path.dirname(self.last_movie)}")
             self.say("Movie saved.", "ok"); self.schedule(0)
 
         def _open(self, path):

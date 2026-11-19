@@ -169,8 +169,9 @@ class ChunkedWriter:
 
     formats: {format name: FFmpeg arguments}. start_chunk > 0 continues an interrupted movie (the record must match)."""
 
-    def __init__(self, out, formats, size, fps, total, settings, chunk_frames=CHUNK_FRAMES, start_chunk=0):
+    def __init__(self, out, formats, size, fps, total, settings, chunk_frames=CHUNK_FRAMES, start_chunk=0, bg=(0, 0, 0)):
         self.out, self.formats, self.size, self.fps, self.total = out, dict(formats), tuple(size), int(fps), int(total)
+        self.bg = np.asarray(bg, np.float32)  # opaque formats get frames with alpha composited over this colour
         self.chunk_frames, self.chunk, self.n_in_chunk = int(chunk_frames), int(start_chunk), 0
         self.paths = output_paths(out, self.formats)
         self.record = dict(settings=settings, total=self.total, fps=self.fps, size=list(self.size), chunk_frames=self.chunk_frames,
@@ -196,10 +197,12 @@ class ChunkedWriter:
         self.record["chunks_done"] = self.chunk; self._save_record()
 
     def write(self, img):
+        """One frame (RGB, or RGBA when a transparent format is written) to every format."""
         if self.pipes is None:
             self._open()
+        rgb = composite(img, self.bg) if img.shape[2] == 4 else img
         for p in self.pipes.values():
-            p.write(img)
+            p.write(img if p.alpha else rgb)
         self.n_in_chunk += 1
         if self.n_in_chunk >= self.chunk_frames:
             self._close_chunk()
@@ -228,6 +231,35 @@ class ChunkedWriter:
     def abort(self):
         """Stop and delete every partial file."""
         self.kill(); remove_partial(self.out, list(self.formats))
+
+
+def composite(rgba, bg):
+    """An RGBA frame over a background colour (0-255), as RGB uint8."""
+    a = rgba[..., 3:4].astype(np.float32) / 255.0
+    return (rgba[..., :3].astype(np.float32) * a + np.asarray(bg, np.float32) * (1 - a) + 0.5).astype(np.uint8)
+
+
+def output_settings(o):
+    """{format: FFmpeg arguments} from the movie's output settings: formats (list), codec, file_size; crf overrides."""
+    formats = [f for f in (o.get("formats") or ["mp4"]) if f in FORMATS] or ["mp4"]
+    return {f: video_args(f, o.get("codec", "h264"), o.get("file_size", "balanced"), o.get("crf")) for f in formats}
+
+
+def encode_sample(frames, size, fps, args, alpha=False):
+    """Bytes of a few frames encoded with these settings (for size estimates)."""
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".mov" if "prores_ks" in args else ".mp4"); os.close(fd)
+    try:
+        p = Pipe(path, size, fps, args, alpha=alpha)
+        for f in frames:
+            p.write(f if alpha else (composite(f, (0, 0, 0)) if f.shape[2] == 4 else f))
+        p.close()
+        return os.path.getsize(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def count_frames(path):

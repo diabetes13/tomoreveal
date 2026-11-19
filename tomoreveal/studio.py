@@ -195,10 +195,12 @@ class Studio:
         out = [dict(key=None, label="None", grid=None)]
         for p, f in self.tomo_files.items():
             nz, ny, nx = f["arr"].shape
-            out.append(dict(key="file:" + p, label="your file: " + os.path.basename(p), grid=[nx, ny, nz], group=os.path.basename(p)))
+            out.append(dict(key="file:" + p, label="your file: " + os.path.basename(p), grid=[nx, ny, nz], group=os.path.basename(p),
+                            name=os.path.basename(p), where="your file", path=p))
         for p, ses in self.sessions.items():
             for i, im in enumerate(ses.images()):
                 out.append(dict(key=f"session:{p}:{i}", label=f"from Dragonfly session {os.path.splitext(os.path.basename(p))[0]}: {im['title']}",
+                                name=im["title"], where=f"in {os.path.splitext(os.path.basename(p))[0]}", path=p,
                                 grid=list(im["dims"]), group=os.path.basename(p)))
         return out
 
@@ -408,7 +410,7 @@ class Studio:
                  outdir=self.outdir, views=VIEWS, version=__version__, match_note=self.match_note,
                  tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(),
                  sessions=[dict(key=f"session:{p}", label=os.path.basename(p), **self.hidden.get(p, {})) for p in self.sessions],
-                 segmentation_sources=[dict(key=s["key"], kind=s["kind"], label=s["label"], group=s["group"],
+                 segmentation_sources=[dict(key=s["key"], kind=s["kind"], label=s["label"], group=s["group"], path=s["path"],
                                             session=(f"session:{s['path']}" if s["kind"] == "dragonfly" else None),
                                             enabled=s["enabled"], usable=s.get("usable", True), reason=s.get("reason", ""),
                                             grid=list(s["native"][::-1]), count=len(s.get("preview") or {}),

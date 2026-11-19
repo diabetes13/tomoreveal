@@ -64,6 +64,11 @@ def build_gui(args):
         t = int(round(t))
         return f"{t // 60} min {t % 60:02d} s" if t >= 90 else f"{t} s"
 
+    class TipFilter(QtC.QObject):
+        """Swallows tooltips while Help > Show tips on hover is off."""
+        def eventFilter(self, obj, e):
+            return e.type() == QtC.QEvent.ToolTip and QtW.QApplication.instance().property("tomoreveal_tips") is False
+
     class Worker(QtC.QThread):
         """Runs file reading and surface building off the window's thread."""
         done = QtC.Signal(object); failed = QtC.Signal(str); log = QtC.Signal(str)
@@ -249,6 +254,7 @@ def build_gui(args):
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
             self.project = ProjectManager(self)
+            self._help_menu(); self.apply_help()
             QtC.QTimer.singleShot(500, self._test_real_shadows)
             # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
             self.play_btn = QtW.QPushButton("Play"); self.play_btn.setToolTip("Play the movie in the preview from the playhead (Space)")
@@ -330,7 +336,28 @@ def build_gui(args):
             self.tabs = QtW.QTabWidget(); self.pages = []; outer.addWidget(self.tabs, 1)
             # data
             lay = self._tab("Data")
-            self.data = DataPanel(self.st, self.run_job, self.settings, self.load_demo, self.start_over); lay.addWidget(self.data)
+            win = self
+
+            class Names:  # names the user gave to files, kept in the project (spec["data"]["names"])
+                @staticmethod
+                def available():
+                    return win.spec is not None
+
+                @staticmethod
+                def get(key):
+                    return ((win.spec or {}).get("data") or {}).get("names", {}).get(key)
+
+                @staticmethod
+                def set(key, name):
+                    if win.spec is None:
+                        return
+                    names = win.spec.setdefault("data", {}).setdefault("names", {})
+                    if name:
+                        names[key] = name
+                    else:
+                        names.pop(key, None)
+                    win.editor.record(); win.schedule()
+            self.data = DataPanel(self.st, self.run_job, self.settings, self.load_demo, self.start_over, names=Names()); lay.addWidget(self.data)
             self.voxel_row = VoxelRow(self); lay.addWidget(self.voxel_row); self.voxel_row.setVisible(False)
             # structures
             lay = self._tab("Structures")
@@ -530,6 +557,22 @@ def build_gui(args):
                 self.look_controls.sync()
             self._shadow_worker.done.connect(done); self._shadow_worker.start()
 
+        def apply_help(self):
+            """Tooltips for every control (texts in help_texts.py); called after lists are rebuilt."""
+            from .help_texts import apply
+            apply(self)
+
+        def _help_menu(self):
+            h = self.project.help_menu; h.addSeparator()
+            self.tips_act = h.addAction("Show tips on hover"); self.tips_act.setCheckable(True)
+            self.tips_act.setChecked(self.settings.value("tips", True, type=bool))
+            app = QtW.QApplication.instance()
+            self.tips_act.toggled.connect(lambda on: (self.settings.setValue("tips", bool(on)), app.setProperty("tomoreveal_tips", bool(on))))
+            app.setProperty("tomoreveal_tips", self.tips_act.isChecked())
+            if not hasattr(app, "_tip_filter"):  # one filter for the whole program (a filter per window slows every event)
+                app._tip_filter = TipFilter(app); app.installEventFilter(app._tip_filter)
+            h.addAction("What is this?", lambda: QtW.QWhatsThis.enterWhatsThisMode())
+
         def _scroll_to(self, w):
             """Scroll the tab page that holds w so that w is visible."""
             p = w.parentWidget()
@@ -654,6 +697,7 @@ def build_gui(args):
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
             self.schedule(0)
             self.project.after_apply()
+            self.data.refresh(self.info); self.apply_help()  # names the user gave the files, from the settings
 
         # ---------- controls ----------
         def _struct_details(self, c, sc):
@@ -741,6 +785,8 @@ def build_gui(args):
                 colb.clicked.connect(lambda _=False, k=k, b=colb: self.pick_color(k, b))
                 ne = QtW.QLineEdit(sc["name"]); ne.setMinimumWidth(70); ne.textChanged.connect(lambda t, k=k: self._class_set(k, "name", t))
                 v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); v.setAlignment(QtC.Qt.AlignRight | QtC.Qt.AlignVCenter); self.vox_lbl[c["id"]] = v
+                cb.setToolTip("Show or hide this structure in the preview and the movie")
+                colb.setToolTip("Choose the colour of this structure"); ne.setToolTip("The name shown in the legend")
                 zb = QtW.QPushButton("Zoom"); zb.setToolTip("Add a close-up of this structure to the movie")
                 zb.clicked.connect(lambda _=False, k=k: self.add_focus({"class": k}, self.spec["classes"][k]["name"]))
                 zb.setEnabled(bool(c["mesh"]))
@@ -774,6 +820,7 @@ def build_gui(args):
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
             self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync(); self.export.sync()
             self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
+            self.apply_help()
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
             self.title_le.blockSignals(True); self.title_le.setText(st.get("title", "")); self.title_le.blockSignals(False)
@@ -993,7 +1040,8 @@ def build_gui(args):
             self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
             empty = not any(p.get("on", True) for p in self.spec["shots"])
             self.go_btn.setEnabled(not empty)
-            self.go_btn.setToolTip("The movie has no parts. Add one with + Add part." if empty else "")
+            self.go_btn.setToolTip("The movie has no parts. Add one with + Add part." if empty else
+                                   "Render the movie and save it. You can keep looking at the window while it runs.")
             if empty:
                 self.say("The movie has no parts. Add one with + Add part under the timeline.")
             self.editor.refresh_buttons()

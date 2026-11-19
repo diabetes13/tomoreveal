@@ -99,6 +99,7 @@ class ExplorePanel(QtW.QWidget):
         self.prev_btn = QtW.QPushButton("Previous"); self.prev_btn.clicked.connect(lambda: self.step(-1))
         self.next_btn = QtW.QPushButton("Next"); self.next_btn.clicked.connect(lambda: self.step(1))
         self.slider = QtW.QSlider(QtC.Qt.Horizontal); self.slider.valueChanged.connect(lambda v: self.go(v - 1))
+        self.slider.setToolTip("Go through the slices (or use the arrow keys and the mouse wheel over the slice)")
         self.spin = QtW.QSpinBox(); self.spin.valueChanged.connect(lambda v: self.go(v - 1))
         row.addWidget(self.prev_btn); row.addWidget(self.slider, 1); row.addWidget(self.spin); row.addWidget(self.next_btn)
         gl.addLayout(row)

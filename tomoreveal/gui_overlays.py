@@ -18,6 +18,7 @@ def _slider(lo, hi, value, on_change, fmt):
     s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(value)); lab = QtW.QLabel(fmt(int(value))); lab.setFixedWidth(44)
     s.valueChanged.connect(lambda v: (lab.setText(fmt(v)), on_change(v)))
     h.addWidget(s, 1); h.addWidget(lab); w.slider, w.label, w.fmt = s, lab, fmt
+    w.setToolTip = lambda t, s=s, f=w.setToolTip: (f(t), s.setToolTip(t))  # the tooltip goes to the slider too
     return w
 
 
@@ -43,7 +44,7 @@ class OverlayControls(QtC.QObject):
         for r, n in enumerate(ov.NAMES):
             cb = QtW.QCheckBox(ov.LABELS[n]); cb.toggled.connect(lambda v, n=n: self.set_show(n, v))
             sz = _slider(50, 300, 100, lambda v, n=n: self.set(n, size=v / 100), lambda v: f"{v / 100:.1f}x")
-            sz.setToolTip("Size of this item")
+            sz.setToolTip(f"Size of the {ov.LABELS[n].lower()} (also: drag its corner in the preview)")
             rb = QtW.QPushButton("Reset position"); rb.setToolTip("Put it back where it was at first")
             rb.clicked.connect(lambda _=False, n=n: self.reset(n))
             grid.addWidget(cb, r, 0); grid.addWidget(sz, r, 1); grid.addWidget(rb, r, 2)
@@ -54,6 +55,7 @@ class OverlayControls(QtC.QObject):
         self.leg_title = QtW.QLineEdit(); self.leg_title.setPlaceholderText("legend title (optional)")
         self.leg_title.textChanged.connect(lambda t: self.set("legend", title=t))
         self.leg_cols = QtW.QComboBox(); self.leg_cols.addItem("one column", 1); self.leg_cols.addItem("two columns", 2)
+        self.leg_cols.setToolTip("List the structures in one or two columns")
         self.leg_cols.activated.connect(lambda j: self.set("legend", columns=self.leg_cols.itemData(j)))
         self.leg_box = QtW.QCheckBox("box"); self.leg_box.setToolTip("A see-through box behind the legend")
         self.leg_box.toggled.connect(lambda v: self.set("legend", box=v))
@@ -70,6 +72,7 @@ class OverlayControls(QtC.QObject):
         self.bar_len = QtW.QDoubleSpinBox(); self.bar_len.setRange(0.1, 100000); self.bar_len.setDecimals(1); self.bar_len.setSuffix(" nm")
         self.bar_len.setValue(100); self.bar_len.valueChanged.connect(lambda _v: self._bar_length())
         self.bar_mode = QtW.QComboBox(); self.bar_mode.addItem("flat on the picture", "screen"); self.bar_mode.addItem("lying on the slice", "slice")
+        self.bar_mode.setToolTip("Flat on the picture: exact at the centre of view. Lying on the slice: exact in every view.")
         self.bar_mode.activated.connect(lambda j: self.set("scale_bar", mode=self.bar_mode.itemData(j)))
         self.bar_label = QtW.QCheckBox("label"); self.bar_label.toggled.connect(lambda v: self.set("scale_bar", label=v))
         sb.addWidget(QtW.QLabel("Scale bar:")); sb.addWidget(self.bar_auto); sb.addWidget(self.bar_len); sb.addWidget(self.bar_mode)

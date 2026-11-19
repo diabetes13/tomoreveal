@@ -14,7 +14,7 @@ PICTURES = "Pictures (*.png *.jpg *.jpeg *.PNG *.JPG *.JPEG)"
 
 
 def _colour_button(hexc, on_pick, title="Colour"):
-    b = QtW.QPushButton(); b.setFixedSize(30, 22)
+    b = QtW.QPushButton(); b.setFixedSize(30, 22); b.setToolTip(f"Choose the {title.lower()}")
     b.setStyleSheet(f"background:{hexc}; border:1px solid palette(mid); border-radius:3px")
 
     def pick():
@@ -99,6 +99,7 @@ def card_rows(panel, pid, p, form):
             tb = QtW.QToolButton(); tb.setText(text); tb.setToolTip(tip); tb.clicked.connect(fn); head.addWidget(tb)
         if b.get("kind") == "text":
             ed = QtW.QPlainTextEdit(b.get("text", "")); ed.setFixedHeight(54); ed.setPlaceholderText("text (line breaks are kept)")
+            ed.setToolTip("The text of this block. The preview follows as you type.")
             timer = QtC.QTimer(ed); timer.setSingleShot(True); timer.setInterval(300)
 
             def typed(i=i, ed=ed):
@@ -115,7 +116,7 @@ def card_rows(panel, pid, p, form):
             al = QtW.QComboBox()
             for t, d in ALIGN:
                 al.addItem(t, d)
-            al.setCurrentIndex(max(0, al.findData(b.get("align", "center"))))
+            al.setCurrentIndex(max(0, al.findData(b.get("align", "center")))); al.setToolTip("Line up the lines of this text")
             al.activated.connect(lambda j, i=i, al=al: (part()["blocks"][i].update(align=al.itemData(j)), changed()))
             v.addWidget(_row(size, col, bold, al))
         else:

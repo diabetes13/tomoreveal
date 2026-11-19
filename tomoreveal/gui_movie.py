@@ -426,6 +426,7 @@ class PartsPanel(QtW.QWidget):
             lab = QtW.QLabel("The movie has no parts. Add one with + Add part."); lab.setStyleSheet(DIM); self.lay.addWidget(lab)
         if keep in self.rows:
             self.open(keep, select=False)
+        self.win.apply_help()
 
     def refresh_line(self, pid):
         r, p = self.rows[pid], self.part(pid)
@@ -491,6 +492,7 @@ class PartsPanel(QtW.QWidget):
     def fill_details(self, pid):
         r, p = self.rows[pid], self.part(pid)
         form = r["form"]; clear_layout(form)
+        QtC.QTimer.singleShot(0, self.win.apply_help)  # tooltips for the new rows
         add = form.addRow
         t = p["type"]
         if t == "slide":

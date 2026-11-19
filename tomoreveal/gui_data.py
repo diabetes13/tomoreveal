@@ -32,9 +32,10 @@ class DataPanel(QtW.QWidget):
     It changes what is loaded only through Studio.add_files, set_tomogram_source, set_segmentation_enabled and
     remove_source, each run by `run(fn, message)` in the window's worker thread (fn takes the log function)."""
 
-    def __init__(self, studio, run, settings, on_demo, on_start_over):
+    def __init__(self, studio, run, settings, on_demo, on_start_over, names=None):
         super().__init__()
         self.st, self.run, self.settings = studio, run, settings
+        self.names = names  # display names the user gave (get(key) / set(key, name or None)), stored in the project
         self.info = None; self.busy = False
         lay = QtW.QVBoxLayout(self)
         lay.addWidget(dim("Drop files anywhere on the window, or:"))
@@ -57,6 +58,7 @@ class DataPanel(QtW.QWidget):
         lay.addWidget(self.empty_lbl)
 
         self.tomo_head = QtW.QLabel("<b>TOMOGRAM</b>"); lay.addWidget(self.tomo_head)
+        self.tomo_shared = dim("", wrap=False); self.tomo_shared.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.tomo_shared)
         self.tomo_w = QtW.QWidget(); self.tomo_lay = QtW.QVBoxLayout(self.tomo_w); self.tomo_lay.setContentsMargins(8, 0, 0, 0)
         lay.addWidget(self.tomo_w)
         self.tomo_group = QtW.QButtonGroup(self); self.tomo_group.setExclusive(True)
@@ -64,6 +66,7 @@ class DataPanel(QtW.QWidget):
         self.match_lbl = dim(""); self.match_lbl.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.match_lbl)
 
         self.seg_head = QtW.QLabel("<b>SEGMENTATION</b>"); lay.addWidget(self.seg_head)
+        self.seg_shared = dim("", wrap=False); self.seg_shared.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.seg_shared)
         self.seg_w = QtW.QWidget(); self.seg_lay = QtW.QVBoxLayout(self.seg_w); self.seg_lay.setContentsMargins(8, 0, 0, 0)
         lay.addWidget(self.seg_w)
         self.hint = dim("Right-click a file to use it as a tomogram or as a segmentation instead.")
@@ -101,22 +104,52 @@ class DataPanel(QtW.QWidget):
     def remove(self, key):
         self.run(lambda log: self.st.remove_source(key, log=log, make_renderer=False), "Updating ...")
 
-    def _menu(self, widget, key):
-        """Right-click on a file: use it as the other kind."""
-        if ":" not in key or key.startswith(("session:", "dragonfly:")):
+    def _menu(self, widget, key, rename_key=None):
+        """Right-click on a file: rename it (in TomoReveal only), use it as the other kind, remove it."""
+        if ":" not in key:
             return
         kind, path = key.split(":", 1)
         widget.setContextMenuPolicy(QtC.Qt.CustomContextMenu)
+        rk = rename_key or key
 
         def show(pos):
             m = QtW.QMenu(widget)
+            if self.names is not None and self.names.available():
+                m.addAction("Rename...", lambda: self.rename(rk))
+                if self.names.get(rk):
+                    m.addAction("Reset name", lambda: self.set_name(rk, None))
+                m.addSeparator()
             if kind == "file":
                 m.addAction("Use as segmentation", lambda: self.add_segmentation([path]))
-            else:
+            elif kind in ("labels", "scores"):
                 m.addAction("Use as tomogram", lambda: self.add_tomogram([path]))
-            m.addAction("Remove", lambda: self.remove(key))
+            if kind not in ("dragonfly",) and not (kind == "session" and path.count(":") and path.rsplit(":", 1)[1].isdigit()):
+                m.addAction("Remove", lambda: self.remove(key))
             m.exec(widget.mapToGlobal(pos))
         widget.customContextMenuRequested.connect(show)
+
+    def rename(self, key):
+        cur = self.names.get(key) or ""
+        text, ok = QtW.QInputDialog.getText(self, "Rename", "Name shown in TomoReveal (the file on disk is not renamed):", text=cur)
+        if ok:
+            self.set_name(key, text.strip() or None)
+
+    def set_name(self, key, name):
+        self.names.set(key, name); self.refresh(self.info)
+
+    def _shown(self, key, short):
+        """The user's name for a file, or its short name."""
+        own = self.names.get(key) if self.names is not None else None
+        return own or short
+
+    @staticmethod
+    def _elide(widget, text, width=330):
+        return widget.fontMetrics().elidedText(text, QtC.Qt.ElideMiddle, width)
+
+    def _shared(self, label, prefix, suffix):
+        txt = (prefix + "\u2026" + suffix) if (prefix or suffix) else ""
+        label.setText(self._elide(label, "all start with: " + txt, 380) if txt else ""); label.setVisible(bool(txt))
+        label.setToolTip(f"The part shared by every name below: {prefix} \u2026 {suffix}" if txt else "")
 
     @staticmethod
     def _remove_btn(fn):
@@ -145,15 +178,24 @@ class DataPanel(QtW.QWidget):
         for b in self.tomo_group.buttons():
             self.tomo_group.removeButton(b)
         self.tomo_head.setVisible(loaded); self.tomo_w.setVisible(loaded)
+        from .names import short_names
+        real = [c for c in choices if c["key"]]
+        pre, suf, shorts = short_names([c.get("name") or c["label"] for c in real])
+        short = {c["key"]: sh for c, sh in zip(real, shorts)}
+        self._shared(self.tomo_shared, pre, suf); self.tomo_shared.setVisible(bool(loaded and (pre or suf)))
         for c in (choices if loaded else []):
             row = QtW.QWidget(); rl = QtW.QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
-            rb = QtW.QRadioButton(c["label"]); rb.setChecked(c["key"] == info.get("tomogram"))
+            text = "None" if not c["key"] else f"{self._shown(c['key'], short[c['key']])}  ({c.get('where', '')})"
+            rb = QtW.QRadioButton(self._elide(self, text)); rb.setChecked(c["key"] == info.get("tomogram"))
+            tip = "Show no tomogram" if not c["key"] else f"{c.get('name', c['label'])}\n{c.get('path', '')}"
             if c.get("grid"):
-                rb.setToolTip(" × ".join(map(str, c["grid"])) + " voxels")
+                tip += "\n" + " × ".join(map(str, c["grid"])) + " voxels"
+            rb.setToolTip(tip)
             rb.clicked.connect(lambda _=False, key=c["key"]: self.choose_tomogram(key))
             self.tomo_group.addButton(rb); rl.addWidget(rb, 1)
             if c["key"] and c["key"].startswith("file:"):
                 rl.addWidget(self._remove_btn(lambda _=False, key=c["key"]: self.remove(key)))
+            if c["key"]:
                 self._menu(row, c["key"])
             self.tomo_lay.addWidget(row)
         dims = info.get("dims")
@@ -174,20 +216,25 @@ class DataPanel(QtW.QWidget):
             if not groups or groups[-1][0] != gkey:
                 groups.append((gkey, []))
             groups[-1][1].append(s)
-        for gkey, items in groups:
+        gpre, gsuf, gshort = short_names([items[0]["group"] for _, items in groups])
+        self._shared(self.seg_shared, gpre, gsuf); self.seg_shared.setVisible(bool(sources and (gpre or gsuf)))
+        for (gkey, items), gname in zip(groups, gshort):
             head = QtW.QWidget(); hl = QtW.QHBoxLayout(head); hl.setContentsMargins(0, 6, 0, 0)
             kind = " (easymode)" if items[0]["kind"] == "scores" else ""
-            hl.addWidget(QtW.QLabel(items[0]["group"] + kind), 1)
+            glab = QtW.QLabel(self._elide(self, self._shown(gkey, gname) + kind, 300)); hl.addWidget(glab, 1)
+            glab.setToolTip(f"{items[0]['group']}\n{items[0].get('path', '')}\nRight-click to rename it in TomoReveal")
             hl.addWidget(self._remove_btn(lambda _=False, key=gkey: self.remove(key)))
             self._menu(head, gkey); self.seg_lay.addWidget(head)
-            for s in items:
+            _, _, ishort = short_names([s["label"] for s in items]) if items[0]["kind"] == "dragonfly" else ("", "", [s["label"] for s in items])
+            for s, sh in zip(items, ishort):
                 n = s["count"]
-                text = s["label"] if s["kind"] == "scores" else f"{s['label']} ({n} structure{'s' if n != 1 else ''})"
+                text = s["label"] if s["kind"] == "scores" else f"{self._shown(s['key'], sh)} ({n} structure{'s' if n != 1 else ''})"
                 if s["kind"] != "dragonfly":
                     text = ", ".join(s["names"]) if s["kind"] == "scores" else f"{n} structure{'s' if n != 1 else ''}"
-                tick = QtW.QCheckBox(text); tick.setChecked(bool(s["enabled"] and s["usable"])); tick.setEnabled(bool(s["usable"]))
+                tick = QtW.QCheckBox(self._elide(self, text, 320)); tick.setChecked(bool(s["enabled"] and s["usable"])); tick.setEnabled(bool(s["usable"]))
                 tick.setContentsMargins(12, 0, 0, 0)
-                tick.setToolTip(s["reason"] or ", ".join(s["names"]))
+                tick.setToolTip("\n".join(x for x in (s["label"], s["reason"] or ", ".join(s["names"]),
+                                                          "Tick to show it; untick to hide it without unloading it") if x))
                 tick.clicked.connect(lambda on, key=s["key"]: self.switch(key, on))
                 self._menu(tick, s["key"])
                 self.seg_lay.addWidget(tick)
@@ -204,3 +251,6 @@ class DataPanel(QtW.QWidget):
                 notes.append(f"{h['undo']} undo cop{'ies' if h['undo'] != 1 else 'y'} hidden")
             if notes:
                 self.seg_lay.addWidget(dim("; ".join(notes), indent=12))
+        w = self.window()
+        if hasattr(w, "apply_help"):
+            w.apply_help()

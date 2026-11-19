@@ -108,8 +108,9 @@ class Dataset:
         self.tomo_name = self.seg_name = ""
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
         self._labels = {}      # structure id -> (label array of its source, label value)
-        self._mesh_cache = {}  # (structure key, threshold) -> surface, kept while sources are switched on and off
+        self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing) -> surface, kept while sources change
         self.smooth, self.step = smooth, step
+        self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations} (the user's choices)
 
     @property
     def shape(self):
@@ -192,9 +193,46 @@ class Dataset:
                 c["named"] = c.get("named", True)
                 self.classes[k] = c; self.bbox[k] = boxes[v - 1]; self._labels[k] = (lab, v)
         for k, c in self.classes.items():  # surfaces made earlier for the same structure are reused
-            m = self._mesh_cache.get((c["key"], c.get("threshold")))
+            m = self._mesh_cache.get(self._cache_key(k))
             if m is not None:
                 self.meshes[k] = m
+
+    def param(self, k, name):
+        """A structure's surface setting: minimum object size (voxels) or smoothing iterations."""
+        v = (self.params.get(self.classes[k]["key"]) or {}).get(name)
+        if name == "smoothing":
+            return int(self.smooth if v is None else v)
+        return int(v or 0)
+
+    def _cache_key(self, k):
+        c = self.classes[k]
+        return (c["key"], c.get("threshold"), self.param(k, "min_object_voxels"), self.param(k, "smoothing"))
+
+    def set_params(self, k, **kw):
+        """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
+        key = self.classes[k]["key"]; before = self._cache_key(k)
+        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing")})
+        self.params[key] = cur
+        if self._cache_key(k) == before:
+            return False
+        had = self.meshes.pop(k, None) is not None
+        cached = self._mesh_cache.get(self._cache_key(k))
+        if cached is not None:
+            self.meshes[k] = cached
+        elif had or not self.classes[k]["background"]:
+            self._mesh(k, force=True)
+        return True
+
+    def kept_mask(self, k, sl):
+        """The structure's voxels in sl, without connected objects smaller than its minimum object size."""
+        m = self.mask(k, sl); n = self.param(k, "min_object_voxels")
+        if n > 1 and m.any():
+            from scipy import ndimage
+            lbl, cnt = ndimage.label(m, structure=np.ones((3, 3, 3), bool))
+            sizes = np.bincount(lbl.ravel())
+            small = sizes < n; small[0] = True
+            m = ~small[lbl]
+        return m
 
     def _rescore(self, k):
         from scipy import ndimage
@@ -213,9 +251,10 @@ class Dataset:
         sl = self.bbox.get(k)
         if sl is None or (self.classes[k]["background"] and not force):
             return
-        m = surface(self.mask(k, sl), [s.start for s in sl], self.smooth, self.step)
+        mask = self.kept_mask(k, sl)
+        m = surface(mask, [s.start for s in sl], self.param(k, "smoothing"), self.step) if mask.any() else None
         if m is not None:
-            self.meshes[k] = m; self._mesh_cache[(self.classes[k]["key"], self.classes[k].get("threshold"))] = m
+            self.meshes[k] = m; self._mesh_cache[self._cache_key(k)] = m
 
     def build_meshes(self, log=print):
         for k in self.classes:
@@ -266,7 +305,7 @@ class Dataset:
 
     def comp_mesh(self, k, cid):
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
-        return surface(lbl[o] == cid, [s.start for s in sl], self.smooth, 1)
+        return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1)
 
     def target_box(self, tgt):
         """Padded (lo, hi) box in (x,y,z) voxels around a structure or one of its connected objects."""

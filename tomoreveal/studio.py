@@ -391,6 +391,16 @@ class Studio:
             self.ren.update_class(k)
         return dict(voxels=self.ds.classes[k]["voxels"], mesh=k in self.ds.meshes, threshold=self.ds.classes[k]["threshold"])
 
+    def set_structure_params(self, key, **kw):
+        """Minimum object size / smoothing of one structure; rebuilds its surface and its 3D actor when they change."""
+        k = self.ds.id_of(key)
+        if k is None:
+            raise UserError("that structure is no longer loaded")
+        if self.ds.set_params(k, **kw) and self.ren is not None:
+            self.ren.update_class(k)
+        c = self.ds.classes[k]
+        return dict(voxels=c["voxels"], mesh=k in self.ds.meshes)
+
     def info(self):
         d = dict(can_show=self.can_show, has_tomogram=self.has_tomogram, has_segmentation=self.has_segmentation,
                  outdir=self.outdir, views=VIEWS, version=__version__, match_note=self.match_note,

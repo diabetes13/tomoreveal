@@ -257,6 +257,10 @@ def load_into(st, data, resolved, log=print):
             s = st._source("scores:" + os.path.abspath(r["path"]))
             if s is not None:
                 s["thr"] = float(r["entry"]["threshold"])
+    for key, c in (remap((data.get("spec") or {}).get("classes") or {}, mapping)).items():  # surfaces built as saved
+        kw = {n: c[n] for n in ("min_object_voxels", "smoothing") if c.get(n) is not None}
+        if kw:
+            st.ds.params[key] = kw
     enabled = remap(data.get("segmentation_enabled") or {}, mapping)
     for s in st.seg_sources:
         if s["key"] in enabled:

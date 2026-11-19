@@ -129,8 +129,8 @@ class Renderer:
             self.img.point_data["I"] = (255 - g if inv else g).ravel(); self._slice_key = key
         self.img.origin = (0, 0, float(k))
         show_slice = ds.tomo is not None and s["slice"] > 0.01
-        # No depth peeling for a see-through slice: with software rendering (VTK 9.6, OSMesa) it hid the slice
-        # completely in frames drawn without anti-aliasing (the preview). Plain blending looks right here.
+        # No depth peeling for a see-through slice alone: with software rendering (VTK 9.6, OSMesa, 3.2) it hid the slice
+        # in frames drawn without anti-aliasing. Plain blending looks right for the slice.
         self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
         # the cutting plane keeps what lies above it: structures above the slice, all of them, or none
         cut = s.get("cut") or ("above" if s["reveal"] else "none")
@@ -142,10 +142,14 @@ class Renderer:
         # structures
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
         tid = ds.id_of(tgt["class"]) if tgt is not None and tgt.get("class") is not None else None
+        all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
+        translucent = False
         for kk, act in self.actors.items():
             c = class_spec(spec, ds, kk)
             if not c.get("show", True):
                 act.SetVisibility(False); continue
+            op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * all_op
+            act.GetProperty().SetOpacity(op); translucent |= op < 0.999
             col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
             is_t = tgt is not None and tid == kk and tgt.get("component") is None
             if e <= 0 or tgt is None or mode == "keep" or is_t:
@@ -163,6 +167,14 @@ class Renderer:
             if act is not None:
                 act.SetVisibility(True)
                 act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
+                op = float(min(1.0, max(0.0, class_spec(spec, ds, tid).get("opacity", 1.0)))) * all_op
+                act.GetProperty().SetOpacity(op); translucent |= op < 0.999
+        # Depth peeling only while some structure is see-through and the slice is opaque or hidden: with OSMesa (VTK 9.6)
+        # peeling plus a see-through slice gives an all-black frame when drawn without anti-aliasing (3.2 and 3.4 pitfall).
+        translucent = translucent and not (show_slice and float(s["slice"]) < 0.999)
+        if translucent != self.peeling:
+            self.pl.enable_depth_peeling(4) if translucent else self.pl.disable_depth_peeling()
+            self.peeling = translucent
         # camera
         p = s["pose"]; fr = Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
         d, up = fr.axes(p["tilt"], p["az"]); cam = self.pl.camera

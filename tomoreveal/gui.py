@@ -230,10 +230,14 @@ def build_gui(args):
             self.pick_for = None       # (part id, structure key) while picking the object of a close-up
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
+            self._struct_open = set()  # structures whose settings are open in the Structures tab
+            self._param_pending = {}
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
             self.prev_timer = QtC.QTimer(self); self.prev_timer.setSingleShot(True); self.prev_timer.timeout.connect(self.do_preview)
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
             self.thr_timer.timeout.connect(self.apply_thresholds)
+            self.param_timer = QtC.QTimer(self); self.param_timer.setSingleShot(True); self.param_timer.setInterval(500)
+            self.param_timer.timeout.connect(self.apply_params)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
             self.project = ProjectManager(self)
@@ -392,7 +396,11 @@ def build_gui(args):
             self.contrast_s.valueChanged.connect(lambda v: self._style_set("contrast", [v / 2, 100 - v / 2]))
             self.title_le = QtW.QLineEdit(); self.title_le.setPlaceholderText("optional text, bottom left")
             self.title_le.textChanged.connect(lambda t: self._style_set("title", t))
-            form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("Title", self.title_le); ll.addLayout(form)
+            self.allop_s = QtW.QSlider(QtC.Qt.Horizontal); self.allop_s.setRange(0, 100)
+            self.allop_s.setToolTip("Fades all structures together, for a 'ghost' look. Each structure's own opacity is in the Structures tab.")
+            self.allop_s.valueChanged.connect(lambda v: self._style_set("structures_opacity", v / 100))
+            form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("All structures", self.allop_s)
+            form.addRow("Title", self.title_le); ll.addLayout(form)
             self.overlay_controls = OverlayControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             wg, wl = self._group("Window", lay)
@@ -616,8 +624,66 @@ def build_gui(args):
             self.project.after_apply()
 
         # ---------- controls ----------
+        def _struct_details(self, c, sc):
+            """The settings that open under a structure: opacity, threshold (score volumes), specks, smoothing."""
+            w = QtW.QWidget(); f = QtW.QFormLayout(w); f.setContentsMargins(0, 0, 0, 6); k = c["key"]
+
+            def slider(lo, hi, v, fmt, fn):
+                row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+                s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(round(v))); val = QtW.QLabel(fmt(s.value())); val.setFixedWidth(44)
+                s.valueChanged.connect(lambda x: (val.setText(fmt(x)), fn(x))); h.addWidget(s, 1); h.addWidget(val)
+                return row
+            f.addRow("Opacity", slider(0, 100, 100 * float(sc.get("opacity", 1.0)), lambda x: f"{x} %",
+                                       lambda x, k=k: self._class_set(k, "opacity", x / 100)))
+            if c["kind"] == "score":
+                f.addRow("Threshold", slider(1, 19, (c["threshold"] or 0.5) * 20, lambda x: f"{x / 20:.2f}",
+                                             lambda x, cid=c["id"]: self._thr_changed(cid, x / 20)))
+            sp = QtW.QSpinBox(); sp.setRange(0, 10_000_000); sp.setSingleStep(10); sp.setSuffix(" voxels"); sp.setSpecialValueText("keep all")
+            sp.setValue(int(sc.get("min_object_voxels", 0) or 0))
+            sp.setToolTip("Leave out separate bits smaller than this. Helps with noisy segmentations.")
+            sp.valueChanged.connect(lambda v, k=k: self._param_changed(k, "min_object_voxels", int(v)))
+            f.addRow("Remove specks smaller than", sp)
+            sm = QtW.QSpinBox(); sm.setRange(0, 200); sm.setValue(int(sc.get("smoothing", self.st.ds.smooth) if sc.get("smoothing") is not None else self.st.ds.smooth))
+            sm.setToolTip("Surface smoothing steps; 0 shows the raw voxel steps")
+            sm.valueChanged.connect(lambda v, k=k: self._param_changed(k, "smoothing", int(v)))
+            f.addRow("Smoothing", sm)
+            return w
+
+        def _param_changed(self, key, name, v):
+            self.spec["classes"][key][name] = v; self._param_pending[key] = True; self.param_timer.start(); self.schedule()
+
+        def apply_params(self):
+            """Rebuild the surfaces whose speck size or smoothing changed (after the controls settle)."""
+            if self.busy or self.gen is not None:
+                self.param_timer.start(); return
+            self._param_pending = {}
+            QtW.QApplication.setOverrideCursor(QtC.Qt.WaitCursor)
+            try:
+                self._sync_params()
+            finally:
+                QtW.QApplication.restoreOverrideCursor()
+            self.schedule(0)
+
+        def _sync_params(self):
+            """Bring the surfaces in line with the settings (after a change, undo, or opening a project)."""
+            if not self.spec or not self.info:
+                return False
+            changed = False
+            for c in self.info.get("structures", []):
+                sc = self.spec["classes"].get(c["key"], {}); k = c["id"]
+                want = dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
+                            smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth)
+                if any(self.st.ds.param(k, n) != v for n, v in want.items()):
+                    try:
+                        r = self.st.set_structure_params(c["key"], **want)
+                    except UserError as exc:
+                        self.say(str(exc), "err"); continue
+                    c.update(mesh=r["mesh"]); changed = True
+            return changed
+
         def build_controls(self):
             sp = self.spec
+            self._sync_params()
             grid = self.struct_grid
             while grid.count():
                 it = grid.takeAt(0); w = it.widget()  # store it first: after setParent(None), it.widget() is None
@@ -650,18 +716,16 @@ def build_gui(args):
                 if why:  # listed in grey, switched off at first; tick it to show it anyway
                     ne.setStyleSheet(DIM); ne.setToolTip(f"{why}; tick the box to show it anyway")
                     cb.setToolTip(f"{why}; tick to show it anyway")
-                for col, w in enumerate((cb, colb, ne, v, zb)):
+                more = QtW.QToolButton(); more.setText("\u2699"); more.setCheckable(True); more.setChecked(k in self._struct_open)
+                more.setToolTip("Opacity, threshold, small specks and smoothing of this structure")
+                for col, w in enumerate((cb, colb, ne, v, zb, more)):
                     grid.addWidget(w, r, col)
                 r += 1
+                det = self._struct_details(c, sc); det.setVisible(k in self._struct_open); grid.addWidget(det, r, 2, 1, 4); r += 1
+                more.toggled.connect(lambda on, k=k, det=det: (det.setVisible(on), self._struct_open.add(k) if on else self._struct_open.discard(k)))
                 if why and why != "no name in the session":
                     lab = QtW.QLabel(f"{why}, so not drawn at first" if not sc["show"] else why); lab.setStyleSheet(DIM)
                     grid.addWidget(lab, r, 2, 1, 3); r += 1
-                if c["kind"] == "score":
-                    row = QtW.QHBoxLayout(); lab = QtW.QLabel("threshold"); lab.setStyleSheet(DIM)
-                    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(1, 19); s.setValue(int(round((c["threshold"] or 0.5) * 20)))
-                    val = QtW.QLabel(f"{(c['threshold'] or 0.5):.2f}"); val.setFixedWidth(40)
-                    s.valueChanged.connect(lambda x, cid=c["id"], val=val: (val.setText(f"{x / 20:.2f}"), self._thr_changed(cid, x / 20)))
-                    row.addWidget(lab); row.addWidget(s, 1); row.addWidget(val); grid.addLayout(row, r, 2, 1, 3); r += 1
             v = sp["view"]
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()
@@ -674,7 +738,7 @@ def build_gui(args):
             self._sweep_hint()
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
-            self._setv(self.invert_cb, st.get("invert", False))
+            self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
             self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync()
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)

@@ -80,7 +80,7 @@ class OrsSession:
             return self._chunks(f, off, total)
 
     def _chunks(self, f, off, total):
-        p, out, got, dob, left = off + 8, [], 0, None, 0
+        p, out, got, dob, left = off + 8, bytearray(total), 0, None, 0  # one buffer of the size the header gives
         while got < total:
             cs = struct.unpack("<Q", f.read(8))[0]
             blob = f.read(cs)
@@ -95,13 +95,15 @@ class OrsSession:
                     if not hasattr(dob, "eof"):
                         left = self._zstd.get_frame_parameters(blob[:18]).content_size
                 d = dob.decompress(blob); blob = b""
-                out.append(d); got += len(d)
+                if got + len(d) > total:
+                    raise ValueError(f"the record at byte {off} holds more data than its header says")
+                out[got:got + len(d)] = d; got += len(d)
                 done = getattr(dob, "eof", None)
                 if done is None:
                     left -= len(d); done = left <= 0
                 if done:
                     blob = getattr(dob, "unused_data", b""); dob = None
-        return b"".join(out)
+        return out
 
     def _array(self, off, count=None):
         raw = self._read(off)
@@ -449,8 +451,7 @@ def describe_session(path):
             if types and num is not None:  # slot numbering may start at 0 or 1; record both readings
                 code = dict(zero_based=types[num] if num < len(types) else None,
                             one_based=types[num - 1] if 0 < num <= len(types) else None)
-            if kind is None and code:
-                kind = SLOT_TYPES.get(code["one_based"]) or SLOT_TYPES.get(code["zero_based"])
+            kind = (SLOT_TYPES.get(code["zero_based"]) if code else None) or kind  # the reader's rule (class_table)
             sl = dict(slot=c.tag, number=num, guid_kind=guid.rsplit(".", 1)[-1] if guid else "",
                       type_code=code, decoded_as=kind or "unknown", size=int(c.findtext("size") or 0))
             try:

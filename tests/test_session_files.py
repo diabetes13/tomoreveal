@@ -130,3 +130,33 @@ def test_single_slice_preview_is_never_the_guess():
     rois = [dict(kind="ROI", title="a", dims=(20, 10, 5), voxels=50), dict(kind="ROI", title="b", dims=(20, 10, 1), voxels=5)]
     assert guess_roi(rois) == "a"  # one 3D ROI left: that one, not all of them
 
+
+
+def test_inspect_reads_slots_without_a_guid_as_the_reader_does(tmp_path):
+    """F-45: without a GUID, inspect took the type code numbered from 1, the reader from 0, so they disagreed."""
+    import re
+    from tomoreveal.dragonfly import describe_session
+    p = str(tmp_path / "s.ORSSession"); write_session(p, names=("ER", "Membrane", "background"))
+    data = open(p, "rb").read(); open(p, "wb").write(re.sub(rb'GUID="ORS\.CxvArray\w+"', b'GUID=""', data))
+    d = describe_session(p)["objects"][0]
+    kinds = {s["slot"]: s["decoded_as"] for s in d["slots"]}
+    assert kinds["ScalarValues_2"] == "string" and kinds["ScalarValues_5"] == "bool" and kinds["ScalarValues_1"] == "uint32"
+    assert [r["name"] for r in d["table"]] == ["ER", "Membrane", "background"]
+
+
+def test_a_record_is_read_with_one_copy_in_memory(tmp_path):
+    """F-46: the pieces of a record were kept in a list and then joined, so reading needed about twice its size."""
+    import io
+    import struct
+    import tracemalloc
+    import zstandard
+    p = str(tmp_path / "s.ORSSession"); write_session(p); ses = OrsSession(p)
+    data = np.arange(6_000_000, dtype="<f4").tobytes()  # 24 MB
+    z = zstandard.ZstdCompressor().compress(data); step = 1 << 20  # one frame, spread over 1 MB chunks as Dragonfly does
+    rec = b"".join(struct.pack("<Q", len(z[i:i + step])) + z[i:i + step] for i in range(0, len(z), step))
+    f = io.BytesIO(rec)
+    tracemalloc.start()
+    out = ses._chunks(f, 0, len(data))
+    peak = tracemalloc.get_traced_memory()[1]; tracemalloc.stop()
+    assert bytes(out) == data
+    assert peak < 1.5 * len(data), peak / len(data)

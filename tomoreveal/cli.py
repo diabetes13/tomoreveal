@@ -286,6 +286,27 @@ def cmd_extract(args):
     print(f"wrote {args.out}/labels.mrc and classes.json" + (" and per-class masks" if args.masks else ""))
 
 
+def validate_args(args):
+    """Values that would fail late with a traceback, or quietly give the wrong movie: a clear message now."""
+    size, con, zr, c = (getattr(args, k, None) for k in ("size", "contrast", "z_range", "clip"))
+    if size is not None and (len(size) != 2 or min(size) < 16):
+        sys.exit("tomoreveal: --size needs WIDTHxHEIGHT, each at least 16, for example 1920x1080")
+    if con is not None and (len(con) != 2 or not 0 <= con[0] < con[1] <= 100):
+        sys.exit("tomoreveal: --contrast needs LOW,HIGH percentiles with 0 <= LOW < HIGH <= 100, for example 1,99")
+    if zr is not None and (len(zr) != 2 or not 0 <= zr[0] <= zr[1]):
+        sys.exit("tomoreveal: --z-range needs FIRST,LAST slice numbers (from 0) with FIRST <= LAST, for example 10,40")
+    if c is not None and (len(c) != 6 or c[0] > c[1] or c[2] > c[3] or c[4] > c[5]):
+        sys.exit("tomoreveal: --clip needs six numbers X0,X1,Y0,Y1,Z0,Z1, each first number at most the second")
+    if getattr(args, "fps", 1) < 1:
+        sys.exit("tomoreveal: --fps needs at least 1 frame per second")
+    if not 1 <= getattr(args, "fov", 30) <= 179:
+        sys.exit("tomoreveal: --fov needs an angle from 1 to 179 degrees")
+    if size is not None and (size[0] % 2 or size[1] % 2):
+        print(f"note: the size is rounded down to {size[0] // 2 * 2}x{size[1] // 2 * 2} (the video needs even numbers)")
+    if getattr(args, "cmd", None) in ("movie", "preview") and not os.path.splitext(args.out)[1]:
+        args.out += ".mp4" if args.cmd == "movie" else ".png"  # the writers choose the format by the extension
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):  # a pipe or file in the Windows code page: show ? for what it lacks
         if stream is not None and hasattr(stream, "reconfigure"):
@@ -326,7 +347,8 @@ def main():
     def render_args(p):
         p.add_argument("tomogram", help="tomogram (.mrc/.rec/.map/.tif) on the same grid as the segmentation")
         seg_args(p)
-        p.add_argument("--view", default="oblique", help=f"comma-separated presets ({', '.join(VIEWS)}) or TILT:AZIMUTH; one output per view")
+        p.add_argument("--view", default="oblique", help=f"comma-separated presets ({', '.join(VIEWS)}) or TILT:AZIMUTH; one output per view. "
+                       "For a negative tilt write it with =, for example --view=-30:20")
         p.add_argument("--only", help="comma-separated class names or numbers to show")
         p.add_argument("--exclude", help="comma-separated class names or numbers to hide")
         p.add_argument("--keep-background", action="store_true", help="do not auto-hide the background class")
@@ -383,6 +405,7 @@ def main():
     args = ap.parse_args(argv)
     if args.cmd == "movie" and args.transparent_frames and not args.frames_dir:
         sys.exit("tomoreveal: --transparent-frames needs --frames-dir")
+    validate_args(args)
     try:
         args.func(args)
     except UserError as exc:

@@ -132,6 +132,7 @@ class Dataset:
     integer id (k, used by the renderer) and a stable key "<source key>#<label>" that the settings use."""
     def __init__(self, smooth=15, step=1):
         self.tomo = None; self.vox = None; self._shape = None
+        self._tomo_vox = self._seg_vox = None  # each source's own voxel size: the tomogram's wins
         self.tomo_name = self.seg_name = ""
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
         self._labels = {}      # structure id -> (label array of its source, label value)
@@ -144,11 +145,11 @@ class Dataset:
         return tuple(self.tomo.shape) if self.tomo is not None else self._shape
 
     def set_tomogram(self, arr, vox, name):
+        self._tomo_vox = vox if arr is not None else None; self.vox = self._tomo_vox or self._seg_vox
         if arr is None:
             self.tomo = None; self._lev = {}; self.tomo_name = ""
             return
         self.tomo = np.ascontiguousarray(arr, dtype=np.float32); self._lev = {}; self.tomo_name = name
-        self.vox = vox or self.vox
 
     def has_seg(self):
         return bool(self.classes)
@@ -191,7 +192,7 @@ class Dataset:
         A label source may carry "_stats" = label_stats(arr); it is computed and stored there when missing."""
         self._comp, self.meshes, self.classes, self.bbox, self.scores, self._labels = {}, {}, {}, {}, {}, {}
         self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
-        self.seg_name = ", ".join(s.get("title", "") for s in sources); self.vox = self.vox or vox
+        self.seg_name = ", ".join(s.get("title", "") for s in sources); self._seg_vox = vox; self.vox = self._tomo_vox or vox
         k = 0
         for src in sources:
             if src["kind"] == "scores":

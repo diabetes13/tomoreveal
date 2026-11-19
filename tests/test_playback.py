@@ -107,3 +107,25 @@ def test_nothing_draws_while_files_are_loading(window, demo, monkeypatch):
             loop.exec()
         run_for(app, 0.2)
     assert win.timeline.isEnabled() and win.explore.page.isEnabled() and not errors, errors
+
+
+def test_closing_during_playback(window, capsys):
+    """F-41: the play timer kept drawing after the window closed and the renderer was gone (AttributeError)."""
+    app, win, errors = window
+    win.play_btn.click(); run_for(app, 0.2); capsys.readouterr()
+    win.close(); run_for(app, 0.3)
+    assert not errors and "Error" not in capsys.readouterr().err, errors
+
+
+def test_closing_during_a_load(window, demo, monkeypatch):
+    """F-41: closing during a load made a new renderer for the closed window when the load finished."""
+    import threading
+    app, win, errors = window
+    made = []; go = threading.Event(); real_load = win.st.load
+    monkeypatch.setattr(win.st, "ensure_renderer", lambda *a, **k: made.append(1))
+    monkeypatch.setattr(win.st, "load", lambda *a, **k: go.wait(10) and real_load(*a, **k))
+    win.load(paths=[demo["tomogram"], demo["labels"]])
+    threading.Timer(0.3, go.set).start()
+    win.close(); run_for(app, 0.3)
+    assert not made and not win.worker.isRunning() and not errors, errors
+

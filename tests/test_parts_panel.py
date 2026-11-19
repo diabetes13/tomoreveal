@@ -97,6 +97,45 @@ def test_open_duration_box_follows_a_timeline_resize(window):
     assert not errors, errors
 
 
+
+def test_notes_follow_the_new_plan(tmp_path, demo, needs_3d):
+    """F-28: the parts list notes came from the previous plan, so after a Data change they said the opposite."""
+    lab, vox = load_volume(demo["labels"])
+    other = str(tmp_path / "other.mrc"); write_mrc(other, (lab == 2).astype("int8"), vox)
+    errors = []; old = sys.excepthook; sys.excepthook = lambda t, v, tb: errors.append(v)
+    app, win = open_window(tmp_path, [demo["tomogram"], demo["labels"], other])
+    try:
+        key = next(c["key"] for c in win.info["structures"] if c["source_title"] == "other.mrc")
+        win.editor.add_closeup(key, "other"); win.do_preview(); pump(app); pid = win.selected_part
+        note = win.parts_panel.rows[pid]["note"]
+        src = key.split("#")[0]
+        for on, expect in ((False, "left out"), (True, "")):
+            loop = QtCore.QEventLoop()
+            win.data.switch(src, on); win.worker.finished.connect(loop.quit)
+            if win.worker.isRunning():
+                loop.exec()
+            pump(app); win.do_preview(); pump(app)
+            note = win.parts_panel.rows[pid]["note"]
+            assert (expect in note.text()) if expect else note.text() == "", (on, note.text())
+        win.parts_panel.open(ids(win)[1]); pump(app)
+        box = field(win.parts_panel, ids(win)[1], "Duration")
+        win.do_preview(); pump(app); win.do_preview(); pump(app)
+        assert field(win.parts_panel, ids(win)[1], "Duration") is box  # a box being used is never replaced by a preview
+        assert not errors, errors
+    finally:
+        sys.excepthook = old; win.close()
+
+
+
+def test_note_of_a_closeup_of_an_unticked_structure(window):
+    """F-35: the parts list gives the plan's reason, not always "not loaded"."""
+    app, win, errors = window
+    key = win.st.ds.key_of(2); win.editor.add_closeup(key, "vesicles"); win.do_preview(); pump(app); pid = win.selected_part
+    win.spec["classes"][key]["show"] = False; win.do_preview(); pump(app)
+    assert "switched off" in win.parts_panel.rows[pid]["note"].text()
+    assert not errors, errors
+
+
 def test_closeup_structure_dropdown(window):
     app, win, errors = window
     ds = win.st.ds
@@ -139,7 +178,7 @@ def test_threshold_change_keeps_single_object_closeups(tmp_path, demo, needs_3d)
         c = win.info["structures"][0]; assert c["kind"] == "score"
         win.editor.insert(sb.focus_shot({"class": c["key"], "component": 1}, "one vesicle")); win.do_preview(); pump(app)
         pid = win.selected_part
-        win._thr_changed(c["id"], 0.6); win.apply_thresholds(); win.do_preview(); pump(app)
+        win._thr_changed(c["id"], 0.6); win.thr_timer.stop(); win.apply_thresholds(); win.do_preview(); pump(app)  # the app applies once, from this timer
         part = win.parts_panel.part(pid)
         assert part is not None and part["target"] == {"class": c["key"]}  # whole structure now, the part stays
         assert "whole structure" in win.msg_lbl.text()

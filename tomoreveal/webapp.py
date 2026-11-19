@@ -2,7 +2,9 @@
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 
 from .common import UserError, __version__
@@ -41,13 +43,18 @@ def make_handler(studio):
                 self._send(500, dict(error=f"{type(exc).__name__}: {exc}"))
 
         def _allowed(self):
-            """Only TomoReveal's own page: Host is this server, and Origin (when sent) is this server too."""
+            """Only TomoReveal's own page: Host is this server, and Origin (when sent) is this server too.
+            Also refuses a Content-Length that is not a whole number (a negative one would block, then still run)."""
             own = (f"127.0.0.1:{self.server.server_address[1]}", f"localhost:{self.server.server_address[1]}")
             origin = self.headers.get("Origin")
-            if self.headers.get("Host") in own and (origin is None or origin in tuple("http://" + h for h in own)):
+            if not (self.headers.get("Host") in own and (origin is None or origin in tuple("http://" + h for h in own))):
+                code, why = 403, "refused: this request did not come from TomoReveal's own page"
+            elif not (self.headers.get("Content-Length") or "0").strip().isdigit():
+                code, why = 400, "refused: the Content-Length is not a whole number"
+            else:
                 return True
             self.close_connection = True  # the unread body must never be taken as a second request
-            self._send(403, dict(error="refused: this request did not come from TomoReveal's own page"), extra={"Connection": "close"})
+            self._send(code, dict(error=why), extra={"Connection": "close"})
             return False
 
         def do_GET(self):
@@ -77,6 +84,8 @@ def make_handler(studio):
                 else:
                     start = max(0, size - int(m.group(2)))
                 end = min(end, size - 1)
+                if start > end:
+                    return self._send(416, dict(error="that byte range is not in the file"), extra={"Content-Range": f"bytes */{size}"})
                 self.send_response(206); self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             else:
                 self.send_response(200)
@@ -100,7 +109,8 @@ def make_handler(studio):
             u = urlparse(self.path)
             if u.path == "/api/upload":
                 name = os.path.basename(unquote(parse_qs(u.query).get("name", ["upload.bin"])[0])) or "upload.bin"
-                n = int(self.headers.get("Content-Length") or 0); dest = os.path.join(studio.work, name)
+                n = int(self.headers.get("Content-Length") or 0); folder = tempfile.mkdtemp(dir=studio.work, prefix="upload_")
+                dest = os.path.join(folder, name)  # a folder per upload: two files with one name are both kept
                 try:
                     with open(dest, "wb") as f:
                         while n > 0:
@@ -109,14 +119,16 @@ def make_handler(studio):
                                 break
                             f.write(chunk); n -= len(chunk)
                 except OSError as exc:
-                    if os.path.exists(dest):
-                        os.remove(dest)
+                    shutil.rmtree(folder, True)
                     return self._send(500, dict(error=f"could not store the file: {exc}"))
                 if n > 0:  # the browser stopped sending before the end
-                    os.remove(dest); self.close_connection = True
+                    shutil.rmtree(folder, True); self.close_connection = True
                     return self._send(400, dict(error="the upload was cut off"), extra={"Connection": "close"})
                 return self._send(200, dict(path=dest))
-            body = self._json()
+            try:
+                body = self._json()
+            except ValueError:
+                return self._send(400, dict(error="the request is not valid JSON"))
             busy = studio.job.get("state") == "rendering"
             if u.path == "/api/load":
                 if busy:

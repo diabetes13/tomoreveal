@@ -818,6 +818,7 @@ def build_gui(args):
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
                 self.selected_part = None
             self.timeline.set_plan(plan, self.spec, self.st.ds); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+            self.parts_panel.refresh_lines()  # the notes come from this plan
             vp = self.view_part()
             self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
             empty = not any(p.get("on", True) for p in self.spec["shots"])
@@ -1008,8 +1009,11 @@ def build_gui(args):
                 if r != QtW.QMessageBox.Yes:
                     e.ignore(); return
                 self.cancel_render()
-            if self.worker is not None and self.worker.isRunning():
-                self.worker.wait(60000)
+            self.playing = None; self.play_timer.stop(); self.prev_timer.stop(); self.thr_timer.stop()  # nothing draws after this
+            if self.worker is not None and self.worker.isRunning():  # let the load end, but never make a renderer for it
+                for sig in (self.worker.done, self.worker.failed, self.worker.log):
+                    sig.disconnect()
+                self.hide(); self.worker.wait()
             self.st._drop_renderer(); e.accept()
 
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])

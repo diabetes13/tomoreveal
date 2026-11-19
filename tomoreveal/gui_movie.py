@@ -336,8 +336,11 @@ class PartsPanel(QtW.QWidget):
             return "needs a tomogram, so it is left out"
         if p["type"] == "slide" and p.get("structures") in ("above", "all") and not info.get("has_segmentation"):
             return "needs a segmentation, so it is left out"
-        if p["id"] in self._problems():
+        why = self._problems().get(p["id"])
+        if why == "structure not loaded":
             return "structure not loaded, so it is left out; choose another structure or load it again"
+        if why:
+            return f"{why}, so it is left out"
         return ""
 
     # ---- building ----
@@ -349,8 +352,7 @@ class PartsPanel(QtW.QWidget):
         if force or sig != self._sig:
             self._sig = sig; self.rebuild()
         else:
-            for pid in self.rows:
-                self.refresh_line(pid)
+            self.refresh_lines()
             if self.open_id in self.rows:  # its boxes may show values that a timeline drag, undo or threshold changed
                 self.fill_details(self.open_id)
         sel = self.win.selected_part
@@ -392,6 +394,11 @@ class PartsPanel(QtW.QWidget):
             lab = QtW.QLabel("The movie has no parts. Add one with + Add part."); lab.setStyleSheet(DIM); self.lay.addWidget(lab)
         if keep in self.rows:
             self.open(keep, select=False)
+
+    def refresh_lines(self):
+        """Every line's name, length and note, without touching any box (also after each new plan)."""
+        for pid in self.rows:
+            self.refresh_line(pid)
 
     def refresh_line(self, pid):
         r, p = self.rows[pid], self.part(pid)

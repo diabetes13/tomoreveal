@@ -155,3 +155,17 @@ def test_one_file_under_two_spellings_is_loaded_once(demo, tmp_path):
     st.add_files([p.lower(), p.upper()], log=quiet, make_renderer=False)
     assert [s["group"] for s in st.seg_sources] == ["Mixed_Labels.mrc"]
 
+
+
+def test_voxel_size_follows_the_tomogram_in_use(demo, tmp_path):
+    """F-47: the first voxel size was never cleared: a tomogram without one, or no tomogram, kept the old size."""
+    tomo, _ = load_volume(demo["tomogram"]); lab, _ = load_volume(demo["labels"])
+    a, b, seg = str(tmp_path / "a.mrc"), str(tmp_path / "b.mrc"), str(tmp_path / "seg.mrc")
+    write_mrc(a, tomo, 10.0); write_mrc(b, tomo, None); write_mrc(seg, lab, 30.0)
+    st = tr.Studio(headless=True)
+    st.add_files([a, b], as_tomogram=[a, b], log=quiet, make_renderer=False)
+    st.set_tomogram_source("file:" + st._norm(a), log=quiet, make_renderer=False); assert st.ds.vox == pytest.approx(10.0)
+    st.set_tomogram_source("file:" + st._norm(b), log=quiet, make_renderer=False); assert st.ds.vox is None  # b has no size
+    st.add_files([seg], as_labels=[seg], log=quiet, make_renderer=False)
+    st.set_tomogram_source("file:" + st._norm(a), log=quiet, make_renderer=False); assert st.ds.vox == pytest.approx(10.0)
+    st.set_tomogram_source(None, log=quiet, make_renderer=False); assert st.ds.vox == pytest.approx(30.0)  # the segmentation's

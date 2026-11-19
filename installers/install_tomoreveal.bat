@@ -25,12 +25,13 @@ if not exist "%APP%\env\python.exe" (
 echo [3/3] Installing the program and shortcuts ...
 "%APP%\env\python.exe" -m pip install -q --no-deps --upgrade --force-reinstall "%ROOT%" || goto :fail
 "%APP%\env\python.exe" -m tomoreveal icon "%APP%\tomoreveal.ico" >nul || goto :fail
+rem The folder is read from APP inside PowerShell, so a name such as O'Brien cannot break the script.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$w = New-Object -ComObject WScript.Shell;" ^
+  "$ErrorActionPreference = 'Stop'; $a = $env:APP; $w = New-Object -ComObject WScript.Shell;" ^
   "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {" ^
   "  $s = $w.CreateShortcut((Join-Path $d 'TomoReveal.lnk'));" ^
-  "  $s.TargetPath = '%APP%\env\pythonw.exe'; $s.Arguments = '-m tomoreveal';" ^
-  "  $s.IconLocation = '%APP%\tomoreveal.ico'; $s.WorkingDirectory = $env:USERPROFILE; $s.Save() }"
+  "  $s.TargetPath = (Join-Path $a 'env\pythonw.exe'); $s.Arguments = '-m tomoreveal';" ^
+  "  $s.IconLocation = (Join-Path $a 'tomoreveal.ico'); $s.WorkingDirectory = $env:USERPROFILE; $s.Save() }" || goto :fail
 echo.
 echo Done. Double-click TomoReveal on your desktop or in the Start menu.
 pause

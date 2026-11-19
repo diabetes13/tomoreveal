@@ -87,9 +87,9 @@ def test_other_pages_and_wrong_host_are_refused(server):
 def test_upload_from_another_page_is_refused(server, tmp_path):
     st, port = server
     assert status(ask(port, *post(port, "/api/upload?name=x.mrc", origin="http://evil.example", body=b"12345"))) == [403]
-    assert not os.path.exists(tmp_path / "x.mrc")
+    assert not list(tmp_path.rglob("x.mrc"))
     assert status(ask(port, *post(port, "/api/upload?name=y.mrc", origin=f"http://127.0.0.1:{port}", body=b"12345"))) == [200]
-    assert (tmp_path / "y.mrc").read_bytes() == b"12345"
+    assert [f.read_bytes() for f in tmp_path.rglob("y.mrc")] == [b"12345"]
 
 
 def test_request_hidden_in_a_refused_body_never_runs(server):
@@ -108,7 +108,7 @@ def test_cut_off_upload_leaves_no_file(server, tmp_path):
     raw, _ = post(port, "/api/upload?name=part.mrc", origin=f"http://127.0.0.1:{port}", length=1000)
     resp = ask(port, raw, b"only ten b", half_close=True)
     assert status(resp) == [400]
-    assert not os.path.exists(tmp_path / "part.mrc")
+    assert not list(tmp_path.rglob("part.mrc"))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="only Windows lets two servers share a busy port")
@@ -124,3 +124,40 @@ def test_second_app_moves_to_the_next_port():
     finally:
         first.server_close()
 
+
+def test_two_uploads_with_the_same_name_are_both_kept(server):
+    """F-42: uploads were stored by name only, so a second seg.ORSSession replaced the first."""
+    import json
+    st, port = server
+    paths = []
+    for body in (b"first", b"second"):
+        resp = ask(port, *post(port, "/api/upload?name=seg.ORSSession", origin=f"http://127.0.0.1:{port}", body=body))
+        assert status(resp) == [200]
+        paths.append(json.loads(resp.split(b"\r\n\r\n", 1)[1])["path"])
+    assert paths[0] != paths[1] and all(os.path.basename(p) == "seg.ORSSession" for p in paths)
+    assert [open(p, "rb").read() for p in paths] == [b"first", b"second"]
+
+
+
+@pytest.mark.parametrize("length", ["-5", "abc"])
+def test_bad_content_length_is_refused(server, length):
+    """F-44: a negative Content-Length blocked and then still ran the request; a non-number closed with no answer."""
+    st, port = server
+    resp = ask(port, f"POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {length}\r\n\r\n")
+    assert status(resp) == [400] and st.calls == []
+
+
+def test_invalid_json_gets_an_answer(server):
+    """F-44: invalid JSON closed the connection with no response."""
+    st, port = server
+    assert status(ask(port, *post(port, "/api/reset", origin=f"http://127.0.0.1:{port}", body=b"{not json"))) == [400]
+    assert st.calls == []
+
+
+def test_backwards_range_is_refused(server, tmp_path):
+    """F-44: Range: bytes=50-10 gave a 206 with a negative length."""
+    st, port = server
+    (tmp_path / "m.mp4").write_bytes(bytes(100))
+    get = f"GET /out/m.mp4 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes=%s\r\nConnection: close\r\n\r\n"
+    assert status(ask(port, get % "50-10")) == [416]
+    assert status(ask(port, get % "10-50")) == [206]

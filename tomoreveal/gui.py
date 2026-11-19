@@ -48,6 +48,8 @@ def build_gui(args):
     from .gui_project import ProjectManager, log_exception, setup_crash_log
     from .encode import read_partial
     from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
+    from .look import look_settings, AA_MOVIE, ensure as ensure_look
+    from .gui_look import LookControls, style_rows
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
 
@@ -241,6 +243,7 @@ def build_gui(args):
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
             self.project = ProjectManager(self)
+            QtC.QTimer.singleShot(500, self._test_real_shadows)
             # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
             self.play_btn = QtW.QPushButton("Play"); self.play_btn.setToolTip("Play the movie in the preview from the playhead (Space)")
             self.play_btn.clicked.connect(self.toggle_play); self.timeline.buttons.insertWidget(self.timeline.buttons.count() - 1, self.play_btn)
@@ -402,6 +405,7 @@ def build_gui(args):
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("All structures", self.allop_s)
             form.addRow("Title", self.title_le); ll.addLayout(form)
             self.overlay_controls = OverlayControls(self, lay)
+            self.look_controls = LookControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             wg, wl = self._group("Window", lay)
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
@@ -434,6 +438,12 @@ def build_gui(args):
             self.name_le = QtW.QLineEdit("tomogram_reveal")
             grid.addWidget(QtW.QLabel("Quality"), 0, 0); grid.addWidget(self.quality_cb, 0, 1); grid.addWidget(QtW.QLabel("Name"), 0, 2); grid.addWidget(self.name_le, 0, 3, 1, 2)
             grid.addWidget(QtW.QLabel("Save in"), 1, 0); grid.addWidget(self.folder_le, 1, 1, 1, 3); grid.addWidget(fb, 1, 4)
+            self.aa_movie = QtW.QComboBox()
+            for t, d in AA_MOVIE:
+                self.aa_movie.addItem(t, d)
+            self.aa_movie.setToolTip("Smooth edges in the movie. Best (the default) looks cleanest; Off is fastest.")
+            self.aa_movie.activated.connect(lambda j: self.spec is not None and (ensure_look(self.spec)["aa"].__setitem__("movie", self.aa_movie.itemData(j)), self.schedule()))
+            grid.addWidget(QtW.QLabel("Smooth edges"), 5, 0); grid.addWidget(self.aa_movie, 5, 1)
             self.go_btn = QtW.QPushButton("Make movie"); self.go_btn.setStyleSheet("font-weight:600; padding:6px 18px"); self.go_btn.clicked.connect(self.make_movie)
             self.cancel_btn = QtW.QPushButton("Cancel"); self.cancel_btn.clicked.connect(self.cancel_render)
             self.open_btn = QtW.QPushButton("Play movie"); self.open_btn.clicked.connect(lambda: self._open(self.last_movie))
@@ -489,7 +499,7 @@ def build_gui(args):
             f = min(f, len(p["frames"]) - 1)
             if f != p["last"]:
                 try:
-                    img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=False)
+                    img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
                 p["last"] = f; p["drawn"] += 1
@@ -497,6 +507,21 @@ def build_gui(args):
                 self.timeline.set_frame(f)
             if end:
                 self.stop_play()
+
+        def _test_real_shadows(self):
+            """Find out once, off the window's thread, whether VTK shadow maps work here (never with software rendering)."""
+            from .render import real_shadows_available
+            if self.st.headless:
+                self.st.real_shadows_ok, self.st.real_shadows_note = real_shadows_available(True)
+                self.look_controls.sync(); return
+            self._shadow_worker = Worker(lambda log: real_shadows_available(False))
+
+            def done(r):
+                self.st.real_shadows_ok, self.st.real_shadows_note = r
+                if self.st.ren is not None:
+                    self.st.ren.real_shadows_ok = r[0]
+                self.look_controls.sync()
+            self._shadow_worker.done.connect(done); self._shadow_worker.start()
 
         def _scroll_to(self, w):
             """Scroll the tab page that holds w so that w is visible."""
@@ -647,6 +672,7 @@ def build_gui(args):
             sm.setToolTip("Surface smoothing steps; 0 shows the raw voxel steps")
             sm.valueChanged.connect(lambda v, k=k: self._param_changed(k, "smoothing", int(v)))
             f.addRow("Smoothing", sm)
+            style_rows(self, f, k)
             return w
 
         def _param_changed(self, key, name, v):
@@ -739,7 +765,8 @@ def build_gui(args):
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
-            self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync()
+            self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync()
+            self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
             self.title_le.blockSignals(True); self.title_le.setText(st.get("title", "")); self.title_le.blockSignals(False)
@@ -933,7 +960,7 @@ def build_gui(args):
             plan, i = self.st.plan_frame(spec, req); frames = plan.frames
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             try:
-                img = self.st.ren.draw(frames[i], spec, size, aa=False)
+                img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"])
             except Exception as exc:
                 traceback.print_exc()
                 if not self.st.headless:
@@ -1112,7 +1139,7 @@ def build_gui(args):
             for g in (self.view_group, self.clip_group, self.movie_group):
                 g.setEnabled(not on)
             self.timeline.setEnabled(not on); self.play_btn.setEnabled(not on)
-            for w in (self.quality_cb, self.name_le, self.folder_le):
+            for w in (self.quality_cb, self.name_le, self.folder_le, self.aa_movie):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)
             if on:

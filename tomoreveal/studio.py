@@ -26,6 +26,7 @@ class Studio:
         self.headless, self.outdir = headless, os.path.abspath(outdir)
         self.smooth, self.step, self.keep_background = smooth, step, keep_background
         self.ren = None; self.default_thr = 0.5
+        self.real_shadows_ok, self.real_shadows_note = False, "Not tested yet"  # set by the window after a self-test
         self._init_sources()
         self.q = queue.Queue(); self.job = dict(state="idle"); self._cancel = False; self.thumb = None
         self.work = tempfile.mkdtemp(prefix="tomoreveal_"); atexit.register(shutil.rmtree, self.work, True)
@@ -365,6 +366,7 @@ class Studio:
         nz, ny, nx = self.ds.shape
         if self.ren is None or self._stale or self.ren.img.dimensions[:2] != (nx, ny) or self.ren.shape != self.ds.shape:
             self._drop_renderer(); self.ren = Renderer(self.ds, self.headless); self._stale = False
+            self.ren.real_shadows_ok = self.real_shadows_ok
         self.ren._slice_key = None
         return self.ren
 

@@ -1,0 +1,237 @@
+"""Look tab: lighting (preset, direction, amounts), shadows, anti-aliasing; and the surface style of a structure."""
+import math
+
+from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
+
+from . import look as lk
+from .gui_theme import DIM
+
+
+def _quiet(w, fn):
+    w.blockSignals(True)
+    try:
+        fn()
+    finally:
+        w.blockSignals(False)
+
+
+class LightBall(QtW.QWidget):
+    """A small shaded ball lit from the chosen direction; dragging on it sets the direction."""
+    moved = QtC.Signal(float, float)  # azimuth, elevation
+
+    def __init__(self):
+        super().__init__(); self.setFixedSize(84, 84); self.az, self.el = -45.0, 50.0
+        self.setToolTip("Drag to choose where the light comes from")
+
+    def set_dir(self, az, el):
+        self.az, self.el = float(az), float(el); self.update()
+
+    def paintEvent(self, e):
+        p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing)
+        c = QtC.QPointF(self.width() / 2, self.height() / 2); r = min(self.width(), self.height()) / 2 - 4
+        a, el = math.radians(self.az), math.radians(self.el)
+        hx, hy = c.x() + r * 0.8 * math.cos(el) * math.cos(a), c.y() - r * 0.8 * math.cos(el) * math.sin(a)
+        g = QtG.QRadialGradient(QtC.QPointF(hx, hy), r * 1.6)
+        g.setColorAt(0, QtG.QColor(250, 250, 250)); g.setColorAt(0.5, QtG.QColor(140, 140, 150)); g.setColorAt(1, QtG.QColor(25, 25, 30))
+        p.setBrush(g); p.setPen(QtG.QPen(self.palette().mid().color(), 1)); p.drawEllipse(c, r, r)
+        p.setBrush(QtG.QColor(255, 210, 60)); p.setPen(QtC.Qt.NoPen); p.drawEllipse(QtC.QPointF(hx, hy), 3.5, 3.5)
+
+    def _set_from(self, pos):
+        c = QtC.QPointF(self.width() / 2, self.height() / 2); r = min(self.width(), self.height()) / 2 - 4
+        dx, dy = (pos.x() - c.x()) / (r * 0.8), -(pos.y() - c.y()) / (r * 0.8)
+        d = min(1.0, math.hypot(dx, dy))
+        self.az = math.degrees(math.atan2(dy, dx)); self.el = math.degrees(math.acos(d)); self.update()
+        self.moved.emit(round(self.az), round(self.el))
+
+    def mousePressEvent(self, e):
+        self._set_from(e.position())
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & QtC.Qt.LeftButton:
+            self._set_from(e.position())
+
+
+def _slider(lo, hi, fmt, fn):
+    w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); lab = QtW.QLabel(""); lab.setFixedWidth(44)
+    s.valueChanged.connect(lambda v: (lab.setText(fmt(v)), fn(v))); h.addWidget(s, 1); h.addWidget(lab)
+    w.s, w.lab, w.fmt = s, lab, fmt
+    return w
+
+
+def _setv(w, v):
+    _quiet(w.s, lambda: w.s.setValue(int(round(v)))); w.lab.setText(w.fmt(int(round(v))))
+
+
+class LookControls(QtC.QObject):
+    """Groups 'Lighting' and 'Shadows' in the Look tab, and 'Smooth edges' for the preview."""
+
+    def __init__(self, win, layout):
+        super().__init__(win); self.win = win
+        g = QtW.QGroupBox("Lighting"); self.light_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        self.preset = QtW.QComboBox()
+        for t, d in lk.PRESETS:
+            self.preset.addItem(t, d)
+        self.preset.setToolTip("Default: as in earlier versions. Simple: one light. Soft: soft shadows in creases (ambient "
+                               "occlusion, for the whole picture). Full: soft plus slice shadows. Flat: colours only, no shading.")
+        self.preset.activated.connect(lambda j: self.set_preset(self.preset.itemData(j)))
+        f.addRow("Preset", self.preset)
+        row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+        col = QtW.QVBoxLayout(); h.addLayout(col, 1)
+        self.az = _slider(-180, 180, lambda v: f"{v}°", lambda v: self.set_light(azimuth=float(v)))
+        self.el = _slider(0, 90, lambda v: f"{v}°", lambda v: self.set_light(elevation=float(v)))
+        for text, w in (("From the side", self.az), ("Height", self.el)):
+            r = QtW.QHBoxLayout(); lab = QtW.QLabel(text); lab.setFixedWidth(84); r.addWidget(lab); r.addWidget(w, 1); col.addLayout(r)
+        self.follow = QtW.QCheckBox("Light moves with the camera")
+        self.follow.setToolTip("On: the light keeps its direction as seen from the viewer. Off: the light is fixed in the "
+                               "scene, so highlights and shadows move when the camera turns.")
+        self.follow.toggled.connect(lambda v: self.set_light(follow_camera=bool(v))); col.addWidget(self.follow)
+        self.ball = LightBall(); self.ball.moved.connect(self._ball); h.addWidget(self.ball)
+        f.addRow("Direction", row)
+        self.amounts = {}
+        for key, text, tip in (("intensity", "Brightness", "Strength of the main light"),
+                               ("fill", "Fill light", "A second, weaker light from the other side"),
+                               ("ambient", "Ambient", "Light from everywhere: lifts the dark sides"),
+                               ("specular", "Shininess", "Bright highlights on the surfaces")):
+            w = _slider(0, 200 if key == "intensity" else 100, lambda v: f"{v} %", lambda v, key=key: self.set_light(**{key: v / 100}))
+            w.setToolTip(tip); f.addRow(text, w); self.amounts[key] = w
+        self.ssao = _slider(1, 20, lambda v: f"{v}", lambda v: self.set_light(ssao_radius=v / 100))
+        self.ssao.setToolTip("How far the soft shadows in creases reach (Soft and Full presets)"); f.addRow("Soft shadow size", self.ssao)
+        self.light_note = QtW.QLabel(""); self.light_note.setStyleSheet(DIM); self.light_note.setWordWrap(True); f.addRow(self.light_note)
+        # shadows
+        g = QtW.QGroupBox("Shadows"); self.shadow_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        self.slice_sh = QtW.QCheckBox("Structures cast shadows on the tomogram slice")
+        self.slice_sh.setToolTip("Soft shadows on the slice, as if lit from the direction above")
+        self.slice_sh.toggled.connect(lambda v: self.set_shadow("slice", on=bool(v))); f.addRow(self.slice_sh)
+        self.sh_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_shadow("slice", strength=v / 100))
+        self.sh_soft = _slider(0, 20, lambda v: f"{v}", lambda v: self.set_shadow("slice", softness=float(v)))
+        f.addRow("Strength", self.sh_strength); f.addRow("Softness", self.sh_soft)
+        self.real_sh = QtW.QCheckBox("Shadows between structures (needs a graphics card; experimental)")
+        self.real_sh.toggled.connect(lambda v: self.set_shadow("real", on=bool(v))); f.addRow(self.real_sh)
+        self.real_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_shadow("real", strength=v / 100))
+        f.addRow("Strength", self.real_strength)
+        # anti-aliasing in the preview
+        g = QtW.QGroupBox("Smooth edges (anti-aliasing)"); layout.addWidget(g); f = QtW.QFormLayout(g)
+        self.aa_prev = QtW.QComboBox()
+        for t, d in lk.AA_PREVIEW:
+            self.aa_prev.addItem(t, d)
+        self.aa_prev.setToolTip("Off is fastest. Fast smooths the edges a little. The movie has its own choice in Make the movie.")
+        self.aa_prev.activated.connect(lambda j: self.set_aa("preview", self.aa_prev.itemData(j))); f.addRow("Preview", self.aa_prev)
+
+    # ---- changes ----
+    def _look(self):
+        return lk.ensure(self.win.spec) if self.win.spec is not None else None
+
+    def set_preset(self, v):
+        L = self._look()
+        if L is not None:
+            L["lighting"]["preset"] = v
+            if v == "full":
+                L["shadows"]["slice"]["on"] = True
+            self.sync(); self.win.schedule()
+
+    def set_light(self, **kw):
+        L = self._look()
+        if L is not None:
+            L["lighting"].update(kw)
+            if "azimuth" in kw or "elevation" in kw:
+                self.ball.set_dir(L["lighting"]["azimuth"], L["lighting"]["elevation"])
+            self.win.schedule()
+
+    def _ball(self, az, el):
+        L = self._look()
+        if L is not None:
+            L["lighting"].update(azimuth=float(az), elevation=float(el)); _setv(self.az, az); _setv(self.el, el); self.win.schedule()
+
+    def set_shadow(self, which, **kw):
+        L = self._look()
+        if L is not None:
+            L["shadows"][which].update(kw); self.win.schedule()
+
+    def set_aa(self, which, v):
+        L = self._look()
+        if L is not None:
+            L["aa"][which] = v; self.win.schedule()
+
+    # ---- showing ----
+    def sync(self):
+        if self.win.spec is None:
+            return
+        L = lk.look_settings(self.win.spec); li = L["lighting"]
+        self.preset.setCurrentIndex(max(0, self.preset.findData(li["preset"])))
+        _setv(self.az, li["azimuth"]); _setv(self.el, li["elevation"]); self.ball.set_dir(li["azimuth"], li["elevation"])
+        _quiet(self.follow, lambda: self.follow.setChecked(bool(li["follow_camera"])))
+        for k, w in self.amounts.items():
+            _setv(w, 100 * float(li[k]))
+        _setv(self.ssao, 100 * float(li["ssao_radius"]))
+        default = li["preset"] == "default"
+        for w in (self.az, self.el, self.follow, self.ball, *self.amounts.values()):
+            w.setEnabled(not default and li["preset"] != "flat")
+        self.ssao.setEnabled(li["preset"] in ("soft", "full"))
+        self.light_note.setText("Default lighting is the one of earlier versions; choose another preset to change the "
+                                "direction and amounts. The direction also sets where slice shadows fall." if default else
+                                "Soft shadows in creases (ambient occlusion) work on the whole picture, not per structure."
+                                if li["preset"] in ("soft", "full") else "")
+        sh = L["shadows"]
+        _quiet(self.slice_sh, lambda: self.slice_sh.setChecked(bool(sh["slice"]["on"])))
+        _setv(self.sh_strength, 100 * float(sh["slice"]["strength"])); _setv(self.sh_soft, float(sh["slice"]["softness"]))
+        has_t = bool((self.win.info or {}).get("has_tomogram"))
+        for w in (self.slice_sh, self.sh_strength, self.sh_soft):
+            w.setEnabled(has_t)
+        self.slice_sh.setToolTip("Soft shadows on the slice, as if lit from the direction above" if has_t else "Needs a tomogram")
+        ok, why = self.win.st.real_shadows_ok, self.win.st.real_shadows_note
+        _quiet(self.real_sh, lambda: self.real_sh.setChecked(bool(sh["real"]["on"]) and ok))
+        self.real_sh.setEnabled(ok and not default); self.real_strength.setEnabled(ok and not default)
+        self.real_sh.setToolTip("Structures shadow each other. Needs a lighting preset other than Default." if ok else why)
+        _setv(self.real_strength, 100 * float(sh["real"]["strength"]))
+        self.aa_prev.setCurrentIndex(max(0, self.aa_prev.findData(L["aa"]["preview"])))
+
+
+def style_rows(win, form, key):
+    """Style settings of one structure in its settings in the Structures tab."""
+    st = lk.style_of(win.spec, key)
+    kind = QtW.QComboBox()
+    for t, d in lk.STYLES:
+        kind.addItem(t, d)
+    kind.setCurrentIndex(max(0, kind.findData(st["kind"])))
+    kind.setToolTip("Normal: as before. Cartoon: flat colour with dark outlines. Dots: the surface drawn as dots. "
+                    "Glossy: shiny plastic, metal or glass.")
+    opts = QtW.QWidget(); h = QtW.QHBoxLayout(opts); h.setContentsMargins(0, 0, 0, 0)
+
+    def put(**kw):
+        sc = win.spec["classes"].setdefault(key, {}); cur = dict(sc.get("style") or {}); cur.update(kw); sc["style"] = cur
+        win.schedule()
+
+    def fill():
+        while h.count():
+            w = h.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None); w.deleteLater()
+        s2 = lk.style_of(win.spec, key)
+        if s2["kind"] == "cartoon":
+            ow = QtW.QSpinBox(); ow.setRange(1, 6); ow.setValue(int(s2["outline_width"])); ow.setPrefix("outline "); ow.setSuffix(" px")
+            ow.valueChanged.connect(lambda v: put(outline_width=int(v)))
+            oc = QtW.QComboBox(); oc.addItem("black", "black"); oc.addItem("darker colour", "darker")
+            oc.setCurrentIndex(1 if s2.get("outline_color") == "darker" else 0); oc.activated.connect(lambda j: put(outline_color=oc.itemData(j)))
+            h.addWidget(ow); h.addWidget(oc)
+        elif s2["kind"] == "dots":
+            ps = QtW.QSpinBox(); ps.setRange(1, 8); ps.setValue(int(s2["point_size"])); ps.setPrefix("dot size "); ps.setSuffix(" px")
+            ps.valueChanged.connect(lambda v: put(point_size=int(v))); h.addWidget(ps)
+        elif s2["kind"] == "glossy":
+            gk = QtW.QComboBox()
+            for t, d in (("shiny", "shiny"), ("metallic", "metallic"), ("glass", "glass")):
+                gk.addItem(t, d)
+            gk.setCurrentIndex(max(0, gk.findData(s2.get("gloss", "shiny")))); gk.activated.connect(lambda j: put(gloss=gk.itemData(j)))
+            h.addWidget(gk)
+        allb = QtW.QPushButton("Apply to all"); allb.setToolTip("Give every structure this style")
+        allb.clicked.connect(lambda: apply_all()); h.addWidget(allb); h.addStretch(1)
+
+    def apply_all():
+        s2 = lk.style_of(win.spec, key)
+        for c in (win.info or {}).get("structures", []):
+            win.spec["classes"].setdefault(c["key"], {})["style"] = dict(s2)
+        win.build_controls(); win.schedule()
+    kind.activated.connect(lambda j: (put(kind=kind.itemData(j)), fill()))
+    fill()
+    row = QtW.QWidget(); v = QtW.QHBoxLayout(row); v.setContentsMargins(0, 0, 0, 0); v.addWidget(kind); v.addWidget(opts, 1)
+    form.addRow("Style", row)

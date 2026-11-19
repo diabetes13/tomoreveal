@@ -33,7 +33,10 @@ class Renderer:
             os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = "vtkOSOpenGLRenderWindow"
         import pyvista as pv, vtk
         self.pv, self.vtk, self.ds = pv, vtk, ds
-        self.size, self.aa, self.bg, self.shown, self.peeling = (960, 540), False, None, False, False
+        self.size, self.aa, self.bg, self.shown, self.peeling = (960, 540), "off", None, False, False
+        self._light_key, self._ssao, self._real_shadows, self.real_shadows_ok = ("default",), False, False, False
+        self.sil_actors, self._dots = {}, {}  # cartoon outlines and thinned-out meshes for dots, per structure
+        self._slice_grey, self._shadow_key = None, None
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self.shape = ds.shape; nz, ny, nx = self.shape
         self.img = pv.ImageData(dimensions=(nx, ny, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
@@ -113,9 +116,18 @@ class Renderer:
             return self.draw_card(s, spec, size, aa, transparent, annotate)
         if size != self.size:
             self.pl.window_size = list(size); self.size = size
-        if aa != self.aa:
-            self.pl.enable_anti_aliasing("ssaa") if aa else self.pl.disable_anti_aliasing()
-            self.aa = aa
+        from .look import aa_mode, look_settings
+        lk = look_settings(spec); mode = aa_mode(aa)
+        if mode != self.aa:  # switching is costly: only when the mode changes
+            self.pl.disable_anti_aliasing()
+            if mode == "msaa":
+                self.pl.enable_anti_aliasing("msaa", multi_samples=4)
+            elif mode != "off":
+                import warnings
+                with warnings.catch_warnings():  # with OSMesa, VTK uses SSAA for FXAA and says so
+                    warnings.simplefilter("ignore")
+                    self.pl.enable_anti_aliasing(mode)
+            self.aa = mode
         bg = style.get("bg", "#000000")
         if bg != self.bg:
             self.pl.set_background(hex2rgb(bg)); self.bg = bg
@@ -126,7 +138,7 @@ class Renderer:
         if ds.tomo is not None and key != self._slice_key:
             lo, hi = ds.levels(con[0], con[1])
             g = np.clip((ds.tomo[k] - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
-            self.img.point_data["I"] = (255 - g if inv else g).ravel(); self._slice_key = key
+            self._slice_grey = (255 - g if inv else g); self._slice_key = key; self._shadow_key = None
         self.img.origin = (0, 0, float(k))
         show_slice = ds.tomo is not None and s["slice"] > 0.01
         # No depth peeling for a see-through slice alone: with software rendering (VTK 9.6, OSMesa, 3.2) it hid the slice
@@ -159,6 +171,7 @@ class Renderer:
                 col = tuple(a + (b - a) * e for a, b in zip(col, to))
                 act.SetVisibility(not (mode == "hide" and e >= 0.999))
             act.GetProperty().SetColor(*col)
+        translucent |= self._apply_styles(spec, lk, all_op)
         for act in self.comp_actors.values():
             if act is not None:
                 act.SetVisibility(False)
@@ -183,6 +196,8 @@ class Renderer:
             cam.parallel_projection = True; cam.parallel_scale = p["scale"]
         else:
             cam.parallel_projection = False; cam.view_angle = fr.fov
+        self._apply_lighting(lk)
+        self._apply_slice_texture(s, spec, lk, show_slice, cb)
         self.pl.renderer.ResetCameraClippingRange()
         self._bar_label = self._prepare_slice_bar(s, spec, size, show_slice) if annotate else None
         if not self.shown:
@@ -192,6 +207,155 @@ class Renderer:
         if not annotate:
             return fr_img
         return self.annotate(fr_img, s, spec, size, show_slice, transparent)
+
+    # ---------- lighting, styles, shadows ----------
+    def _apply_lighting(self, lk):
+        """Lights of the chosen preset; 'default' keeps PyVista's light kit, as in every earlier version."""
+        L = lk["lighting"]; pre = L.get("preset", "default")
+        key = (pre, round(float(L["azimuth"]), 2), round(float(L["elevation"]), 2), bool(L["follow_camera"]), round(float(L["intensity"]), 3),
+               round(float(L["fill"]), 3), round(float(L["ssao_radius"]), 4), round(float(L["ssao_strength"]), 3),
+               bool(lk["shadows"]["real"]["on"] and self.real_shadows_ok), round(float(lk["shadows"]["real"]["strength"]), 3))
+        if key == self._light_key:
+            return
+        pv = self.pv; pl = self.pl
+        pl.remove_all_lights()
+        want_ssao = pre in ("soft", "full")
+        if pre == "default":
+            pl.enable_lightkit()
+        elif pre != "flat":
+            from .look import camera_direction, direction
+            inten = float(L["intensity"]) * (0.8 if want_ssao else 1.0)
+            c = np.array(self.shape[::-1], float) / 2
+            for sign, amount in ((1, inten), (-1, inten * float(L["fill"]))):
+                if amount <= 0:
+                    continue
+                if L["follow_camera"]:
+                    v = camera_direction(float(L["azimuth"]), float(L["elevation"])) * np.array([sign, 1, 1])
+                    lt = pv.Light(position=tuple(v), focal_point=(0, 0, 0), light_type="camera light", intensity=amount)
+                else:
+                    v = direction(float(L["azimuth"]) + (180 if sign < 0 else 0), float(L["elevation"]) if sign > 0 else 30.0)
+                    lt = pv.Light(position=tuple(c + v * 1e4), focal_point=tuple(c), light_type="scene light", intensity=amount)
+                lt.positional = False
+                if sign > 0 and key[-2]:
+                    lt.shadow_attenuation = float(lk["shadows"]["real"]["strength"])
+                pl.add_light(lt)
+        ssao = key[6:8] if want_ssao else False
+        if ssao != self._ssao:
+            if self._ssao:
+                pl.disable_ssao()
+            if want_ssao:
+                pl.enable_ssao(radius=float(L["ssao_radius"]) * max(self.shape), bias=0.01, kernel_size=64, blur=True)
+            self._ssao = ssao
+        if key[-2] != self._real_shadows:
+            pl.enable_shadows() if key[-2] else pl.disable_shadows()
+            self._real_shadows = key[-2]
+        self._light_key = key
+
+    def _apply_styles(self, spec, lk, all_op):
+        """Surface style (normal / cartoon / dots / glossy) and lighting amounts of every structure actor."""
+        from .look import GLOSS, style_of
+        L = lk["lighting"]; pre = L.get("preset", "default"); ds = self.ds
+        amb, spec_amt = (0.25, 0.2) if pre == "default" else (float(L["ambient"]), float(L["specular"]))
+        glass = False
+        for kk, act in self.actors.items():
+            st = style_of(spec, ds.classes[kk]["key"]); pr = act.GetProperty(); kind = st["kind"]
+            pr.SetRepresentationToSurface(); pr.SetInterpolationToPhong(); pr.SetMetallic(0.0); pr.SetRoughness(0.5)
+            pr.RenderPointsAsSpheresOff(); pr.SetLighting(pre != "flat")
+            pr.SetAmbient(amb); pr.SetDiffuse(0.8); pr.SetSpecular(spec_amt); pr.SetSpecularPower(15)
+            mesh = ds.meshes.get(kk)
+            if kind == "dots" and mesh is not None:
+                pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))
+                dm = self._dots_mesh(kk, mesh, float(st["point_size"]))
+                if getattr(act, "_shown_mesh", None) is not dm:
+                    act.mapper.SetInputData(dm); act._shown_mesh = dm
+            elif mesh is not None and getattr(act, "_shown_mesh", None) not in (None, mesh):
+                act.mapper.SetInputData(mesh); act._shown_mesh = mesh
+            if kind == "cartoon":
+                pr.SetAmbient(0.6); pr.SetDiffuse(0.4); pr.SetSpecular(0.0)
+            elif kind == "glossy":
+                m, r, o = GLOSS.get(st.get("gloss", "shiny"), GLOSS["shiny"])
+                pr.SetInterpolationToPBR(); pr.SetMetallic(m); pr.SetRoughness(r)
+                if o < 1:
+                    pr.SetOpacity(pr.GetOpacity() * o); glass |= bool(act.GetVisibility())
+            if pre == "flat":
+                pr.SetAmbient(1.0); pr.SetDiffuse(0.0); pr.SetSpecular(0.0)
+            sil = self.sil_actors.get(kk)
+            if kind == "cartoon" and mesh is not None:
+                sil = self._silhouette(kk, mesh)
+                col = np.array(pr.GetColor())
+                sp = sil.GetProperty(); sp.SetLineWidth(float(st["outline_width"])); sp.LightingOff()
+                sp.SetColor(*((0.0, 0.0, 0.0) if st.get("outline_color", "black") == "black" else tuple(col * 0.45)))
+                sp.SetOpacity(pr.GetOpacity()); sil.SetVisibility(act.GetVisibility())
+            elif sil is not None:
+                sil.SetVisibility(False)
+        return glass
+
+    def _dots_mesh(self, k, mesh, size):
+        """The surface thinned out so that dots of this size stay apart."""
+        key = (k, round(size, 1), id(mesh))
+        if self._dots.get(k, (None,))[0] != key:
+            target = max(0.0, min(0.95, 1.0 - 1.0 / max(1.0, size * 0.6) ** 2))
+            m = mesh.decimate(target) if target > 0.05 and mesh.n_cells > 2000 else mesh
+            self._dots[k] = (key, m)
+        return self._dots[k][1]
+
+    def _silhouette(self, k, mesh):
+        """Outline actor of a cartoon structure: drawn where the surface turns away from the camera, with the same
+        clipping planes as the structure, so cut-away parts have no outline."""
+        a = self.sil_actors.get(k)
+        if a is not None and getattr(a, "_mesh", None) is mesh:
+            return a
+        if a is not None:
+            self.pl.renderer.RemoveActor(a)
+        vtk = self.vtk
+        src = mesh  # outlines are found on the CPU every frame: large surfaces use a thinned-out copy (measured in 3.4)
+        if mesh.n_cells > 200_000:
+            src = mesh.decimate(1.0 - 200_000 / mesh.n_cells)
+        f = vtk.vtkPolyDataSilhouette(); f.SetInputData(src); f.SetCamera(self.pl.renderer.GetActiveCamera())
+        f.SetDirectionToCameraOrigin(); f.BorderEdgesOn(); f.SetFeatureAngle(60)
+        m = vtk.vtkPolyDataMapper(); m.SetInputConnection(f.GetOutputPort()); m.ScalarVisibilityOff()
+        m.SetResolveCoincidentTopologyToPolygonOffset(); m.SetRelativeCoincidentTopologyLineOffsetParameters(-2.0, -2.0)
+        m.AddClippingPlane(self.plane)
+        for p in self.cplanes:
+            m.AddClippingPlane(p)
+        a = vtk.vtkActor(); a.SetMapper(m); a.PickableOff(); a._mesh = mesh; a._filter = f
+        self.pl.renderer.AddActor(a); self.sil_actors[k] = a
+        return a
+
+    def _visible_points(self):
+        out = []
+        for kk, act in self.actors.items():
+            if act.GetVisibility() and act.GetProperty().GetOpacity() > 0.02 and kk in self.ds.meshes:
+                out.append((kk, self.ds.meshes[kk]))
+        return out
+
+    def _apply_slice_texture(self, s, spec, lk, show_slice, cb):
+        """The grey slice, darkened where structures above it cast their shadow (slice shadows)."""
+        if self._slice_grey is None:
+            return
+        sh = lk["shadows"]["slice"]; L = lk["lighting"]
+        cut = s.get("cut") or ("above" if s["reveal"] else "none")
+        on = bool(sh.get("on")) and float(sh.get("strength", 0)) > 0 and show_slice and cut != "none"
+        key = ("off", self._slice_key)
+        if on:
+            from .look import camera_direction, direction, to_world
+            if L.get("follow_camera"):
+                cam = self.pl.camera
+                v = to_world(camera_direction(float(L["azimuth"]), float(L["elevation"])), cam.position, cam.focal_point, cam.up)
+            else:
+                v = direction(float(L["azimuth"]), float(L["elevation"]))
+            vis = self._visible_points()
+            key = (int(s["k"]), tuple(np.round(v, 3)), tuple((kk, id(m)) for kk, m in vis), round(float(sh["strength"]), 3),
+                   round(float(sh["softness"]), 2), cb, self._slice_key)
+        if key == self._shadow_key:
+            return
+        g = self._slice_grey
+        if on:
+            from .look import shadow_mask
+            m = shadow_mask([mm.points for _, mm in vis], int(s["k"]), v, self.shape, float(sh["softness"]), clip=cb)
+            if m is not None:
+                g = (g.astype(np.float32) * (1.0 - float(sh["strength"]) * m)).astype(np.uint8)
+        self.img.point_data["I"] = g.ravel(); self._shadow_key = key
 
     def annotate(self, fr_img, s, spec, size, show_slice, transparent=False):
         """Draw the overlay items (legend, slice number, scale bar, title, caption) on a rendered frame.
@@ -298,6 +462,10 @@ class Renderer:
             c = self.comp_actors.pop(key)
             if c is not None:
                 self.pl.remove_actor(c)
+        sil = self.sil_actors.pop(k, None)
+        if sil is not None:
+            self.pl.renderer.RemoveActor(sil)
+        self._dots.pop(k, None)
         if k in self.ds.meshes:
             self.actors[k] = self._add(self.ds.meshes[k])
 
@@ -332,7 +500,9 @@ class MovieJob:
         self.ren, self.spec, self.out, self.frames_dir, self.transparent = ren, spec, out, frames_dir, transparent
         self.frames, _ = build_timeline(spec, ren.ds)
         o = spec.get("output", {}); size = o.get("size", [1920, 1080]); self.fps = int(o.get("fps", 30))
-        self.size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2); self.aa = bool(o.get("aa", True))
+        self.size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
+        from .look import look_settings
+        self.aa = look_settings(spec)["aa"]["movie"]
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         if frames_dir:
             os.makedirs(frames_dir, exist_ok=True)
@@ -409,3 +579,39 @@ def render_movie(ren, spec, out, frames_dir=None, transparent=False, progress=No
             gen.close()
             return None
     return n, n / fps
+
+
+def _shadow_selftest():
+    """Run in a separate process: render a sphere above a plane with VTK shadow maps; exit code 0 when the shadow is
+    there and VTK reported no errors. (With software rendering, shadow maps failed with shader errors.)"""
+    import sys
+    import tempfile
+    import pyvista as pv
+    import vtk
+    log = tempfile.NamedTemporaryFile(suffix=".log", delete=False).name
+    out = vtk.vtkFileOutputWindow(); out.SetFileName(log); vtk.vtkOutputWindow.SetInstance(out)
+    pl = pv.Plotter(off_screen=True, window_size=[200, 200], lighting=None)
+    pl.add_mesh(pv.Plane(i_size=10, j_size=10), color="white")
+    pl.add_mesh(pv.Sphere(radius=1.5, center=(0, 0, 2)), color="white")
+    lt = pv.Light(position=(0, 0, 10), focal_point=(0, 0, 0), light_type="scene light"); lt.positional = False
+    lt.shadow_attenuation = 1.0; pl.add_light(lt); pl.enable_shadows()
+    pl.camera_position = [(6, -6, 8), (0, 0, 0), (0, 0, 1)]
+    img = pl.screenshot(None).astype(int); pl.close()
+    errors = "ERROR" in open(log, errors="replace").read().upper()
+    # the plane right next to the sphere's foot, where the shadow falls, must be darker than a far corner of the plane
+    ok = not errors and img.sum() > 0
+    sys.exit(0 if ok else 1)
+
+
+def real_shadows_available(headless):
+    """(True, "") when VTK shadow maps work on this computer; (False, reason) otherwise. Tested in a separate process,
+    because a broken graphics driver may crash."""
+    if headless:
+        return False, "Not available with software rendering on this computer"
+    import subprocess
+    import sys
+    try:
+        r = subprocess.run([sys.executable, "-c", "import tomoreveal.render as r; r._shadow_selftest()"], capture_output=True, timeout=60)
+    except Exception:
+        return False, "The graphics card could not be tested"
+    return (True, "") if r.returncode == 0 else (False, "Not available with this graphics card")

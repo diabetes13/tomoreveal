@@ -45,6 +45,8 @@ def build_gui(args):
     from .gui_timeline import Timeline
     from .gui_movie import MovieEditor, PartsPanel
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
+    from .gui_project import ProjectManager, log_exception, setup_crash_log
+    from .encode import read_partial
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
 
@@ -196,6 +198,7 @@ def build_gui(args):
             self.thr_timer.timeout.connect(self.apply_thresholds)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
+            self.project = ProjectManager(self)
             # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
             self.play_btn = QtW.QPushButton("Play"); self.play_btn.setToolTip("Play the movie in the preview from the playhead (Space)")
             self.play_btn.clicked.connect(self.toggle_play); self.timeline.buttons.insertWidget(self.timeline.buttons.count() - 1, self.play_btn)
@@ -483,7 +486,10 @@ def build_gui(args):
 
         def dropEvent(self, e):
             paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-            if paths:
+            projects = [p for p in paths if p.lower().endswith(".tomoreveal")]
+            if projects:
+                e.acceptProposedAction(); self.project.open(projects[0])
+            elif paths:
                 e.acceptProposedAction(); self.load(paths=paths)
 
         def run_job(self, fn, msg="Reading the files and building 3D surfaces. This can take a minute for large tomograms ..."):
@@ -517,7 +523,7 @@ def build_gui(args):
             self.set_busy(False); self.apply_info(info)
 
         def _load_failed(self, msg):
-            self.set_busy(False)
+            self.set_busy(False); self.project.load_failed()
             try:
                 self.st.ensure_renderer()
                 self.apply_info(self.st.info(), keep_message=True)
@@ -525,10 +531,14 @@ def build_gui(args):
                 traceback.print_exc()
             self.say(msg, "err")
 
-        def start_over(self):
+        def start_over(self, ask=True):
+            """Unload everything: a new, empty project (File > New)."""
             if self.busy or self.gen is not None:
                 return
+            if ask and not self.project.confirm_discard("starting over"):
+                return
             self.st.reset(); self.info = self.spec = None; self.data.refresh(self.st.info()); self.show_empty(); self.say("")
+            pm = self.project; pm.path, pm.extra, pm.saved_core = None, {}, None; pm.autosave.remove(); pm.refresh()
 
         def apply_info(self, info, keep_message=False):
             prev = self.info
@@ -537,7 +547,7 @@ def build_gui(args):
             if not info.get("can_show"):
                 if not keep_message:
                     self.say(info.get("message", ""))
-                self.spec = None; self.show_empty(); return
+                self.spec = None; self.show_empty(); self.project.load_failed(); return
             if not same:
                 self.spec = info["spec"]; self.req = self._main_req()
             else:  # keep the user's settings of every structure that is still there
@@ -553,6 +563,7 @@ def build_gui(args):
             if not keep_message:
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
             self.schedule(0)
+            self.project.after_apply()
 
         # ---------- controls ----------
         def build_controls(self):
@@ -788,6 +799,8 @@ def build_gui(args):
 
         def schedule(self, delay=120):
             self.prev_timer.start(delay)
+            if hasattr(self, "project"):
+                self.project.touch()
             if self.spec is not None and hasattr(self, "editor"):
                 self.editor.changed()  # one undo step once things settle
 
@@ -938,7 +951,15 @@ def build_gui(args):
             if not name.lower().endswith(".mp4"):
                 name += ".mp4"
             path = os.path.join(folder, name)
-            if os.path.exists(path):
+            spec = self.spec_for(); resume = False
+            part = read_partial(path)
+            if part and part.get("chunks_done"):
+                from .encode import settings_hash
+                same = part.get("settings") == settings_hash(spec, self.st.ds)
+                resume = self.ask_resume(part, same)
+                if resume is None:
+                    return
+            if os.path.exists(path) and not resume:
                 r = QtW.QMessageBox.question(self, "TomoReveal", f"{name} already exists in that folder. Replace it?")
                 if r != QtW.QMessageBox.Yes:
                     return
@@ -947,9 +968,26 @@ def build_gui(args):
             except OSError as exc:
                 self.say(f"Cannot use that folder: {exc}", "err"); return
             self.settings.setValue("outdir", folder)
-            self.stop_play()
-            self.gen = movie_frames(self.st.ren, self.spec_for(), path); self.render_path = path; self.t0 = time.time()
-            self._rendering(True); self.status_lbl.setText("Starting ..."); self.render_timer.start()
+            self.stop_play(); self.project.autosave_now()
+            try:
+                self.gen = movie_frames(self.st.ren, spec, path, resume=resume)
+            except Exception as exc:
+                traceback.print_exc(); self.say(f"Could not start the movie: {exc}", "err"); return
+            self.render_path = path; self.t0 = time.time()
+            self._rendering(True); self.progress.setMaximum(len(self.gen)); self.progress.setValue(self.gen.start); self.status_lbl.setText("Starting ..." if not self.gen.start else
+                                                           f"Continuing after frame {self.gen.start} ..."); self.render_timer.start()
+
+        def ask_resume(self, part, same):
+            """An interrupted movie of this name: True = continue, False = start again, None = do nothing."""
+            if not same:
+                r = QtW.QMessageBox.question(self, "TomoReveal", "A movie of this name was interrupted, but the settings have changed "
+                                             "since. Start it again from the beginning?")
+                return False if r == QtW.QMessageBox.Yes else None
+            box = QtW.QMessageBox(self); box.setWindowTitle("TomoReveal")
+            box.setText(f"A movie was interrupted after {part['frames_done']} of {part['total']} frames. Continue it or start again?")
+            b_c = box.addButton("Continue", QtW.QMessageBox.AcceptRole); b_s = box.addButton("Start again", QtW.QMessageBox.DestructiveRole)
+            box.addButton("Cancel", QtW.QMessageBox.RejectRole); box.exec()
+            return True if box.clickedButton() is b_c else False if box.clickedButton() is b_s else None
 
         def _rendering(self, on):
             # everything is locked while the movie is made, except Cancel (in the Make the movie box)
@@ -974,8 +1012,8 @@ def build_gui(args):
                 traceback.print_exc(); self._render_stop()
                 self.say(f"Making the movie failed: {exc}", "err"); self.status_lbl.setText(""); return
             self.progress.setMaximum(n); self.progress.setValue(i)
-            el = time.time() - self.t0
-            self.status_lbl.setText(f"frame {i} of {n} \u00b7 about {fmt_time(el / i * (n - i))} left")
+            el = time.time() - self.t0; done = max(1, i - self.gen.start)
+            self.status_lbl.setText(f"frame {i} of {n} \u00b7 about {fmt_time(el / done * (n - i))} left")
             if i % 6 == 1 or i == n:
                 self.prev.set_image(to_qimage(img))
 
@@ -986,10 +1024,10 @@ def build_gui(args):
             self._rendering(False)
 
         def cancel_render(self):
-            self._render_stop()
-            for p in (self.render_path, os.path.splitext(self.render_path)[0] + "_poster.png"):
+            self._render_stop()  # deletes the partial files; a finished movie of the same name is left alone
+            if not os.path.exists(self.render_path):
                 try:
-                    os.remove(p)
+                    os.remove(os.path.splitext(self.render_path)[0] + "_poster.png")
                 except OSError:
                     pass
             self.status_lbl.setText("Cancelled."); self.schedule(0)
@@ -1012,15 +1050,27 @@ def build_gui(args):
                 if r != QtW.QMessageBox.Yes:
                     e.ignore(); return
                 self.cancel_render()
+            elif not self.project.confirm_discard("closing TomoReveal"):
+                e.ignore(); return
             if self.worker is not None and self.worker.isRunning():
                 self.worker.wait(60000)
-            self.st._drop_renderer(); e.accept()
+            self.project.clean_exit(); self.st._drop_renderer(); e.accept()
 
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])
     app.setApplicationName("TomoReveal"); app.setOrganizationName("TomoReveal")
     app.setWindowIcon(QtG.QIcon(QtG.QPixmap.fromImage(to_qimage(np.asarray(make_icon(256))))))
     apply_theme(app, QtC.QSettings("TomoReveal", "TomoReveal").value("theme", "system"))  # before the window is made
+    setup_crash_log()
     win = Main(); win.show()
+
+    def excepthook(t, v, tb):  # never fail silently: log it, autosave, and say so in the window
+        path = log_exception(t, v, tb); traceback.print_exception(t, v, tb)
+        try:
+            win.project.autosave_now()
+            win.say(f"Something went wrong. Your work was autosaved. Details: {path}", "err")
+        except Exception:
+            pass
+    sys.excepthook = excepthook
     if getattr(args, "files", None):
         QtC.QTimer.singleShot(300, lambda: win.load(paths=args.files))
     return app, win

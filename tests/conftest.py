@@ -35,3 +35,16 @@ def private_settings(tmp_path_factory):
     except ImportError:
         return
     QtCore.QSettings.setPath(QtCore.QSettings.NativeFormat, QtCore.QSettings.UserScope, str(tmp_path_factory.mktemp("settings")))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def private_data_dir(tmp_path_factory):
+    """Autosaves and logs go to a temporary folder, and the window never waits for an answer in a dialog."""
+    os.environ["TOMOREVEAL_DATA_DIR"] = str(tmp_path_factory.mktemp("appdata"))
+    try:
+        from tomoreveal.gui_project import ProjectManager
+    except ImportError:
+        return
+    ProjectManager.ask_save = lambda self, what: "discard"
+    ProjectManager.ask_restore = lambda self, when: "later"
+    ProjectManager.ask_relink = lambda self, problems: True

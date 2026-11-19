@@ -203,40 +203,85 @@ class Renderer:
             pass
 
 
-def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True):
-    """Render a movie frame by frame; yields (frames done, total, last image). Closing the generator stops it."""
-    import imageio.v2 as imageio
-    frames, _ = build_timeline(spec, ren.ds)
-    o = spec.get("output", {}); size = o.get("size", [1920, 1080]); fps = int(o.get("fps", 30))
-    size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    if frames_dir:
-        os.makedirs(frames_dir, exist_ok=True)
-    w = imageio.get_writer(out, fps=fps, codec="libx264", quality=None, macro_block_size=2, pixelformat="yuv420p",
-                           output_params=["-crf", str(int(o.get("crf", 20))), "-preset", "medium", "-movflags", "+faststart"])
-    # poster: a frame from the main phase of a slide that shows structures (else an overview), never a close-up
-    reveal_idx = [i for i, s in enumerate(frames) if s.get("type") == "slide" and s["reveal"] and s["phase"] == "main" and s["e"] == 0] \
-        or [i for i, s in enumerate(frames) if s.get("type") == "overview" and s["phase"] == "main" and s["e"] == 0]
-    poster_i = reveal_idx[len(reveal_idx) // 4] if (reveal_idx and poster) else -1
-    last_key, img = None, None
-    try:
-        for i, s in enumerate(frames):
+class MovieJob:
+    """Renders a movie frame by frame: iterate it to get (frames done, total, last image). Closing it before the end
+    cancels the movie and deletes its partial files. With resume=True, the frames of the complete chunks of an
+    interrupted movie with the same settings are kept and only the rest is rendered (see encode.py)."""
+
+    def __init__(self, ren, spec, out, frames_dir=None, transparent=False, poster=True, resume=False, chunk_frames=None):
+        from . import encode
+        self.ren, self.spec, self.out, self.frames_dir, self.transparent = ren, spec, out, frames_dir, transparent
+        self.frames, _ = build_timeline(spec, ren.ds)
+        o = spec.get("output", {}); size = o.get("size", [1920, 1080]); self.fps = int(o.get("fps", 30))
+        self.size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2); self.aa = bool(o.get("aa", True))
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        if frames_dir:
+            os.makedirs(frames_dir, exist_ok=True)
+        formats = {"mp4": encode.video_args("mp4", crf=int(o.get("crf", 20)), preset="medium")}
+        self.settings = encode.settings_hash(spec, ren.ds)
+        chunk = int(chunk_frames or encode.CHUNK_FRAMES); start_chunk = 0
+        old = encode.read_partial(out)
+        if resume and old and old.get("settings") == self.settings and old.get("formats") == list(formats) \
+                and int(old.get("chunk_frames", 0)) == chunk and old["chunks_done"] > 0:
+            start_chunk = old["chunks_done"]
+        else:
+            encode.remove_partial(out)
+        self.start = min(len(self.frames), start_chunk * chunk)
+        self.writer = encode.ChunkedWriter(out, formats, self.size, self.fps, len(self.frames), self.settings, chunk, start_chunk)
+        # poster: a frame from the main phase of a slide that shows structures (else an overview), never a close-up
+        fr = self.frames
+        idx = [i for i, s in enumerate(fr) if s.get("type") == "slide" and s["reveal"] and s["phase"] == "main" and s["e"] == 0] \
+            or [i for i, s in enumerate(fr) if s.get("type") == "overview" and s["phase"] == "main" and s["e"] == 0]
+        self.poster_i = idx[len(idx) // 4] if (idx and poster) else -1
+        self.i, self.last_key, self.img, self.finished, self.closed = self.start, None, None, False, False
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return len(self.frames)
+
+    def __next__(self):
+        import imageio.v2 as imageio
+        if self.closed:
+            raise StopIteration
+        if self.i >= len(self.frames):
+            self.writer.close(); self.finished = self.closed = True
+            raise StopIteration
+        try:
+            i, s = self.i, self.frames[self.i]
             key = state_key(s)
-            if key != last_key:
-                img = ren.draw(s, spec, size, aa=bool(o.get("aa", True)), transparent=transparent and bool(frames_dir)); last_key = key
-                if frames_dir:
-                    imageio.imwrite(os.path.join(frames_dir, f"frame_{i:05d}.png"), img)
-            if i == poster_i:
-                imageio.imwrite(os.path.splitext(out)[0] + "_poster.png", img[..., :3])
-            w.append_data(np.ascontiguousarray(img[..., :3]))
-            yield i + 1, len(frames), img
-    finally:
-        w.close()
+            if key != self.last_key:
+                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=self.transparent and bool(self.frames_dir))
+                self.last_key = key
+                if self.frames_dir:
+                    imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)
+            if i == self.poster_i:
+                imageio.imwrite(os.path.splitext(self.out)[0] + "_poster.png", self.img[..., :3])
+            self.writer.write(self.img)
+        except BaseException:
+            self.close(); raise
+        self.i += 1
+        return self.i, len(self.frames), self.img
+
+    def close(self):
+        """Stop; unless the movie is finished, its partial files are deleted."""
+        if not self.closed:
+            self.closed = True; self.writer.abort()
+
+    def crash(self):
+        """Stop as a crash would: the complete chunks stay on disk (for tests)."""
+        self.closed = True; self.writer.kill()
 
 
-def render_movie(ren, spec, out, frames_dir=None, transparent=False, progress=None, cancelled=None, poster=True):
+def movie_frames(ren, spec, out, frames_dir=None, transparent=False, poster=True, resume=False, chunk_frames=None):
+    """A MovieJob: iterate it to render the movie; yields (frames done, total, last image). close() cancels."""
+    return MovieJob(ren, spec, out, frames_dir, transparent, poster, resume, chunk_frames)
+
+
+def render_movie(ren, spec, out, frames_dir=None, transparent=False, progress=None, cancelled=None, poster=True, resume=False):
     fps = int(spec.get("output", {}).get("fps", 30)); n = 0
-    gen = movie_frames(ren, spec, out, frames_dir, transparent, poster)
+    gen = movie_frames(ren, spec, out, frames_dir, transparent, poster, resume); n = len(gen)
     for i, n, img in gen:
         if progress:
             progress(i, n, img)

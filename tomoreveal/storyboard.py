@@ -206,7 +206,10 @@ def merge_settings(spec, new, same_grid=True):
     Every structure that is still there keeps its name, colour and visibility (they are keyed by its stable key);
     new structures get their defaults. Close-ups of structures that are gone stay in the movie, marked and skipped,
     until the structure is back."""
-    spec["classes"] = {k: spec["classes"].get(k) or v for k, v in new["classes"].items()}
+    old = spec.get("classes") or {}
+    spec["classes"] = {k: old.get(k) or v for k, v in new["classes"].items()}
+    for k, v in old.items():  # settings of structures that are not loaded now are kept, for when they come back
+        spec["classes"].setdefault(k, v)
     migrate_spec(spec)
     if not same_grid:  # the slice range and the clip box belonged to the old grid
         spec["clip"] = None; spec["z_range"] = None

@@ -108,6 +108,13 @@ def parse_views(spec):
 def cmd_movie(args):
     st, _ = cli_studio(args); spec = cli_spec(st, args); ds = st.ds
     spec["style"].update(legend=not args.no_legend, slice_label=not args.no_slice_label, title=args.title or "")
+    if args.scale_bar:
+        from .overlays import set_item, set_show
+        set_show(spec, "scale_bar", True)
+        if args.scale_bar != "auto":
+            set_item(spec, "scale_bar", length_nm=float(args.scale_bar))
+    if args.voxel_nm:
+        spec["data"] = dict(voxel_size_nm=float(args.voxel_nm))
     spec["z_range"] = list(args.z_range) if args.z_range else None
     spec["output"].update(fps=args.fps, crf=args.crf)
     for part in spec["shots"]:  # by type, never by position
@@ -348,6 +355,8 @@ def main():
     p.add_argument("--focus", action="append", help="structure name to zoom into and orbit after the overview (repeatable)")
     p.add_argument("--focus-seconds", type=float, default=5.0)
     p.add_argument("--no-legend", action="store_true"); p.add_argument("--no-slice-label", action="store_true")
+    p.add_argument("--scale-bar", nargs="?", const="auto", help="draw a scale bar: 'auto' or a length in nm")
+    p.add_argument("--voxel-nm", type=float, help="voxel size in nm, when the file's header is wrong")
     p.add_argument("--title", help="text shown bottom-left"); p.add_argument("--crf", type=int, default=20, help="H.264 quality, lower = better")
     p.add_argument("--frames-dir", help="also save every rendered frame as PNG here")
     p.add_argument("--transparent-frames", action="store_true", help="PNG frames get a transparent background (needs --frames-dir)")

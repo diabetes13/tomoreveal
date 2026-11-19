@@ -479,6 +479,8 @@ def build_plan(spec, ds):
         if has_seg:
             need_structures()
         emit(1, lambda u: {}, "main")
+    from .overlays import add_bar_lengths
+    add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
     return Plan(frames, segments, marks, fps, problems)
 
 

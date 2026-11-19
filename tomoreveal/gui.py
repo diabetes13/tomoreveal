@@ -47,6 +47,7 @@ def build_gui(args):
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
     from .gui_project import ProjectManager, log_exception, setup_crash_log
     from .encode import read_partial
+    from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
                ("Square 1080 x 1080", (1080, 1080)), ("Portrait 1080 x 1920", (1080, 1920))]
 
@@ -81,7 +82,8 @@ def build_gui(args):
             super().__init__(); self.setAlignment(QtC.Qt.AlignCenter); self.setWordWrap(True)
             self.setMinimumSize(320, 180); self.setSizePolicy(QtW.QSizePolicy.Ignored, QtW.QSizePolicy.Ignored)
             self.setStyleSheet("background: palette(base); color: palette(placeholder-text); border-radius:8px; padding:6px")
-            self._img = None; self._press = None; self._moved = False
+            self._img = None; self._press = None; self._moved = False; self.overlay = None; self._ov = False
+            self.setMouseTracking(True)
             self.note = QtW.QLabel(self); self.note.setStyleSheet(
                 "background: rgba(0, 0, 0, 160); color: #ffffff; border-radius: 4px; padding: 3px 8px")
             self.note.move(10, 10); self.note.setVisible(False)
@@ -103,27 +105,63 @@ def build_gui(args):
         def resizeEvent(self, e):
             super().resizeEvent(e); self._rescale()
 
-        def frac(self, pos):
+        def frac(self, pos, free=False):
+            """Position as fractions of the shown image (None outside it unless free)."""
             pm = self.pixmap()
             if pm is None or pm.isNull():
                 return None
             w, h = pm.width(), pm.height(); x0, y0 = (self.width() - w) / 2, (self.height() - h) / 2
             fx, fy = (pos.x() - x0) / w, (pos.y() - y0) / h
-            return (fx, fy) if 0 <= fx <= 1 and 0 <= fy <= 1 else None
+            return (fx, fy) if free or (0 <= fx <= 1 and 0 <= fy <= 1) else None
+
+        def image_px(self):
+            """Size of the shown image on screen (pixels)."""
+            pm = self.pixmap()
+            return None if pm is None or pm.isNull() else (pm.width(), pm.height())
+
+        def to_widget(self, fx, fy):
+            pm = self.pixmap(); w, h = pm.width(), pm.height()
+            return QtC.QPointF((self.width() - w) / 2 + fx * w, (self.height() - h) / 2 + fy * h)
+
+        def paintEvent(self, e):
+            super().paintEvent(e)
+            if self.overlay is not None and self.image_px():
+                p = QtG.QPainter(self); self.overlay.paint(p, self.to_widget); p.end()
 
         def mousePressEvent(self, e):
             if e.button() == QtC.Qt.LeftButton:
-                self._press = e.position().toPoint(); self._moved = False
+                pos = e.position().toPoint()
+                self._ov = bool(self.overlay and self.overlay.press(self.frac(pos), e.modifiers()))
+                self._press = pos; self._moved = False
 
         def mouseMoveEvent(self, e):
+            pos = e.position().toPoint()
             if self._press is None:
+                if self.overlay is not None:
+                    self.overlay.hover(self.frac(pos))
                 return
-            d = e.position().toPoint() - self._press
+            d = pos - self._press
             if self._moved or abs(d.x()) + abs(d.y()) > 4:
-                self._moved = True; self.dragged.emit(d.x(), d.y())
+                self._moved = True
+                if self._ov:
+                    self.overlay.move(self.frac(pos, free=True), e.modifiers())
+                else:
+                    self.dragged.emit(d.x(), d.y())
+
+        def contextMenuEvent(self, e):
+            if self.overlay is not None:
+                self.overlay.context(self.frac(e.pos()), e.globalPos())
+
+        def mouseDoubleClickEvent(self, e):
+            if self.overlay is not None:
+                self.overlay.double(self.frac(e.position().toPoint()))
 
         def mouseReleaseEvent(self, e):
             if self._press is None:
+                return
+            if self._ov:
+                self._ov = False; self._press = None
+                self.overlay.release()
                 return
             if self._moved:
                 self.released.emit()
@@ -280,6 +318,7 @@ def build_gui(args):
             # data
             lay = self._tab("Data")
             self.data = DataPanel(self.st, self.run_job, self.settings, self.load_demo, self.start_over); lay.addWidget(self.data)
+            self.voxel_row = VoxelRow(self); lay.addWidget(self.voxel_row); self.voxel_row.setVisible(False)
             # structures
             lay = self._tab("Structures")
             self.struct_group, sl = self._group("Structures", lay)
@@ -342,9 +381,8 @@ def build_gui(args):
             self._note("The default for the whole movie and the preview. Each shot in the Movie tab can show, fade or hide "
                        "the tomogram on its own.", tg)
             self.look_group, ll = self._group("Look", lay)
-            row = QtW.QHBoxLayout(); self.legend_cb = QtW.QCheckBox("Legend"); self.slabel_cb = QtW.QCheckBox("Slice number"); self.invert_cb = QtW.QCheckBox("Invert contrast")
-            for cb, key in ((self.legend_cb, "legend"), (self.slabel_cb, "slice_label"), (self.invert_cb, "invert")):
-                cb.toggled.connect(lambda v, k=key: self._style_set(k, v)); row.addWidget(cb)
+            row = QtW.QHBoxLayout(); self.invert_cb = QtW.QCheckBox("Invert contrast")
+            self.invert_cb.toggled.connect(lambda v: self._style_set("invert", v)); row.addWidget(self.invert_cb); row.addStretch(1)
             ll.addLayout(row)
             form = QtW.QFormLayout(); self.bg_cb = QtW.QComboBox()
             for t, c in (("black", "#000000"), ("white", "#ffffff"), ("dark grey", "#1c1f26")):
@@ -355,6 +393,8 @@ def build_gui(args):
             self.title_le = QtW.QLineEdit(); self.title_le.setPlaceholderText("optional text, bottom left")
             self.title_le.textChanged.connect(lambda t: self._style_set("title", t))
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("Title", self.title_le); ll.addLayout(form)
+            self.overlay_controls = OverlayControls(self, lay)
+            self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             wg, wl = self._group("Window", lay)
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
             for t, d in THEMES:
@@ -369,6 +409,8 @@ def build_gui(args):
             self.right.addWidget(right); self.right.addWidget(self.explore.page)
             self.tabs.currentChanged.connect(self._tab_changed)
             self.prev = Preview()
+            self.toolbar = OverlayToolbar(self); rl.addWidget(self.toolbar)
+            self.prev.overlay = OverlayDrag(self)
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
             rl.addWidget(self.prev, 1)
@@ -448,6 +490,14 @@ def build_gui(args):
             if end:
                 self.stop_play()
 
+        def _scroll_to(self, w):
+            """Scroll the tab page that holds w so that w is visible."""
+            p = w.parentWidget()
+            while p is not None and not isinstance(p, QtW.QScrollArea):
+                p = p.parentWidget()
+            if p is not None:
+                p.ensureWidgetVisible(w, 0, 20)
+
         def _tab_changed(self, i):
             """The Explore tab shows its own slice view on the right; every other tab shows the movie preview."""
             self.stop_play()
@@ -464,7 +514,7 @@ def build_gui(args):
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
-            self.timeline.setVisible(False); self.go_btn.setEnabled(False)
+            self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.voxel_row.setVisible(False)
             self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
 
         def set_busy(self, flag, msg=None):
@@ -558,7 +608,7 @@ def build_gui(args):
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
                 self.tabs.setTabVisible(i, True)
             self.explore.set_data(info)
-            self.timeline.setVisible(True); self.go_btn.setEnabled(True)
+            self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
             self.build_controls()
             if not keep_message:
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
@@ -624,7 +674,8 @@ def build_gui(args):
             self._sweep_hint()
             self._setv(self.rto_cb, sp.get("return_to_overview", True))
             st = sp["style"]
-            self._setv(self.legend_cb, st.get("legend", True)); self._setv(self.slabel_cb, st.get("slice_label", True)); self._setv(self.invert_cb, st.get("invert", False))
+            self._setv(self.invert_cb, st.get("invert", False))
+            self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync()
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
             self.title_le.blockSignals(True); self.title_le.setText(st.get("title", "")); self.title_le.blockSignals(False)

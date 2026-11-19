@@ -463,6 +463,8 @@ class PartsPanel(QtW.QWidget):
         cap = QtW.QLineEdit(p.get("caption", "")); cap.setPlaceholderText("text shown at the bottom while this part plays")
         cap.textChanged.connect(lambda txt: self.set(pid, "caption", txt)); add("Caption", cap); r["caption"] = cap
         tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
+        from .gui_overlays import part_overlay_row
+        ovr = part_overlay_row(self.win, pid, p); add("On the picture", ovr); r["overlays"] = ovr
         tr = p.get("transition")
         add("Transition in", _spin(-0.1, 10, -0.1 if tr is None else float(tr), lambda v: self.set(pid, "transition", None if v < 0 else v),
                                    step=0.1, special="automatic"))

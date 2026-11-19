@@ -46,6 +46,7 @@ class Renderer:
         for p in self.cplanes[:4]:
             self.slice_actor.mapper.AddClippingPlane(p)
         self.actors, self.comp_actors, self._fonts = {}, {}, {}
+        self.bar_actor, self.last_rects = None, {}
         for k, m in ds.meshes.items():
             self.actors[k] = self._add(m)
 
@@ -136,39 +137,110 @@ class Renderer:
         else:
             cam.parallel_projection = False; cam.view_angle = fr.fov
         self.pl.renderer.ResetCameraClippingRange()
+        self._bar_label = self._prepare_slice_bar(s, spec, size, show_slice) if annotate else None
         if not self.shown:
             self.pl.show(auto_close=False); self.shown = True
         self.pl.render()
         fr_img = self.pl.screenshot(None, transparent_background=bool(transparent))
         if not annotate:
             return fr_img
-        # text overlays
-        im = Image.fromarray(fr_img).convert("RGBA"); ov = Image.new("RGBA", im.size, (0, 0, 0, 0)); d2 = ImageDraw.Draw(ov)
-        px = max(10, round(size[1] * 0.024)); font = self._font(px)
-        dark = sum(bgc) < 1.5; fg = (255, 255, 255, 255) if dark else (0, 0, 0, 255); back = (0, 0, 0, 120) if dark else (255, 255, 255, 150)
-        if style.get("slice_label", True) and show_slice and s["slice"] > 0.5:
-            d2.text((round(px * 1.5), round(px * 1.1)), f"slice {k + 1}/{self.shape[0]}", fill=fg, font=font)
-        if style.get("title"):
-            d2.text((round(px * 1.5), size[1] - round(px * 2.4)), str(style["title"]), fill=fg, font=font)
-        if s["caption"]:
-            big = self._font(round(px * 1.4)); wt = d2.textlength(s["caption"], font=big)
-            x, y = (size[0] - wt) / 2, size[1] - round(px * 3.4)
-            d2.rounded_rectangle([x - px, y - px * 0.4, x + wt + px, y + px * 2.0], radius=px * 0.5, fill=back)
-            d2.text((x, y), s["caption"], fill=fg, font=big)
-        if style.get("legend", True) and s["reveal"]:
-            rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
-                    for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
-                    and not (tgt is not None and e > 0.5 and mode != "keep" and tid != kk)]
-            if rows:
-                wtxt = max(d2.textlength(n, font=font) for n, _ in rows)
-                x, y = size[0] - round(wtxt + px * 3.4), round(px * 1.1)
-                d2.rounded_rectangle([x - px * 0.6, y - px * 0.5, size[0] - px * 0.6, y + round(px * 1.45) * len(rows) + px * 0.2],
-                                     radius=px * 0.5, fill=back)
-                for n, c in rows:
-                    d2.rectangle([x, y + px * 0.15, x + px * 0.95, y + px * 1.1], fill=c)
-                    d2.text((x + px * 1.5, y), n, fill=fg, font=font); y += round(px * 1.45)
-        im = Image.alpha_composite(im, ov)
+        return self.annotate(fr_img, s, spec, size, show_slice, transparent)
+
+    def annotate(self, fr_img, s, spec, size, show_slice, transparent=False):
+        """Draw the overlay items (legend, slice number, scale bar, title, caption) on a rendered frame.
+        Their boxes are kept in self.last_rects (pixels) for the preview, which lets the user drag them."""
+        from PIL import Image
+        from . import overlays as ov
+        ds, style = self.ds, spec.get("style", {}); W, H = size; k = int(s["k"])
+        items = ov.overlay_settings(spec); pid = s.get("part")
+
+        def shown(name, base):
+            c = ov.part_choice(spec, pid, name)
+            return items[name]["show"] and base if c == "default" else (c == "show")
+        im = Image.fromarray(fr_img).convert("RGBA"); layer = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        P = ov.Painter(layer, self._font, size, hex2rgb(style.get("bg", "#000000")))
+        sl = items["slice_label"]; nz = self.shape[0]
+        txt = str(sl.get("format") or "slice {k}/{n}").replace("{k}", str(k + 1)).replace("{n}", str(nz))
+        vox = ov.voxel_size(spec, ds)
+        if sl.get("show_depth") and vox:
+            txt += f" \u00b7 {k * vox / 10.0:.0f} nm"
+        base_slice = show_slice and s["slice"] > 0.5
+        P.text_item("slice_label", sl, txt, lambda px: (round(px * 1.5), round(px * 1.1)),
+                    shown("slice_label", base_slice) and ds.tomo is not None)
+        P.text_item("title", items["title"], str(style.get("title") or ""), lambda px: (round(px * 1.5), H - round(px * 2.4)),
+                    shown("title", True))
+        e, tgt, mode = float(s["e"]), s["target"], s["others"]
+        tid = ds.id_of(tgt["class"]) if tgt is not None and tgt.get("class") is not None else None
+        rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
+                for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
+                and not (tgt is not None and e > 0.5 and mode != "keep" and tid != kk)]
+        P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
+        self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
+        P.caption(items["caption"], s["caption"] or "", shown("caption", True))
+        self.last_rects = P.rects
+        im = Image.alpha_composite(im, layer)
         return np.asarray(im if transparent else im.convert("RGB"))
+
+    def _scale_bar(self, P, item, s, spec, size, vox, show):
+        from . import overlays as ov
+        style = spec.get("style", {}); W, H = size
+        on_slice = item.get("mode") == "slice"
+        if not vox:
+            P.scale_bar(item, 0, "", False); return
+        if on_slice:
+            if self._bar_label is None:
+                P.scale_bar(item, 0, "", False); return
+            at, L = self._bar_label
+            P.scale_bar(item, 0, ov.length_text(L), show, at=at); return
+        L = item.get("length_nm")
+        L = float(L) if L not in (None, "auto") else s.get("bar_nm")
+        fr = Framer(self.shape, W / H, float(style.get("fov", 30)), bool(style.get("ortho", False)))
+        if L is None:
+            L = ov.auto_length(ov.px_per_voxel(s["pose"], H, fr.fov, fr.ortho) * 10.0 / vox, W)
+        px = ov.px_per_voxel(s["pose"], H, fr.fov, fr.ortho) * float(L) * 10.0 / vox
+        P.scale_bar(item, px, ov.length_text(L), show)
+
+    def _prepare_slice_bar(self, s, spec, size, show_slice):
+        """Before rendering: the on-slice scale bar, when it is used in this frame. Returns (label position, nm) or None."""
+        from . import overlays as ov
+        if self.bar_actor is not None:
+            self.bar_actor.SetVisibility(False)
+        item = ov.overlay_settings(spec)["scale_bar"]; vox = ov.voxel_size(spec, self.ds)
+        if item.get("mode") != "slice" or not vox or self.ds.tomo is None or not show_slice:
+            return None
+        c = ov.part_choice(spec, s.get("part"), "scale_bar")
+        if not (item["show"] if c == "default" else c == "show"):
+            return None
+        nz, ny, nx = self.shape; L = item.get("length_nm")
+        L = float(L) if L not in (None, "auto") else ov.auto_length(1.0 / (vox / 10.0), nx) or 10.0  # 10-25 % of the slice width
+        return self._slice_bar(item, s, spec, size, L * 10.0 / vox), L
+
+    def _slice_bar(self, item, s, spec, size, L_vox):
+        """A flat bar lying on the slice (exact in every view), near the slice corner closest to the item's anchor.
+        Returns the screen position (pixels) for its label."""
+        pv = self.pv; W, H = size; k = float(s["k"]); nz, ny, nx = self.shape
+        cb = clip_box(spec, self.shape)
+        (x0, y0, _), (x1, y1, _) = cb if cb else ((0, 0, 0), (nx - 1, ny - 1, nz - 1))
+        corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+        ren = self.pl.renderer; ax = float(item.get("x") if item.get("x") is not None else 0.97) * W
+        ay = float(item.get("y") if item.get("y") is not None else 0.95) * H
+
+        def screen(x, y, z):
+            ren.SetWorldPoint(x, y, z, 1.0); ren.WorldToDisplay(); dx, dy, _ = ren.GetDisplayPoint()
+            return dx, H - dy
+        cx, cy = min(corners, key=lambda c: sum((a - b) ** 2 for a, b in zip(screen(c[0], c[1], k), (ax, ay))))
+        m = 0.04 * max(x1 - x0, y1 - y0); th = max(1.0, 0.012 * max(x1 - x0, y1 - y0)) * float(item.get("thickness", 1.0))
+        sx, sy = (1 if cx == x0 else -1), (1 if cy == y0 else -1)
+        bx0 = cx + sx * m; bx1 = bx0 + sx * L_vox; by = cy + sy * m
+        box = pv.Box(bounds=(min(bx0, bx1), max(bx0, bx1), min(by, by + sy * th), max(by, by + sy * th), k + 0.2, k + 0.6))
+        col = (1, 1, 1) if item.get("color", "auto") == "auto" and sum(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) < 1.5 else \
+            (0, 0, 0) if item.get("color", "auto") == "auto" else hex2rgb(item["color"])
+        if self.bar_actor is None:
+            self.bar_actor = self.pl.add_mesh(box, color=col, lighting=False, pickable=False)
+        else:
+            self.bar_actor.mapper.SetInputData(box); self.bar_actor.GetProperty().SetColor(*col)
+        self.bar_actor.SetVisibility(True)
+        return screen((bx0 + bx1) / 2, by + sy * th * 2, k)
 
     def update_class(self, k):
         """Swap in the new surface of one structure (after a threshold change)."""
@@ -250,7 +322,7 @@ class MovieJob:
             raise StopIteration
         try:
             i, s = self.i, self.frames[self.i]
-            key = state_key(s)
+            key = (state_key(s), s.get("part"), s.get("bar_nm"))  # overlays may differ per part
             if key != self.last_key:
                 self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=self.transparent and bool(self.frames_dir))
                 self.last_key = key

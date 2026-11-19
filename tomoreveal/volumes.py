@@ -307,22 +307,45 @@ class Dataset:
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
         return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1)
 
-    def targets_box(self, tgt):
+    def targets_box(self, tgt, pad=True):
         """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""
         from .storyboard import target_items
         items = target_items(tgt)
         if not items:
             raise KeyError("no target")
-        boxes = [self.target_box({"class": k, "component": c}) for k, c in items]
+        boxes = [self.target_box({"class": k, "component": c}, pad) for k, c in items]
         return np.min([b[0] for b in boxes], axis=0), np.max([b[1] for b in boxes], axis=0)
 
-    def target_box(self, tgt):
-        """Padded (lo, hi) box in (x,y,z) voxels around a structure or one of its connected objects."""
+    def main_axis(self, tgt):
+        """Unit vector along the longest direction of the voxels of a close-up's items (for the cross-section)."""
+        from .storyboard import target_items
+        pts = []
+        for key, comp in target_items(tgt):
+            k = self.id_of(key)
+            if k is None:
+                continue
+            if comp is None:
+                sl = self.bbox[k]; z, y, x = np.nonzero(self.mask(k, sl))
+            else:
+                lbl, _, _ = self.components(k); sl = self.bbox[k]; z, y, x = np.nonzero(lbl == int(comp))
+            step = max(1, len(x) // 20000)
+            pts.append(np.c_[x[::step] + sl[2].start, y[::step] + sl[1].start, z[::step] + sl[0].start])
+        if not pts:
+            return np.array([0.0, 0.0, 1.0])
+        p = np.vstack(pts).astype(float); p -= p.mean(0)
+        w, v = np.linalg.eigh(p.T @ p)
+        a = v[:, -1]
+        return a if a[2] >= 0 else -a
+
+    def target_box(self, tgt, pad=True):
+        """Padded (lo, hi) box in (x,y,z) voxels around a structure or one of its connected objects (pad=False: tight)."""
         k = self.id_of(tgt["class"])
         if k is None:
             raise KeyError(tgt["class"])
         sl = self._comp_slices(k, int(tgt["component"])) if tgt.get("component") is not None else self.bbox[k]
         lo = np.array([sl[2].start, sl[1].start, sl[0].start], float); hi = np.array([sl[2].stop, sl[1].stop, sl[0].stop], float) - 1
+        if not pad:
+            return lo, hi
         c = (lo + hi) / 2
         half = np.maximum((hi - lo) / 2 * (1.35 if tgt.get("component") is not None else 1.05), 8.0)
         half[:2] = np.maximum(half[:2], 0.03 * max(self.shape))  # keep some context around very small objects

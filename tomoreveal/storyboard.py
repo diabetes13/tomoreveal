@@ -527,14 +527,20 @@ def build_plan(spec, ds):
 
             t = part.get("transition"); t = CLOSEUP_TRANSITION if t is None else float(t)
             nt = round(fps * max(0.0, t))
+            if (part.get("effect") or {}).get("kind") == "grow":  # the objects disappear on the way in, then grow in
+                fly = (lambda u, f0=fly: dict(f0(u), fx={"fade": 1.0 - smooth01(u)}))
             if nt > 0:
                 emit(nt, fly, "transition", cap or "Focus")
                 label = None
             else:
                 st.update(fly(1.0)); pose[0] = p1; label = cap or "Focus"
             m, ang = part.get("motion", "orbit"), float(part.get("angle", 30))
-            emit(n, lambda u, fp=fp, m=m, ang=ang: dict(pose=fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)),
-                 "main", label)
+            anim = closeup_animation(part, ds, fr, fp, n, fps, k0=st["k"], nz=nz)
+            if anim is None:  # orbit / rock / still without effects: exactly as in 3.3
+                emit(n, lambda u, fp=fp, m=m, ang=ang: dict(pose=fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)),
+                     "main", label)
+            else:
+                emit(n, anim, "main", label)
             pose[0] = fp()
         elif typ == "hold":
             start_fade(part)
@@ -584,6 +590,83 @@ def build_plan(spec, ds):
     from .overlays import add_bar_lengths
     add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
     return Plan(frames, segments, marks, fps, problems)
+
+
+FX_DEFAULTS = dict(wiggle=dict(amplitude=8.0, frequency=0.5, shape="circle"), push=dict(on=False, start=1.0, end=1.35),
+                   highlight=dict(kind="none", pulses=2), effect=dict(kind="none", direction="slices", move_slice=True, sweep="whole",
+                                                                       how="bottom", seconds=None))
+
+
+def fx_settings(part):
+    out = {k: dict(v) for k, v in FX_DEFAULTS.items()}
+    for k in out:
+        if isinstance(part.get(k), dict):
+            out[k].update(part[k])
+    return out
+
+
+def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
+    """Frame function u -> state changes for a close-up's main phase with wiggle, push-in, highlight or an object effect;
+    None when the close-up has none of them (it is then drawn exactly as before)."""
+    S = fx_settings(part); m = part.get("motion", "orbit"); ang = float(part.get("angle", 30))
+    wig, push, hl, eff = S["wiggle"], S["push"], S["highlight"], S["effect"]
+    if m != "wiggle" and not push.get("on") and hl["kind"] == "none" and eff["kind"] == "none":
+        return None
+    T = max(1e-6, (n - 1) / fps); tgt = part.get("target") or {}
+    base = fp(); obj_lo, obj_hi = ds.targets_box(tgt, pad=False)
+    lo, hi = np.asarray(obj_lo, float) - 0.5, np.asarray(obj_hi, float) + 0.5
+    centre = (lo + hi) / 2; radius = float(np.linalg.norm(hi - lo)) / 2
+    axis = ds.main_axis(tgt) if eff["kind"] == "section" and eff.get("direction") == "axis" else None
+
+    def fn(u):
+        t = u * T; d = {}; fx = {}
+        if m == "wiggle":
+            A = float(wig["amplitude"]) * smooth01(t / 0.5) * smooth01((T - t) / 0.5); f = float(wig["frequency"])
+            if wig.get("shape") == "eight":
+                daz, dtl = A * math.sin(2 * math.pi * f * t), A / 2 * math.sin(4 * math.pi * f * t)
+            else:
+                daz, dtl = A * math.cos(2 * math.pi * f * t), A * math.sin(2 * math.pi * f * t)
+            p = dict(base, az=base["az"] + daz, tilt=min(89.0, max(0.0, base["tilt"] + dtl)))
+            fx["wiggle"] = [round(daz, 4), round(dtl, 4)]
+        else:
+            p = fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)
+        if push.get("on"):
+            z = float(push["start"]) + (float(push["end"]) - float(push["start"])) * smooth01(u)
+            need = fr.fit(lo, hi, p["tilt"], p["az"], 1.02)  # never so close that the objects leave the frame
+            p = dict(p, dist=max(p["dist"] / z, need["dist"]), scale=max(p["scale"] / z, need["scale"]))
+            fx["push"] = round(z, 4)
+        d["pose"] = p
+        if hl["kind"] == "pulse":
+            fx["pulse"] = round((1 - math.cos(2 * math.pi * max(1, int(hl.get("pulses", 2))) * u)) / 2, 4)
+        elif hl["kind"] == "glow":
+            fx["glow"] = round((1 - math.cos(2 * math.pi * max(1, int(hl.get("pulses", 2))) * u)) / 2, 4)
+        if eff["kind"] == "section":
+            q = smooth01(min(1.0, u / 0.6)) * 0.5 if eff.get("sweep") == "half" else u
+            direc = eff.get("direction", "slices")
+            if direc == "viewer":
+                cam = fr.axes(p["tilt"], p["az"])[0]; nrm = -np.asarray(cam)  # keep the far side; the cut faces the camera
+                o = centre + nrm * (-radius + 2 * radius * q)
+            elif direc == "axis":
+                nrm = -axis; o = centre + axis * (radius - 2 * radius * q)
+            else:  # through the slices, top to bottom: keep what is below the cut
+                nrm = np.array([0.0, 0.0, -1.0]); o = np.array([centre[0], centre[1], hi[2] - (hi[2] - lo[2]) * q])
+                if eff.get("move_slice", True):
+                    d["k"] = int(min(nz - 1, max(0, math.floor(o[2] - 0.6))))  # the slice just under the cut face
+            fx["cut"] = dict(normal=[round(float(v), 4) for v in nrm], origin=[round(float(v), 2) for v in o], mode="section")
+        elif eff["kind"] == "grow":
+            dur = float(eff["seconds"]) if eff.get("seconds") else T * 0.7
+            g = smooth01(min(1.0, t / max(1e-6, dur)))
+            if eff.get("how") == "fade":
+                fx["fade"] = round(g, 4)
+            else:
+                start = float(k0) if eff.get("how") == "slice" and lo[2] <= k0 <= hi[2] else lo[2]
+                z = start + (hi[2] - start) * g if g < 1 else hi[2] + 1
+                fx["cut"] = dict(normal=[0.0, 0.0, -1.0], origin=[round(float(centre[0]), 2), round(float(centre[1]), 2), round(float(z), 2)],
+                                 mode="grow")
+        if fx:
+            d["fx"] = fx
+        return d
+    return fn
 
 
 def build_timeline(spec, ds):
@@ -716,5 +799,6 @@ class History:
 def state_key(s):
     p = s["pose"]
     oth = s["others"] if not isinstance(s["others"], dict) else json.dumps(s["others"], sort_keys=True)
-    return (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), oth,
+    extra = (json.dumps(s["fx"], sort_keys=True, default=float),) if s.get("fx") else ()  # close-up animations (3.4)
+    return extra + (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), oth,
             s["caption"], tuple(np.round(p["c"], 2)), round(p["tilt"], 3), round(p["az"] % 360.0, 3), round(p["dist"], 2))

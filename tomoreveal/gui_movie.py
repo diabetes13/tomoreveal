@@ -327,7 +327,11 @@ def _spin(lo, hi, value, on_change, step=0.5, suffix=" s", decimals=2, special=N
 SLIDE_ENDS = (("first slice", "first"), ("last slice", "last"), ("where the slice is", "current"), ("a slice number", "number"))
 STRUCTURES = (("hidden", "none"), ("above the slice", "above"), ("all", "all"), ("leave as they are", "keep"))
 MOTIONS = (("rock", "rock"), ("full spin", "spin"), ("still", "none"))
-FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("hold still", "none"))
+FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("wiggle", "wiggle"), ("hold still", "none"))
+HIGHLIGHTS = (("none", "none"), ("pulse (brighter and back)", "pulse"), ("glowing outline", "glow"))
+EFFECTS = (("none", "none"), ("cross-section sweep", "section"), ("grow in", "grow"))
+SECTION_DIRS = (("through the slices, top to bottom", "slices"), ("from the viewer's side", "viewer"), ("along the object's longest axis", "axis"))
+GROW_HOW = (("build up from the bottom", "bottom"), ("build up from the slice", "slice"), ("fade in", "fade"))
 OTHERS = (("grey", "grey"), ("hidden", "hide"), ("unchanged", "keep"))
 OTHER_COLOURS = (("grey", "grey"), ("darker", "darken"), ("unchanged colour", "keep"))
 
@@ -623,12 +627,66 @@ class PartsPanel(QtW.QWidget):
         op.valueChanged.connect(lambda v: self.set(pid, "others", dict(colour=sb.others_of(self.part(pid).get("others"))[0], opacity=v / 100)))
         h.addWidget(col); h.addWidget(op); h.addStretch(1)
         form.addRow("Other structures", orow)
-        form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v)))
+        form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v, rebuild=True)))
+        self._animation_rows(pid, p, form)
         form.addRow("Zoom", _spin(0.3, 4, float(p.get("zoom", 1)), lambda v: self.set(pid, "zoom", v), step=0.1, suffix=" x"))
         form.addRow("Tilt", _spin(-1, 85, float(p["tilt"]) if p.get("tilt") is not None else -1,
                                   lambda v: self.set(pid, "tilt", None if v < 0 else v), step=5, suffix="\u00b0", decimals=0,
                                   special="automatic"))
         form.addRow("Vignette", self._vignette_row(pid, p))
+
+    def _fx(self, pid, key, rebuild=False, **kw):
+        q = self.part(pid)
+        if q is not None:
+            cur = dict(sb.fx_settings(q)[key]); cur.update(kw); self.set(pid, key, cur, rebuild=rebuild)
+
+    def _animation_rows(self, pid, p, form):
+        """Wiggle amounts, push-in, highlight and object effect of a close-up (they can be combined)."""
+        S = sb.fx_settings(p)
+
+        def row(*ws):
+            w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+            for x in ws:
+                h.addWidget(x)
+            h.addStretch(1)
+            return w
+        if p.get("motion") == "wiggle":
+            w = S["wiggle"]
+            amp = _spin(1, 30, float(w["amplitude"]), lambda v: self._fx(pid, "wiggle", amplitude=v), step=1, suffix="\u00b0", decimals=0)
+            amp.setToolTip("How far the camera swings around the object")
+            fq = _spin(0.1, 2, float(w["frequency"]), lambda v: self._fx(pid, "wiggle", frequency=v), step=0.1, suffix=" per second", decimals=1)
+            shp = _combo((("circle", "circle"), ("figure eight", "eight")), w.get("shape", "circle"), lambda v: self._fx(pid, "wiggle", shape=v))
+            form.addRow("Wiggle", row(amp, fq, shp))
+        pu = S["push"]
+        on = QtW.QCheckBox("push in"); on.setChecked(bool(pu["on"])); on.setToolTip("The camera moves slowly closer during the close-up")
+        on.toggled.connect(lambda v: self._fx(pid, "push", rebuild=True, on=bool(v)))
+        ws = [on]
+        if pu["on"]:
+            ws += [_spin(0.5, 3, float(pu["start"]), lambda v: self._fx(pid, "push", start=v), step=0.05, suffix=" x \u2192", decimals=2),
+                   _spin(0.5, 3, float(pu["end"]), lambda v: self._fx(pid, "push", end=v), step=0.05, suffix=" x", decimals=2)]
+        form.addRow("Camera push-in", row(*ws))
+        hl = S["highlight"]
+        hk = _combo(HIGHLIGHTS, hl["kind"], lambda v: self._fx(pid, "highlight", rebuild=True, kind=v))
+        ws = [hk]
+        if hl["kind"] != "none":
+            n = QtW.QSpinBox(); n.setRange(1, 10); n.setValue(int(hl.get("pulses", 2))); n.setSuffix(" times")
+            n.valueChanged.connect(lambda v: self._fx(pid, "highlight", pulses=int(v))); ws.append(n)
+        form.addRow("Highlight", row(*ws))
+        ef = S["effect"]
+        ek = _combo(EFFECTS, ef["kind"], lambda v: self._fx(pid, "effect", rebuild=True, kind=v))
+        ek.setToolTip("Cross-section: a cut moves through the objects and shows their inside. Grow in: the objects appear gradually.")
+        ws = [ek]
+        if ef["kind"] == "section":
+            ws.append(_combo(SECTION_DIRS, ef.get("direction", "slices"), lambda v: self._fx(pid, "effect", rebuild=True, direction=v)))
+            ws.append(_combo((("whole close-up", "whole"), ("halfway, then hold", "half")), ef.get("sweep", "whole"),
+                             lambda v: self._fx(pid, "effect", sweep=v)))
+        elif ef["kind"] == "grow":
+            ws.append(_combo(GROW_HOW, ef.get("how", "bottom"), lambda v: self._fx(pid, "effect", how=v)))
+        form.addRow("Object effect", row(*ws))
+        if ef["kind"] == "section" and ef.get("direction", "slices") == "slices":
+            mv = QtW.QCheckBox("move the tomogram slice with the cut"); mv.setChecked(bool(ef.get("move_slice", True)))
+            mv.setToolTip("The slice follows the cut, so you see the density inside the object exactly where it is cut")
+            mv.toggled.connect(lambda v: self._fx(pid, "effect", move_slice=bool(v))); form.addRow("", mv)
 
     def _vignette_row(self, pid, p):
         """As in the Look tab, or this close-up's own vignette (strength) and background blur."""

@@ -36,6 +36,7 @@ class Renderer:
         self.size, self.aa, self.bg, self.shown, self.peeling = (960, 540), "off", None, False, False
         self._light_key, self._ssao, self._real_shadows, self.real_shadows_ok = ("default",), False, False, False
         self.sil_actors, self._dots = {}, {}  # cartoon outlines and thinned-out meshes for dots, per structure
+        self.glow_actors, self.cut_actors, self._cut_cache, self._fx_meshes = {}, {}, {}, {}  # close-up animations
         self._slice_grey, self._shadow_key = None, None
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -190,6 +191,7 @@ class Renderer:
                 act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
                 op = float(min(1.0, max(0.0, class_spec(spec, ds, tid).get("opacity", 1.0)))) * all_op
                 act.GetProperty().SetOpacity(op); translucent |= op < 0.999
+        translucent |= self._apply_fx(s.get("fx") or {}, items, spec, e, keep, all_op)
         # Depth peeling only while some structure is see-through and the slice is opaque or hidden: with OSMesa (VTK 9.6)
         # peeling plus a see-through slice gives an all-black frame when drawn without anti-aliasing (3.2 and 3.4 pitfall).
         translucent = translucent and not (show_slice and float(s["slice"]) < 0.999)
@@ -274,6 +276,105 @@ class Renderer:
             self._dof = on
         if on:
             self.pl.camera.SetFocalDisk(amount * 0.08 * max(self.shape))
+
+    # ---------- close-up animations (fx) ----------
+    def _fx_mesh(self, k, cid, kind="item"):
+        """Surfaces used by the effects, cached: the item itself, the item with outward-facing polygons (for capped
+        clipping), and the rest of a structure without one of its objects."""
+        key = (k, cid, kind, id(self.ds.meshes.get(k)))
+        if key not in self._fx_meshes:
+            ds = self.ds
+            if kind == "rest":
+                from .volumes import surface
+                lbl, _, _ = ds.components(k); sl = ds.bbox[k]
+                m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step)
+            else:
+                m = ds.meshes.get(k) if cid is None else ds.comp_mesh(k, int(cid))
+                if m is not None and kind == "outward":
+                    m = m.compute_normals(flip_normals=True, split_vertices=False)  # our surfaces are wound inwards
+            self._fx_meshes[key] = m
+        return self._fx_meshes[key]
+
+    def _clipped(self, k, cid, normal, origin):
+        """(body, cap) of an item cut by a plane on the CPU (the six OpenGL clipping planes are all in use); cached by the
+        plane's position rounded to 0.5 voxel."""
+        n = np.asarray(normal, float); o = np.round(np.asarray(origin, float) * 2) / 2
+        key = (k, cid, tuple(np.round(n, 3)), tuple(o), id(self.ds.meshes.get(k)))
+        if key in self._cut_cache:
+            return self._cut_cache[key]
+        vtk, pv = self.vtk, self.pv
+        m = self._fx_mesh(k, cid, "outward")
+        body = cap = None
+        if m is not None:
+            f = vtk.vtkClipClosedSurface(); pc = vtk.vtkPlaneCollection(); pl = vtk.vtkPlane(); pl.SetNormal(*n); pl.SetOrigin(*o)
+            pc.AddItem(pl); f.SetClippingPlanes(pc); f.SetInputData(m); f.SetScalarModeToLabels(); f.Update()
+            out = pv.wrap(f.GetOutput())
+            if out.n_cells:
+                lab = np.asarray(out.cell_data["Labels"])
+                body = out.extract_cells(np.nonzero(lab == 0)[0]).extract_surface(algorithm="dataset_surface") if (lab == 0).any() else None
+                cap = out.extract_cells(np.nonzero(lab == 1)[0]).extract_surface(algorithm="dataset_surface") if (lab == 1).any() else None
+        if len(self._cut_cache) > 96:
+            self._cut_cache.pop(next(iter(self._cut_cache)))
+        self._cut_cache[key] = (body, cap)
+        return body, cap
+
+    def _cut_actor(self, key, part):
+        a = self.cut_actors.get((key, part))
+        if a is None:
+            a = self._add(self.pv.Sphere(radius=0.01), front=key[1] is not None); a.SetPickable(False)
+            self.cut_actors[(key, part)] = a
+        return a
+
+    def _apply_fx(self, fx, items, spec, e, keep, all_op):
+        """Pulse, glowing outline, fade and cutting of the objects in focus. Returns True when something is see-through."""
+        from colorsys import hsv_to_rgb, rgb_to_hsv
+        for a in list(self.glow_actors.values()) + list(self.cut_actors.values()):
+            a.SetVisibility(False)
+        for kk, act in self.actors.items():  # the structure's own surface again (a cut may have swapped it)
+            if getattr(act, "_rest", False):
+                act.mapper.SetInputData(self.ds.meshes[kk]); act._rest = False; act._shown_mesh = self.ds.meshes[kk]
+        if not fx or not items:
+            return False
+        ds = self.ds; translucent = False
+        targets = []  # (structure id, component, actor drawing it now)
+        for k, cid in items:
+            act = self.actors.get(k) if cid is None else self.comp_actors.get((k, int(cid)))
+            if act is not None and (cid is None or (e > 0 and not keep)):
+                targets.append((k, cid, act))
+        for k, cid, act in targets:
+            pr = act.GetProperty(); cut_body = None
+            if "pulse" in fx:  # brighter and back, n times
+                h, sat, v = rgb_to_hsv(*pr.GetColor()); v = min(1.0, v * (1 + 0.35 * float(fx["pulse"])))
+                pr.SetColor(*hsv_to_rgb(h, sat, v))
+            if "fade" in fx:
+                pr.SetOpacity(pr.GetOpacity() * float(fx["fade"])); act.SetVisibility(act.GetVisibility() and fx["fade"] > 0.002)
+                translucent |= float(fx["fade"]) < 0.999
+            if "cut" in fx:
+                c = fx["cut"]; body, cap = self._clipped(k, cid, c["normal"], c["origin"]); cut_body = body
+                if cid is None:
+                    act.SetVisibility(False)
+                else:  # the greyed structure must not draw this object uncut over the cross-section
+                    act.SetVisibility(False); rest = self._fx_mesh(k, cid, "rest"); sa = self.actors.get(k)
+                    if sa is not None and rest is not None:
+                        sa.mapper.SetInputData(rest); sa._rest = True; sa._shown_mesh = rest
+                col = np.array(pr.GetColor())
+                for part_name, mesh, colour in (("body", body, col), ("cap", cap, col + (1 - col) * (0.45 if c.get("mode") == "section" else 0.0))):
+                    if mesh is None or mesh.n_cells == 0:
+                        continue
+                    ca = self._cut_actor((k, cid), part_name); ca.mapper.SetInputData(mesh)
+                    cp = ca.GetProperty(); cp.SetColor(*colour); cp.SetOpacity(pr.GetOpacity())
+                    cp.SetAmbient(pr.GetAmbient()); cp.SetDiffuse(pr.GetDiffuse()); cp.SetSpecular(pr.GetSpecular())
+                    ca.SetVisibility(pr.GetOpacity() > 0.002)
+            if "glow" in fx:
+                mesh = cut_body if "cut" in fx else self._fx_mesh(k, cid)  # the outline follows the cut
+                if mesh is not None:
+                    g = self.glow_actors.get((k, cid))
+                    if g is None or getattr(g, "_mesh", None) is not mesh:
+                        g = self._silhouette(("glow", k, cid), mesh); self.glow_actors[(k, cid)] = g
+                    col = np.array(pr.GetColor()); gp = g.GetProperty()
+                    gp.SetColor(*(col + (1 - col) * 0.6)); gp.SetLineWidth(2 + 4 * float(fx["glow"])); gp.LightingOff()
+                    g.SetVisibility(bool(act.GetVisibility() or ("cut" in fx and pr.GetOpacity() > 0.002)))
+        return translucent
 
     def _focus_items(self, tgt):
         """[(structure id, component or None)] of a close-up target that are loaded."""
@@ -543,6 +644,12 @@ class Renderer:
         if sil is not None:
             self.pl.renderer.RemoveActor(sil)
         self._dots.pop(k, None)
+        for key in [key for key in self.glow_actors if key[0] == k]:
+            self.pl.renderer.RemoveActor(self.glow_actors.pop(key))
+        for key in [key for key in self.sil_actors if isinstance(key, tuple) and key[1] == k]:
+            self.pl.renderer.RemoveActor(self.sil_actors.pop(key))
+        self._fx_meshes = {key: v for key, v in self._fx_meshes.items() if key[0] != k}
+        self._cut_cache = {key: v for key, v in self._cut_cache.items() if key[0] != k}
         if k in self.ds.meshes:
             self.actors[k] = self._add(self.ds.meshes[k])
 

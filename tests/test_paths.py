@@ -131,6 +131,11 @@ def test_window_path_parts(tmp_path, demo):
             win.editor.commit(select=pts["id"])
         win.prev_timer.stop(); win.do_preview(); settle()
         assert pts["id"] not in win.timeline.canvas.plan.problems and len(win.st.ren._markers) == 2
+        from PySide6 import QtWidgets
+        for v in (1.5, 2.0, 2.5):  # changing a camera setting more than once (3.4.0 bug: the second change failed)
+            dist = next(w for w in win.findChildren(QtWidgets.QDoubleSpinBox) if w.toolTip().startswith("How far the camera"))
+            dist.setValue(v); app.processEvents()
+        assert win.parts_panel.part(pts["id"])["camera"]["distance"] == 2.5
         assert not errs, errs
     finally:
         sys.excepthook = old; win.close()

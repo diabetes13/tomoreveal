@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.4.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.4.1. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 

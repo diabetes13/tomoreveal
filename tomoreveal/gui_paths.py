@@ -56,7 +56,7 @@ def path_rows(panel, pid, p, form):
     def setcam(**kw):
         q = part()
         if q is not None:
-            panel.set(pid, "camera", dict(sb.PATH_CAMERA, **(q.get("camera") or {}), **kw))
+            panel.set(pid, "camera", {**sb.PATH_CAMERA, **(q.get("camera") or {}), **kw})
     src = p.get("source") or {}; kind = src.get("kind", "follow")
     form.addRow("The camera", _combo((("follows a structure", "follow"), ("moves through points", "points")), kind,
                                      lambda v: panel.set(pid, "source", dict(part().get("source") or {}, kind=v), rebuild=True)))

@@ -1,5 +1,10 @@
 # Change log
 
+## 3.4.1
+
+- **Fixed a crash with "Shadows between structures"** on NVIDIA graphics cards. VTK's shadow shader failed for everything drawn without lighting (the tomogram slice, outlines, the scale bar, the Flat preset), which filled the terminal with shader errors and could end in a segmentation fault while turning the view. Those items are now drawn in the same colours in a way the shadow shader accepts, and the graphics card self-test checks this too.
+- **Fixed: camera path settings could be changed only once.** A second change of the camera distance, side, height or where it looks did nothing and wrote an error to the log.
+
 ## 3.4.0
 
 - **Projects and crash safety (R3).** File > Save / Save as / Open / Open recent / Revert. A project (`.tomoreveal`) stores where the data files are and every setting, not the data. Moved data folders are found again; missing or changed files are listed in one dialog (Locate, Skip, Use it anyway). Your work is autosaved a few seconds after each change; after a crash TomoReveal offers to restore it. Movies are written in pieces, so a movie interrupted by a crash can be continued instead of started again. Errors are written to a log (Help > Show log folder).

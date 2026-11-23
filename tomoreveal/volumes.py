@@ -1,10 +1,22 @@
 """Reading volumes, recognising what a file is, surfaces, and the loaded dataset."""
-import json
 import os
 
 import numpy as np
 
-from .common import PALETTE, UserError
+from .common import PALETTE, UserError, label_dtype, read_json
+
+
+def clean_labels(a, path):
+    """A label volume with label numbers 0 and up. MRC mode 0 is signed, so an 8-bit file that reads as negative numbers
+    (a 0/255 mask, labels 128-255) is taken as 0-255; whole-number floats become integers; other negative labels are an error."""
+    if a.dtype == np.int8 and a.size and a.min() < 0:
+        a = a.view(np.uint8)
+    elif not np.issubdtype(a.dtype, np.integer):
+        a = np.rint(a)
+    lo, hi = (int(a.min()), int(a.max())) if a.size else (0, 0)
+    if lo < 0:
+        raise UserError(f"{os.path.basename(path)}: label numbers must be 0 or more, but the file holds {lo}")
+    return a.astype(label_dtype(hi)) if a.dtype == np.uint8 or not np.issubdtype(a.dtype, np.integer) else a
 
 
 def load_volume(path):
@@ -15,6 +27,8 @@ def load_volume(path):
     if ext in (".tif", ".tiff"):
         import tifffile
         a = tifffile.imread(path)
+        if a.ndim == 3 and a.shape[-1] in (3, 4):
+            raise UserError(f"{os.path.basename(path)} is a colour (RGB) image, not a 3D volume")
     elif ext in (".mrc", ".rec", ".map", ".mrcs", ".st"):
         import mrcfile
         with mrcfile.open(path, permissive=True) as m:
@@ -27,10 +41,13 @@ def load_volume(path):
 
 
 def looks_like_labels(a):
-    if not np.issubdtype(a.dtype, np.integer):
-        return False
+    """Few distinct whole numbers, with background (0) the most common value: a label volume rather than a tomogram.
+    Floats count when they are whole numbers above 1 (labels saved as float32); a 0/1 float mask stays a score map."""
     sub = a[::max(1, a.shape[0] // 16), ::7, ::7]
-    return len(np.unique(sub)) <= 64
+    if not np.issubdtype(a.dtype, np.integer) and not (np.isfinite(sub).all() and np.array_equal(sub, np.rint(sub)) and sub.max() > 1):
+        return False
+    vals, counts = np.unique(sub, return_counts=True)
+    return len(vals) <= 64 and vals[counts.argmax()] == 0 and counts.max() >= 0.3 * sub.size
 
 
 def score_scale(a):
@@ -39,6 +56,16 @@ def score_scale(a):
     if np.issubdtype(a.dtype, np.integer):
         return 1.0 if mx <= 1 else 127.0 if a.dtype == np.int8 else 255.0
     return 1.0 if mx <= 1.5 else mx
+
+
+def guess_kind(a, stem, have_tomo, nvol):
+    """What a volume given without a role probably is: "tomogram", "labels" or "scores" (an easymode / Ais score map)."""
+    scores, labels = looks_like_scores(a), looks_like_labels(a)
+    binary = float(a[::max(1, a.shape[0] // 16), ::7, ::7].max()) <= 1  # a 0/1 mask works as a score map too
+    named = "__" in stem  # easymode / Ais: <tomogram>__<feature>.mrc
+    if scores and (not labels or (binary and named)) and (named or have_tomo or nvol > 1):
+        return "scores"
+    return "labels" if labels else "tomogram"
 
 
 def looks_like_scores(a):
@@ -76,7 +103,7 @@ def sidecar_classes(path):
     for cand in (os.path.splitext(path)[0] + ".json", os.path.join(os.path.dirname(path), "classes.json")):
         if os.path.isfile(cand):
             try:
-                return {int(k): {kk: v[kk] for kk in ("name", "color") if kk in v} for k, v in json.load(open(cand)).items()}
+                return {int(k): {kk: v[kk] for kk in ("name", "color") if kk in v} for k, v in read_json(cand).items()}
             except Exception as exc:
                 print(f"  note: could not read {cand} ({exc})")
     return {}
@@ -105,6 +132,7 @@ class Dataset:
     integer id (k, used by the renderer) and a stable key "<source key>#<label>" that the settings use."""
     def __init__(self, smooth=15, step=1):
         self.tomo = None; self.vox = None; self._shape = None
+        self._tomo_vox = self._seg_vox = None  # each source's own voxel size: the tomogram's wins
         self.tomo_name = self.seg_name = ""
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
         self._labels = {}      # structure id -> (label array of its source, label value)
@@ -120,11 +148,11 @@ class Dataset:
         return tuple(self.tomo.shape) if self.tomo is not None else self._shape
 
     def set_tomogram(self, arr, vox, name):
+        self._tomo_vox = vox if arr is not None else None; self.vox = self._tomo_vox or self._seg_vox
         if arr is None:
             self.tomo = None; self._lev = {}; self.tomo_name = ""
             return
         self.tomo = np.ascontiguousarray(arr, dtype=np.float32); self._lev = {}; self.tomo_name = name
-        self.vox = vox or self.vox
 
     def has_seg(self):
         return bool(self.classes)
@@ -168,7 +196,7 @@ class Dataset:
         self._comp, self.meshes, self.classes, self.bbox, self.scores, self._labels = {}, {}, {}, {}, {}, {}
         self.path_cache = {}
         self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
-        self.seg_name = ", ".join(s.get("title", "") for s in sources); self.vox = self.vox or vox
+        self.seg_name = ", ".join(s.get("title", "") for s in sources); self._seg_vox = vox; self.vox = self._tomo_vox or vox
         k = 0
         for src in sources:
             if src["kind"] == "scores":

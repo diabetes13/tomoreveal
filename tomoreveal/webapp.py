@@ -2,7 +2,9 @@
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 
 from .common import UserError, __version__
@@ -40,7 +42,24 @@ def make_handler(studio):
             except Exception as exc:
                 self._send(500, dict(error=f"{type(exc).__name__}: {exc}"))
 
+        def _allowed(self):
+            """Only TomoReveal's own page: Host is this server, and Origin (when sent) is this server too.
+            Also refuses a Content-Length that is not a whole number (a negative one would block, then still run)."""
+            own = (f"127.0.0.1:{self.server.server_address[1]}", f"localhost:{self.server.server_address[1]}")
+            origin = self.headers.get("Origin")
+            if not (self.headers.get("Host") in own and (origin is None or origin in tuple("http://" + h for h in own))):
+                code, why = 403, "refused: this request did not come from TomoReveal's own page"
+            elif not (self.headers.get("Content-Length") or "0").strip().isdigit():
+                code, why = 400, "refused: the Content-Length is not a whole number"
+            else:
+                return True
+            self.close_connection = True  # the unread body must never be taken as a second request
+            self._send(code, dict(error=why), extra={"Connection": "close"})
+            return False
+
         def do_GET(self):
+            if not self._allowed():
+                return
             u = urlparse(self.path)
             if u.path in ("/", "/index.html"):
                 return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -65,6 +84,8 @@ def make_handler(studio):
                 else:
                     start = max(0, size - int(m.group(2)))
                 end = min(end, size - 1)
+                if start > end:
+                    return self._send(416, dict(error="that byte range is not in the file"), extra={"Content-Range": f"bytes */{size}"})
                 self.send_response(206); self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             else:
                 self.send_response(200)
@@ -83,10 +104,13 @@ def make_handler(studio):
                     left -= len(chunk)
 
         def do_POST(self):
+            if not self._allowed():
+                return
             u = urlparse(self.path)
             if u.path == "/api/upload":
                 name = os.path.basename(unquote(parse_qs(u.query).get("name", ["upload.bin"])[0])) or "upload.bin"
-                n = int(self.headers.get("Content-Length") or 0); dest = os.path.join(studio.work, name)
+                n = int(self.headers.get("Content-Length") or 0); folder = tempfile.mkdtemp(dir=studio.work, prefix="upload_")
+                dest = os.path.join(folder, name)  # a folder per upload: two files with one name are both kept
                 try:
                     with open(dest, "wb") as f:
                         while n > 0:
@@ -95,9 +119,16 @@ def make_handler(studio):
                                 break
                             f.write(chunk); n -= len(chunk)
                 except OSError as exc:
+                    shutil.rmtree(folder, True)
                     return self._send(500, dict(error=f"could not store the file: {exc}"))
+                if n > 0:  # the browser stopped sending before the end
+                    shutil.rmtree(folder, True); self.close_connection = True
+                    return self._send(400, dict(error="the upload was cut off"), extra={"Connection": "close"})
                 return self._send(200, dict(path=dest))
-            body = self._json()
+            try:
+                body = self._json()
+            except ValueError:
+                return self._send(400, dict(error="the request is not valid JSON"))
             busy = studio.job.get("state") == "rendering"
             if u.path == "/api/load":
                 if busy:
@@ -136,16 +167,24 @@ def make_handler(studio):
     return Handler
 
 
-def cmd_app(args):
+def _bind(handler, port):
+    """A server on the first free port from `port` on (30 tries) -> (server, port), or (None, None)."""
     from http.server import ThreadingHTTPServer
-    import webbrowser
-    studio = Studio(headless=args.headless, outdir=args.outdir)
-    httpd = None
-    for port in range(args.port, args.port + 30):
+
+    class Server(ThreadingHTTPServer):
+        allow_reuse_address = sys.platform != "win32"  # on Windows it lets a second server take a busy port
+    for p in range(port, port + 30):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(studio)); break
+            return Server(("127.0.0.1", p), handler), p
         except OSError:
             continue
+    return None, None
+
+
+def cmd_app(args):
+    import webbrowser
+    studio = Studio(headless=args.headless, outdir=args.outdir)
+    httpd, port = _bind(make_handler(studio), args.port)
     if httpd is None:
         sys.exit("tomoreveal: no free port found")
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -292,7 +331,7 @@ function applyInfo(info){
     if(String(prev.dims)!==String(info.dims)){S.spec.clip=null;S.spec.z_range=null;}
     const keys=new Set(info.structures.map(c=>c.key));const merged={};
     for(const [k,v] of Object.entries(info.spec.classes))merged[k]=S.spec.classes[k]||v;
-    S.spec.classes=merged;S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||keys.has(s.target.class));}
+    S.spec.classes={...S.spec.classes,...merged};S.spec.shots=S.spec.shots.filter(s=>s.type!=='focus'||keys.has(s.target.class));}
   say('Loaded. Adjust anything on the left; the preview updates as you go.','ok');
   for(const id of ['datacard','classcard','viewcard','storycard','lookcard','rendercard','scrubwrap'])$('#'+id).classList.remove('hidden');
   $('#hint').classList.add('hidden');

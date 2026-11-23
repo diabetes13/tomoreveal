@@ -1,5 +1,6 @@
 """Reader for Dragonfly .ORSSession files (multi-ROIs, ROIs and stored images)."""
-import mmap
+import contextlib
+import functools
 import os
 import re
 import struct
@@ -7,11 +8,41 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from .common import PALETTE, UserError, ZMAGIC
+from .common import PALETTE, UserError, ZMAGIC, label_dtype
+
+# what a cut-off, overwritten or otherwise unexpected file raises while it is parsed
+_PARSE_ERRORS = (struct.error, KeyError, IndexError, TypeError, ValueError, AttributeError, ZeroDivisionError, OverflowError,
+                 ET.ParseError)
+
+
+@contextlib.contextmanager
+def _damaged(path):
+    """Turns parse errors into one clear UserError; a UserError passes through unchanged."""
+    try:
+        yield
+    except UserError:
+        raise
+    except Exception as exc:
+        if not isinstance(exc, _PARSE_ERRORS) and type(exc).__module__.split(".")[0] != "zstandard":
+            raise
+        raise UserError(f"{os.path.basename(path)} looks damaged and cannot be read ({type(exc).__name__}: {exc}). "
+                        "Save it again in Dragonfly, or export the ROI as a TIFF stack and use that instead.") from exc
+
+
+def _checked(method):
+    @functools.wraps(method)
+    def run(self, *a, **k):
+        with _damaged(self.path):
+            return method(self, *a, **k)
+    return run
 
 
 class OrsSession:
     def __init__(self, path):
+        with _damaged(path):
+            self._open_session(path)
+
+    def _open_session(self, path):
         try:
             import zstandard
         except ImportError:
@@ -21,39 +52,58 @@ class OrsSession:
         self._zstd = zstandard
         self.dctx = zstandard.ZstdDecompressor()
         self.path = path
-        self.f = open(path, "rb")
-        self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
-        if self.mm[:4] != b"ORSZ":
-            raise UserError(f"{os.path.basename(path)} is not a compressed Dragonfly session (no 'ORSZ' header). "
-                            "Export the ROI from Dragonfly as a TIFF stack and use that instead.")
-        xoff = struct.unpack_from("<Q", self.mm, 4)[0]
-        xml = self.mm[xoff:].decode("utf-8", "replace")
-        xml = re.sub(r"<(/?)([\w.\-]+):([\w.\-]+)", r"<\1\2_\3", xml)  # tags with ':' are not valid XML names
-        self.root = ET.fromstring(xml)
-        self.version = self.root.attrib.get("Version", "?")
+        # No file stays open between reads, so Dragonfly can save over the session while it is loaded here.
+        with open(path, "rb") as f:
+            st = os.fstat(f.fileno()); self._stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
+            head = f.read(12)
+            if head[:4] != b"ORSZ":
+                raise UserError(f"{os.path.basename(path)} is not a compressed Dragonfly session (no 'ORSZ' header). "
+                                "Export the ROI from Dragonfly as a TIFF stack and use that instead.")
+            f.seek(struct.unpack_from("<Q", head, 4)[0]); xml = f.read().decode("utf-8", "replace")
+            xml = re.sub(r"<(/?)([\w.\-]+):([\w.\-]+)", r"<\1\2_\3", xml)  # tags with ':' are not valid XML names
+            self.root = ET.fromstring(xml)
+            self.version = self.root.attrib.get("Version", "?")
+            self._images = self._find_images(f)
+
+    def _open(self):
+        """The session file, opened for one read; an error if it changed since it was loaded (its offsets would be stale)."""
+        f = open(self.path, "rb"); st = os.fstat(f.fileno())
+        if (st.st_ino, st.st_size, st.st_mtime_ns) != self._stamp:
+            f.close()
+            raise UserError(f"{os.path.basename(self.path)} changed on disk since it was loaded; remove it and add it again")
+        return f
 
     # [uint64 total bytes] then repeated [uint64 chunk size][zstd data]; a zstd frame may span chunks
     def _read(self, off):
-        mm = self.mm
-        total = struct.unpack_from("<Q", mm, off)[0]
-        p, out, got, dob, left = off + 8, [], 0, None, 0
+        with self._open() as f:
+            f.seek(off); total = struct.unpack("<Q", f.read(8))[0]
+            return self._chunks(f, off, total)
+
+    def _chunks(self, f, off, total):
+        p, out, got, dob, left = off + 8, bytearray(total), 0, None, 0  # one buffer of the size the header gives
         while got < total:
-            cs = struct.unpack_from("<Q", mm, p)[0]
-            blob = mm[p + 8:p + 8 + cs]
-            if dob is None:
-                if blob[:4] != ZMAGIC:
-                    raise ValueError(f"unexpected record layout at byte {p}")
-                dob = self.dctx.decompressobj()
-                if not hasattr(dob, "eof"):
-                    left = self._zstd.get_frame_parameters(blob[:18]).content_size
-            d = dob.decompress(blob)
-            out.append(d); got += len(d); p += 8 + cs
-            done = getattr(dob, "eof", None)
-            if done is None:
-                left -= len(d); done = left <= 0
-            if done:
-                dob = None
-        return b"".join(out)
+            cs = struct.unpack("<Q", f.read(8))[0]
+            blob = f.read(cs)
+            if len(blob) != cs:
+                raise ValueError(f"the record at byte {p} runs past the end of the file")
+            p += 8 + cs
+            while blob:  # one chunk may end one zstd frame and start the next
+                if dob is None:
+                    if blob[:4] != ZMAGIC:
+                        raise ValueError(f"unexpected record layout at byte {p}")
+                    dob = self.dctx.decompressobj()
+                    if not hasattr(dob, "eof"):
+                        left = self._zstd.get_frame_parameters(blob[:18]).content_size
+                d = dob.decompress(blob); blob = b""
+                if got + len(d) > total:
+                    raise ValueError(f"the record at byte {off} holds more data than its header says")
+                out[got:got + len(d)] = d; got += len(d)
+                done = getattr(dob, "eof", None)
+                if done is None:
+                    left -= len(d); done = left <= 0
+                if done:
+                    blob = getattr(dob, "unused_data", b""); dob = None
+        return out
 
     def _array(self, off, count=None):
         raw = self._read(off)
@@ -68,20 +118,26 @@ class OrsSession:
 
     def images(self):
         """Image volumes stored in the session (float32 only)."""
+        return list(self._images)
+
+    def _find_images(self, f):
         res = []
         for el in self.root.findall("CxvChannel"):
             off = el.findtext("DataOffset")
             if off is None:
                 continue
             dims, vox = self._grid(el)
-            if struct.unpack_from("<Q", self.mm, int(off))[0] == 4 * dims[0] * dims[1] * dims[2]:
+            f.seek(int(off))
+            if struct.unpack("<Q", f.read(8))[0] == 4 * dims[0] * dims[1] * dims[2]:
                 res.append(dict(title=el.findtext("title") or "image", off=int(off), dims=dims, voxel=vox))
         return res
 
+    @_checked
     def read_image(self, im):
         nx, ny, nz = im["dims"]
         return np.frombuffer(self._read(im["off"]), "<f4").reshape(nz, ny, nx)
 
+    @_checked
     def objects(self, include_undo=False):
         res = []
         for tag, kind in (("CxvLabeledMultiROI", "multi-ROI"), ("CxvVolume_ROI", "ROI")):
@@ -107,6 +163,7 @@ class OrsSession:
             raise UserError(f"'{name}' matches {len(hits)} objects in the session. {'Candidates' if hits else 'Available'}:\n  {names}")
         return hits[0]
 
+    @_checked
     def _runs(self, obj):
         """Checked run-length intervals of a multi-ROI -> (begin, end, label) as int64 arrays, sorted by begin."""
         el = obj["el"]; ld = el.find("LabelData"); td = ld.find("TreeData")
@@ -132,10 +189,11 @@ class OrsSession:
                             "understands; export the multi-ROI from Dragonfly as a TIFF stack and drop that instead.")
         return b, e, l
 
+    @_checked
     def read_multiroi(self, obj):
         el = obj["el"]; nx, ny, nz = obj["dims"]; n = nx * ny * nz
         b, e, l = self._runs(obj)
-        dt = np.int16 if (len(l) and l.max() > 127) else np.int8
+        dt = label_dtype(int(l.max()) if len(l) else 0)
         delta = np.zeros(n + 1, dt)
         delta[b] += l.astype(dt); delta[e + 1] -= l.astype(dt)
         lab = np.cumsum(delta[:n], dtype=dt).reshape(nz, ny, nx)
@@ -144,6 +202,7 @@ class OrsSession:
     def _multiroi_classes(self, el, nlab):
         return self.class_table(el, nlab)[0]
 
+    @_checked
     def class_table(self, el, nlab):
         """Names, colours and Dragonfly's visible flag of labels 1..nlab -> ({label: dict(name, color, visible, named)}, rules).
 
@@ -219,6 +278,7 @@ class OrsSession:
                           color=colors.get(k) or PALETTE[(k - 1) % len(PALETTE)], visible=visible.get(k))
         return out, rules
 
+    @_checked
     def preview_classes(self, obj):
         """Names and colours of an object's structures without decoding its voxels (for listing it before use)."""
         if obj["kind"] == "ROI":
@@ -240,6 +300,7 @@ class OrsSession:
                 nlab = 0
         return self._multiroi_classes(obj["el"], nlab)
 
+    @_checked
     def read_roi(self, obj):
         """Plain ROI: uint32 pairs (first voxel, last voxel) of each run."""
         el = obj["el"]; nx, ny, nz = obj["dims"]; n = nx * ny * nz
@@ -257,6 +318,7 @@ class OrsSession:
                 pass
         return mask, col
 
+    @_checked
     def read_selection(self, objs):
         """One multi-ROI, or one or more plain ROIs (one class each) -> (labels, classes)."""
         if len(objs) == 1 and objs[0]["kind"] == "multi-ROI":
@@ -264,7 +326,7 @@ class OrsSession:
         if not objs or any(o["kind"] != "ROI" for o in objs):
             raise UserError("choose either one multi-ROI or one or more plain ROIs")
         nx, ny, nz = objs[0]["dims"]
-        lab = np.zeros((nz, ny, nx), np.int8); classes = {}
+        lab = np.zeros((nz, ny, nx), label_dtype(len(objs))); classes = {}
         for k, o in enumerate(objs, 1):
             if o["dims"] != objs[0]["dims"]:
                 raise UserError(f"ROI '{o['title']}' is on a different grid from '{objs[0]['title']}'")
@@ -275,7 +337,8 @@ class OrsSession:
 
 
 def guess_roi(objs):
-    """Most likely 'final segmentation' among a session's objects."""
+    """Most likely 'final segmentation' among a session's objects; one-slice previews never are."""
+    objs = [o for o in objs if o["dims"][2] > 1]
     multi = [o for o in objs if o["kind"] == "multi-ROI"]
     def score(o):
         t = o["title"].lower()
@@ -372,7 +435,11 @@ def describe_session(path):
                 d["error"] = str(exc)
             out["objects"].append(d); continue
         isc = o["el"].find("InternalScalars")
-        types, where = _scalar_types(ses, isc)
+        try:
+            with _damaged(path):
+                types, where = _scalar_types(ses, isc)
+        except UserError as exc:
+            types, where = None, str(exc)
         d["data_types"] = types; d["data_types_source"] = where
         slots = []
         for c in (isc if isc is not None else []):
@@ -384,8 +451,7 @@ def describe_session(path):
             if types and num is not None:  # slot numbering may start at 0 or 1; record both readings
                 code = dict(zero_based=types[num] if num < len(types) else None,
                             one_based=types[num - 1] if 0 < num <= len(types) else None)
-            if kind is None and code:
-                kind = SLOT_TYPES.get(code["one_based"]) or SLOT_TYPES.get(code["zero_based"])
+            kind = (SLOT_TYPES.get(code["zero_based"]) if code else None) or kind  # the reader's rule (class_table)
             sl = dict(slot=c.tag, number=num, guid_kind=guid.rsplit(".", 1)[-1] if guid else "",
                       type_code=code, decoded_as=kind or "unknown", size=int(c.findtext("size") or 0))
             try:

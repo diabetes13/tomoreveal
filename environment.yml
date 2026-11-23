@@ -8,6 +8,7 @@ dependencies:
   - pyvista
   - vtk
   - numpy
+  - libblas=*=*openblas  # MKL 2026.1's threaded calls crash NumPy on Windows (0xC06D007F)
   - scipy
   - scikit-image
   - imageio

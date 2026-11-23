@@ -47,6 +47,7 @@ def test_inspect_command(tmp_path, demo):
 def test_inspect_real_sessions():
     folder = os.environ["TOMOREVEAL_TEST_DATA"]
     files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".orssession")]
+    assert files, f"TOMOREVEAL_TEST_DATA is set, but {folder} holds no .ORSSession files"
     for f in files:
         for o in describe_session(f)["objects"]:
             if o["kind"] == "multi-ROI" and not o["undo_copy"] and not o["single_slice"]:  # previews are never shown

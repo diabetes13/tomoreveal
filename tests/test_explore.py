@@ -64,7 +64,7 @@ def test_large_slice_is_fast():
 
 
 @pytest.fixture
-def window(tmp_path, demo):
+def window(tmp_path, demo, needs_3d):
     from PySide6 import QtCore
     from tomoreveal.gui import build_gui
     app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
@@ -72,8 +72,7 @@ def window(tmp_path, demo):
     loop = QtCore.QEventLoop(); win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     for _ in range(40):
         app.processEvents()
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     win.tabs.setCurrentIndex(win.TAB_EXPLORE)
     for _ in range(20):
         app.processEvents()
@@ -107,6 +106,29 @@ def test_keys_and_hand_over_to_the_movie(window):
     win.tabs.setCurrentIndex(win.TAB_MOVIE)
     assert win.right.currentIndex() == 0
     assert not errors, errors
+
+
+
+def test_overlay_follows_a_threshold_change(tmp_path, demo, needs_3d):
+    """F-25: after a score threshold changes, the 2D overlay is drawn again, not taken from the cache."""
+    from PySide6 import QtCore
+    from tomoreveal.gui import build_gui
+    from tomoreveal.volumes import load_volume, write_mrc
+    tomo, vox = load_volume(demo["tomogram"]); z, y, x = np.indices(tomo.shape)
+    blob = np.exp(-(((z - 24) / 12.0) ** 2 + ((y - 160) / 60.0) ** 2 + ((x - 128) / 50.0) ** 2)).astype("float32")
+    feat = str(tmp_path / "demo_tomogram__blob.mrc"); write_mrc(feat, blob, vox)
+    app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
+    loop = QtCore.QEventLoop(); win.load(paths=[demo["tomogram"], feat]); win.worker.finished.connect(loop.quit); loop.exec()
+    for _ in range(40):
+        app.processEvents()
+    ex = win.explore; ex.go(24)
+    cid = [c["id"] for c in win.info["structures"] if c["kind"] == "score"][0]
+    first = ex.image_2d(win.spec_for()).copy()
+    win._thr_pending = {cid: 0.9}; win.apply_thresholds()
+    after = ex.image_2d(win.spec_for())
+    assert not np.array_equal(first, after)
+    assert np.array_equal(after, slice_image(win.st.ds, win.spec_for(), 24, ex.overlay_cb.currentData(), ex.alpha_s.value() / 100))
+    win.close()
 
 
 def test_3d_at_this_slice(window):

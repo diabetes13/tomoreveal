@@ -92,6 +92,7 @@ def test_second_source_after_first_has_its_own_names(tmp_path, demo):
 @pytest.mark.skipif(not os.environ.get("TOMOREVEAL_TEST_DATA"), reason="set TOMOREVEAL_TEST_DATA to a folder of real sessions")
 def test_real_sessions_use_the_typed_slots():
     folder = os.environ["TOMOREVEAL_TEST_DATA"]
+    assert any(f.lower().endswith(".orssession") for f in os.listdir(folder)), f"TOMOREVEAL_TEST_DATA is set, but {folder} holds no .ORSSession files"
     for f in sorted(os.listdir(folder)):
         if not f.lower().endswith(".orssession"):
             continue

@@ -18,17 +18,20 @@ if not exist "%APP%\env\python.exe" (
   echo [2/3] Installing Python, Qt and the 3D/video libraries ^(about 4 GB, several minutes^) ...
   "%APP%\micromamba.exe" create -y -q -r "%APP%\mamba-root" -p "%APP%\env" -f "%ROOT%\environment.yml" || goto :fail
 ) else (
-  echo [2/3] Libraries already installed.
+  rem an update, or a first install that was stopped part way: bring the libraries to what this version needs
+  echo [2/3] Updating the libraries to what this version needs ...
+  "%APP%\micromamba.exe" install -y -q -r "%APP%\mamba-root" -p "%APP%\env" -f "%ROOT%\environment.yml" || goto :fail
 )
 echo [3/3] Installing the program and shortcuts ...
 "%APP%\env\python.exe" -m pip install -q --no-deps --upgrade --force-reinstall "%ROOT%" || goto :fail
 "%APP%\env\python.exe" -m tomoreveal icon "%APP%\tomoreveal.ico" >nul || goto :fail
+rem The folder is read from APP inside PowerShell, so a name such as O'Brien cannot break the script.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$w = New-Object -ComObject WScript.Shell;" ^
+  "$ErrorActionPreference = 'Stop'; $a = $env:APP; $w = New-Object -ComObject WScript.Shell;" ^
   "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {" ^
   "  $s = $w.CreateShortcut((Join-Path $d 'TomoReveal.lnk'));" ^
-  "  $s.TargetPath = '%APP%\env\pythonw.exe'; $s.Arguments = '-m tomoreveal';" ^
-  "  $s.IconLocation = '%APP%\tomoreveal.ico'; $s.WorkingDirectory = $env:USERPROFILE; $s.Save() }"
+  "  $s.TargetPath = (Join-Path $a 'env\pythonw.exe'); $s.Arguments = '-m tomoreveal';" ^
+  "  $s.IconLocation = (Join-Path $a 'tomoreveal.ico'); $s.WorkingDirectory = $env:USERPROFILE; $s.Save() }" || goto :fail
 echo.
 echo Done. Double-click TomoReveal on your desktop or in the Start menu.
 pause

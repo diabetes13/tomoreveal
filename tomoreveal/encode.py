@@ -218,7 +218,12 @@ class ChunkedWriter:
                 os.replace(chunks[0], tmp)
             else:
                 join(chunks, tmp)
-            os.replace(tmp, path)
+            try:
+                os.replace(tmp, path)
+            except OSError as exc:  # Windows: the old movie is open in a player
+                from .common import UserError
+                raise UserError(f"could not replace {os.path.basename(path)} (is it open in another program?); "
+                                f"the new movie is saved as {os.path.basename(tmp)}") from exc
         remove_partial(self.out, list(self.formats))
 
     def kill(self):

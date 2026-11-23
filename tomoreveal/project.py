@@ -247,14 +247,14 @@ def load_into(st, data, resolved, log=print):
     resolved: resolve_sources() after the user's choices; entries with path None are skipped. Returns st.info()."""
     mapping = path_mapping(resolved)
     use = [r for r in resolved if r.get("path") and r["entry"].get("kind") != "image"]
-    paths = [os.path.abspath(r["path"]) for r in use]
-    kinds = {os.path.abspath(r["path"]): r["entry"].get("kind") for r in use}
+    paths = [st._norm(r["path"]) for r in use]  # the same spelling as Studio's source keys
+    kinds = {st._norm(r["path"]): r["entry"].get("kind") for r in use}
     st._register(paths, as_features=[p for p in paths if kinds[p] == "scores"],
-                 as_segmentation=[p for p in paths if kinds[p] == "labels"],
+                 as_labels=[p for p in paths if kinds[p] == "labels"],  # saved as labels: never guessed again
                  as_tomogram=[p for p in paths if kinds[p] == "tomogram"], log=log)
     for r in use:
         if r["entry"].get("kind") == "scores" and r["entry"].get("threshold") is not None:
-            s = st._source("scores:" + os.path.abspath(r["path"]))
+            s = st._source("scores:" + st._norm(r["path"]))
             if s is not None:
                 s["thr"] = float(r["entry"]["threshold"])
     for key, c in (remap((data.get("spec") or {}).get("classes") or {}, mapping)).items():  # surfaces built as saved

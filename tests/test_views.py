@@ -48,7 +48,7 @@ def test_two_views_in_a_row_fly_from_one_to_the_other(st):
 
 
 @pytest.fixture
-def window(tmp_path, demo):
+def window(tmp_path, demo, needs_3d):
     QtCore = pytest.importorskip("PySide6.QtCore")
     from tomoreveal.gui import build_gui
     app, win = build_gui(argparse.Namespace(files=[], outdir=str(tmp_path), headless=True))
@@ -56,8 +56,7 @@ def window(tmp_path, demo):
     loop = QtCore.QEventLoop(); win.load(paths=[demo["tomogram"], demo["labels"]]); win.worker.finished.connect(loop.quit); loop.exec()
     for _ in range(30):
         app.processEvents()
-    if win.st.ren is None:
-        pytest.skip("3D rendering is not available here")
+    assert win.st.ren is not None, "the 3D renderer did not start after loading"
     win.do_preview()
     yield app, win, errors
     sys.excepthook = old; win.close()

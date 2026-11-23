@@ -43,7 +43,8 @@ class Framer:
 
     def fit(self, lo, hi, tilt, az, margin=1.07):
         """Pose that just frames the box lo..hi."""
-        lo, hi = np.asarray(lo, float), np.asarray(hi, float); c = (lo + hi) / 2
+        lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+        hi = np.maximum(hi, lo + 1.0); c = (lo + hi) / 2  # at least one voxel wide: a zero-size box has no distance
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]) - c
         th = math.tan(math.radians(self.fov) / 2)
         p, up = self.axes(tilt, az); right = np.cross(up, p)
@@ -241,6 +242,8 @@ def migrate_spec(spec):
                 if k not in ("on", "seconds", "tomogram", "caption"):
                     p[k] = v
             p["type"] = "slide"
+        if p.get("type") not in PART_TYPES:
+            raise UserError(f"part {i + 1} of the movie has " + (f"an unknown type ({p['type']!r})" if p.get("type") else "no type"))
         if not p.get("id") or p["id"] in seen:
             p["id"] = new_id()
         seen.add(p["id"])
@@ -421,14 +424,14 @@ def build_plan(spec, ds):
     st = dict(k=z0, reveal=False, cut=None, slice=base, e=0.0, target=None, others="grey", caption="", card=None)
     pose = [ov()]
     ramp = {}  # the tomogram fade at the start of the current part
-    cur = dict(id=None, index=-1, type=None)
+    cur = dict(id=None, index=-1, type=None); shown = {}  # shown: the last part that drew frames
 
     def start_fade(part, fade=None):
         t = shot_tomogram(part); f = t["fade"] if fade is None else fade
         ramp.clear(); ramp.update(start=len(frames), s0=st["slice"], s1=target_of(part), n=max(1, round(fps * max(0.0, float(f)))))
 
     def emit(n, fn, phase, label=None, seg_phase=None):
-        n = max(1, int(n))
+        n = max(1, int(n)); shown.update(cur)
         if label:
             marks.append(dict(frame=len(frames), label=label))
         segments.append(dict(part=cur["id"], index=cur["index"], type=cur["type"], phase=seg_phase or phase, start=len(frames), count=n))
@@ -486,8 +489,10 @@ def build_plan(spec, ds):
                 continue  # nothing to see: no tomogram to slide through, or no segmentation to reveal
             start_fade(part)
             a, b = slice_no(part.get("from"), st["k"]), slice_no(part.get("to"), st["k"])
-            t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
-            go_to(ov(), a, t, slice_to=(target_of(part) if st["e"] > 0 else None))
+            t = part.get("transition"); back = st["e"] > 0; t = (CLOSEUP_TRANSITION if back else OTHER_TRANSITION) if t is None else float(t)
+            go_to(ov(), a, t, slice_to=(target_of(part) if back else None))
+            if back:
+                start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
             if show == "none":
                 st.update(reveal=False, cut=None)
             elif show == "above":
@@ -523,6 +528,9 @@ def build_plan(spec, ds):
             except (KeyError, IndexError, TypeError, ValueError):
                 problems[part.get("id")] = "structure not loaded"
                 continue
+            if not any(class_spec(spec, ds, ds.id_of(key)).get("show", True) for key, _ in target_items(tgt)):  # every object is off
+                problems[part.get("id")] = "structure switched off in the Structures tab"
+                continue
             start_fade(part)
             need_structures()
             ft, fz = float(part.get("tilt", max(tilt, 50))), max(0.05, float(part.get("zoom", 1)))
@@ -554,6 +562,7 @@ def build_plan(spec, ds):
                 label = None
             else:
                 st.update(fly(1.0)); pose[0] = p1; label = cap or "Focus"
+            start_fade(part, fade=0)  # the fly-in already faded the tomogram
             m, ang = part.get("motion", "orbit"), float(part.get("angle", 30))
             anim = closeup_animation(part, ds, fr, fp, n, fps, k0=st["k"], nz=nz)
             if anim is None:  # orbit / rock / still without effects: exactly as in 3.3
@@ -613,7 +622,7 @@ def build_plan(spec, ds):
             emit(n, card, "main", _mark_label(part))
             st.update(card=None, card_fade=1.0, dissolve=0.0, caption="")
     if st["e"] > 0 and spec.get("return_to_overview", True):
-        ramp.clear(); cur.update(index=len(shots))  # the flight back belongs to the last part shown
+        ramp.clear(); cur.update(shown, index=len(shots))  # the flight back belongs to the last part shown
         p0, e0, s0 = pose[0], st["e"], st["slice"]
         emit(round(fps * CLOSEUP_TRANSITION), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u)), e=e0 * (1 - smooth01(u)),
                                                                slice=s0 + (base - s0) * smooth01(u), caption=""), "transition")

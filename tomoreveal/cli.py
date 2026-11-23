@@ -26,7 +26,7 @@ import sys
 
 import numpy as np
 
-from .common import UserError, VIEWS, __version__
+from .common import UserError, VIEWS, __version__, read_json
 from .dragonfly import OrsSession, describe_session, guess_roi
 from .gui import cmd_demo, cmd_gui, cmd_icon
 from .render import get_font, render_movie
@@ -46,33 +46,44 @@ def cli_studio(args):
         if len(args.roi) > 1:
             raise UserError("give one --roi (use the app or 'all plain ROIs' via --roi __all_rois__ to combine ROIs)")
         roi = args.roi[0]
-    info = st.load(paths, roi=roi, as_features=args.features)
+    info = st.load(paths, roi=roi, as_features=args.features, as_tomogram=[getattr(args, "tomogram", None)], as_labels=[args.labels])
     if not st.can_show:
         raise UserError("nothing to show: give a tomogram and/or a segmentation (--session, --labels, --features)")
-    if args.classes:  # keyed by label number
-        for k, v in json.load(open(args.classes)).items():
-            for c in st.ds.classes.values():
-                if c["kind"] == "label" and str(c["label"]) == str(k):
-                    c.update({kk: vv for kk, vv in v.items() if kk in ("name", "color")})
+    args.class_settings = {}  # structure id -> its --classes entry, found before any renaming
+    if args.classes:  # keyed by label number or name
+        for t, v in read_json(args.classes).items():
+            for k in _structures(st.ds, t, "--classes", missing_ok=True):
+                args.class_settings[k] = v; st.ds.classes[k].update({kk: vv for kk, vv in v.items() if kk in ("name", "color")})
     return st, info
+
+
+def _structures(ds, token, opt, missing_ok=False):
+    """Structure ids named by a token: a label number as printed, or a name in any letter case."""
+    def show(ks):
+        return ", ".join(f"{ds.classes[k]['label']} {ds.classes[k]['name']} ({ds.classes[k]['source_title']})" for k in ks)
+    t = str(token).strip()
+    hits = [k for k, c in ds.classes.items() if t == str(c.get("label"))]
+    if len({ds.classes[k]["source"] for k in hits}) > 1:
+        raise UserError(f"{opt} {t}: more than one segmentation has a structure {t}: {show(hits)}. Give the name instead.")
+    hits = hits or [k for k, c in ds.classes.items() if t.lower() == c["name"].lower()]
+    if not hits and not missing_ok:
+        raise UserError(f"{opt} '{t}': no such structure. Available: {show(ds.classes)}")
+    return hits
 
 
 def cli_spec(st, args):
     spec = default_spec(st.ds); ds = st.ds
-    def match(spec_list, k):
-        return any(s == str(ds.classes[k]["label"]) or s.lower() == ds.classes[k]["name"].lower() for s in spec_list)
-    only = [s.strip() for s in (args.only or "").split(",") if s.strip()]
-    excl = [s.strip() for s in (args.exclude or "").split(",") if s.strip()]
+    def picked(text, opt):
+        return {k for t in (text or "").split(",") if t.strip() for k in _structures(ds, t, opt)}
+    only, excl, ov = picked(args.only, "--only"), picked(args.exclude, "--exclude"), getattr(args, "class_settings", {})
     for k in ds.classes:
         c = spec["classes"][ds.key_of(k)]
         if only:
-            c["show"] = match(only, k)
-        if match(excl, k):
+            c["show"] = k in only
+        if k in excl:
             c["show"] = False
-        if getattr(args, "classes", None):
-            ov = json.load(open(args.classes)).get(str(ds.classes[k]["label"]), {})
-            if "show" in ov:
-                c["show"] = bool(ov["show"])
+        if "show" in ov.get(k, {}):
+            c["show"] = bool(ov[k]["show"])
         if k not in ds.meshes:
             c["show"] = False
     spec["style"].update(bg=args.bg, contrast=list(args.contrast), invert=args.invert, ortho=args.ortho, fov=args.fov)
@@ -84,10 +95,12 @@ def cli_spec(st, args):
     if st.match_note:
         print("  " + st.match_note)
     spec["output"].update(size=list(args.size), aa=not args.no_aa)
+    several = len({c["source"] for c in ds.classes.values()}) > 1
     for k in sorted(ds.classes):
         c = spec["classes"][ds.key_of(k)]
         if c["show"]:
-            print(f"  class {k:>3}  {c['color']}  {ds.classes[k]['voxels']:>12,} voxels  {c['name']}")
+            print(f"  class {ds.classes[k]['label']:>3}  {c['color']}  {ds.classes[k]['voxels']:>12,} voxels  {c['name']}"
+                  + (f"  ({ds.classes[k]['source_title']})" if several else ""))
     return spec
 
 
@@ -130,8 +143,8 @@ def cmd_movie(args):
         elif part["type"] == "overview":
             part.update(on=args.end != "none", motion=args.end, seconds=args.end_seconds, angle=args.rock_angle)
     for name in args.focus or []:
-        hits = [k for k, c in ds.classes.items() if name == str(c["label"]) or name.lower() == c["name"].lower()]
-        if not hits or hits[0] not in ds.meshes:
+        hits = _structures(ds, name, "--focus")
+        if hits[0] not in ds.meshes:
             raise UserError(f"--focus '{name}': no such structure. Available: {', '.join(c['name'] for k, c in ds.classes.items() if k in ds.meshes)}")
         spec["shots"].append(focus_shot({"class": ds.key_of(hits[0])}, ds.classes[hits[0]]["name"], seconds=args.focus_seconds))
     views = parse_views(args.view); base, ext = os.path.splitext(args.out)
@@ -277,7 +290,9 @@ def cmd_extract(args):
     lab, classes = ses.read_selection(objs); vox = objs[0]["voxel"]
     print(f"segmentation: {', '.join(o['title'] for o in objs)}  grid {lab.shape[::-1]}  {vox:.3f} A/voxel")
     os.makedirs(args.out, exist_ok=True)
-    write_mrc(os.path.join(args.out, "labels.mrc"), lab, vox)
+    if lab.dtype.itemsize > 2:  # MRC has no 32-bit integer mode
+        print("  note: label numbers above 32767 are written as float32 (whole numbers)")
+    write_mrc(os.path.join(args.out, "labels.mrc"), lab.astype(np.float32) if lab.dtype.itemsize > 2 else lab, vox)
     json.dump({str(k): v for k, v in classes.items()}, open(os.path.join(args.out, "classes.json"), "w"), indent=2)
     cnt = np.bincount(lab.ravel().astype(np.int64), minlength=max(classes, default=0) + 1)
     for k, c in classes.items():
@@ -286,6 +301,27 @@ def cmd_extract(args):
             safe = re.sub(r"[^\w\-]+", "_", c["name"]).strip("_") or f"class{k}"
             write_mrc(os.path.join(args.out, f"mask_{k:02d}_{safe}.mrc"), (lab == k).astype(np.int8), vox)
     print(f"wrote {args.out}/labels.mrc and classes.json" + (" and per-class masks" if args.masks else ""))
+
+
+def validate_args(args):
+    """Values that would fail late with a traceback, or quietly give the wrong movie: a clear message now."""
+    size, con, zr, c = (getattr(args, k, None) for k in ("size", "contrast", "z_range", "clip"))
+    if size is not None and (len(size) != 2 or min(size) < 16):
+        sys.exit("tomoreveal: --size needs WIDTHxHEIGHT, each at least 16, for example 1920x1080")
+    if con is not None and (len(con) != 2 or not 0 <= con[0] < con[1] <= 100):
+        sys.exit("tomoreveal: --contrast needs LOW,HIGH percentiles with 0 <= LOW < HIGH <= 100, for example 1,99")
+    if zr is not None and (len(zr) != 2 or not 0 <= zr[0] <= zr[1]):
+        sys.exit("tomoreveal: --z-range needs FIRST,LAST slice numbers (from 0) with FIRST <= LAST, for example 10,40")
+    if c is not None and (len(c) != 6 or c[0] > c[1] or c[2] > c[3] or c[4] > c[5]):
+        sys.exit("tomoreveal: --clip needs six numbers X0,X1,Y0,Y1,Z0,Z1, each first number at most the second")
+    if getattr(args, "fps", 1) < 1:
+        sys.exit("tomoreveal: --fps needs at least 1 frame per second")
+    if not 1 <= getattr(args, "fov", 30) <= 179:
+        sys.exit("tomoreveal: --fov needs an angle from 1 to 179 degrees")
+    if size is not None and (size[0] % 2 or size[1] % 2):
+        print(f"note: the size is rounded down to {size[0] // 2 * 2}x{size[1] // 2 * 2} (the video needs even numbers)")
+    if getattr(args, "cmd", None) == "preview" and not os.path.splitext(args.out)[1]:
+        args.out += ".png"  # the image writer chooses the format by the extension (movies get theirs from --format)
 
 
 def build_parser():
@@ -325,7 +361,8 @@ def build_parser():
     def render_args(p):
         p.add_argument("tomogram", help="tomogram (.mrc/.rec/.map/.tif) on the same grid as the segmentation")
         seg_args(p)
-        p.add_argument("--view", default="oblique", help=f"comma-separated presets ({', '.join(VIEWS)}) or TILT:AZIMUTH; one output per view")
+        p.add_argument("--view", default="oblique", help=f"comma-separated presets ({', '.join(VIEWS)}) or TILT:AZIMUTH; one output per view. "
+                       "For a negative tilt write it with =, for example --view=-30:20")
         p.add_argument("--only", help="comma-separated class names or numbers to show")
         p.add_argument("--exclude", help="comma-separated class names or numbers to hide")
         p.add_argument("--keep-background", action="store_true", help="do not auto-hide the background class")
@@ -385,6 +422,9 @@ def build_parser():
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):  # a pipe or file in the Windows code page: show ? for what it lacks
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     ap = build_parser()
     argv = sys.argv[1:]
     if not argv or argv[0] not in ("gui", "app", "icon", "demo", "list", "inspect", "extract", "movie", "preview", "-h", "--help", "--version"):
@@ -392,6 +432,7 @@ def main():
     args = ap.parse_args(argv)
     if args.cmd == "movie" and args.transparent_frames and not args.frames_dir:
         sys.exit("tomoreveal: --transparent-frames needs --frames-dir")
+    validate_args(args)
     try:
         args.func(args)
     except UserError as exc:

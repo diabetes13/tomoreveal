@@ -1,9 +1,12 @@
 """Off-screen 3D drawing of one frame, and writing movies."""
+import glob
 import os
+import re
+import sys
 
 import numpy as np
 
-from .common import hex2rgb
+from .common import UserError, hex2rgb
 from .storyboard import Framer, build_timeline, class_spec, clip_box, others_of, state_key, target_items
 
 
@@ -27,9 +30,21 @@ def get_font(px, bold=False):
         return ImageFont.load_default()
 
 
+def software_rendering_available():
+    """True where VTK's OSMesa window can start. Elsewhere (Windows, macOS, no mesalib) it crashes the
+    whole process on the first draw, so headless rendering falls back to the normal off-screen window."""
+    if not sys.platform.startswith("linux"):
+        return False
+    import vtk
+    if not hasattr(vtk, "vtkOSOpenGLRenderWindow"):
+        return False
+    import ctypes.util
+    return bool(ctypes.util.find_library("OSMesa") or glob.glob(os.path.join(sys.prefix, "lib", "libOSMesa*")))
+
+
 class Renderer:
     def __init__(self, ds, headless=False):
-        if headless:
+        if headless and software_rendering_available():
             os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = "vtkOSOpenGLRenderWindow"
         import pyvista as pv, vtk
         self.pv, self.vtk, self.ds = pv, vtk, ds
@@ -46,7 +61,7 @@ class Renderer:
         self.slice_actor = self.pl.add_mesh(self.img, scalars="I", cmap="gray", clim=(0, 255), lighting=False,
                                             show_scalar_bar=False, pickable=False)
         self.plane = vtk.vtkPlane(); self.plane.SetNormal(0, 0, 1)
-        # clip box: x-, x+, y-, y+, z+ (the lower z face is the slice itself); with the reveal plane that is the 6 OpenGL allows
+        # clip box: x-, x+, y-, y+, z+ (the reveal plane is never below the lower z face); that is the 6 OpenGL allows
         self.cplanes = []
         for nrm in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, -1)):
             p = vtk.vtkPlane(); p.SetNormal(*nrm); self.cplanes.append(p)
@@ -149,9 +164,9 @@ class Renderer:
         self.slice_actor.SetVisibility(show_slice); self.slice_actor.GetProperty().SetOpacity(float(s["slice"]))
         # the cutting plane keeps what lies above it: structures above the slice, all of them, or none
         cut = s.get("cut") or ("above" if s["reveal"] else "none")
-        self.plane.SetOrigin(0, 0, {"above": k + 0.5, "all": -10.0}.get(cut, self.shape[0] + 10))
         cb = clip_box(spec, self.shape); far = 1e9
-        (x0, y0, _), (x1, y1, z1) = cb if cb else ((-far, -far, 0), (far, far, far))
+        (x0, y0, z0), (x1, y1, z1) = cb if cb else ((-far, -far, -far), (far, far, far))
+        self.plane.SetOrigin(0, 0, max({"above": k + 0.5, "all": -10.0}.get(cut, self.shape[0] + 10), z0 - 0.5))
         for p, o in zip(self.cplanes, ((x0 - 0.5, 0, 0), (x1 + 0.5, 0, 0), (0, y0 - 0.5, 0), (0, y1 + 0.5, 0), (0, 0, z1 + 0.5))):
             p.SetOrigin(*o)
         # structures
@@ -761,6 +776,23 @@ class Renderer:
             pass
 
 
+def poster_path(out):
+    return os.path.splitext(out)[0] + "_poster.png"
+
+
+def poster_partial(out):
+    """The poster of a movie that is not finished yet; it replaces the old poster only when the movie is done."""
+    return os.path.splitext(out)[0] + "_poster.partial.png"
+
+
+def _discard(*paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
 class MovieJob:
     """Renders a movie frame by frame: iterate it to get (frames done, total, last image). Closing it before the end
     cancels the movie and deletes its partial files. With resume=True, the frames of the complete chunks of an
@@ -777,6 +809,10 @@ class MovieJob:
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         if frames_dir:
             os.makedirs(frames_dir, exist_ok=True)
+            beyond = sorted(f for f in os.listdir(frames_dir) if re.fullmatch(r"frame_\d{5}\.png", f) and int(f[6:11]) >= len(self.frames))
+            if beyond:  # lower numbers are overwritten by this run; these would stay mixed in
+                raise UserError(f"{frames_dir} already holds frames up to {beyond[-1]} from a longer movie; "
+                                f"this one has {len(self.frames)} frames. Choose an empty folder, or remove the old frames.")
         formats = encode.output_settings(o)
         self.alpha = any(encode.FORMATS[f][2] for f in formats)  # a transparent MOV: frames are drawn with alpha
         self.paths = encode.output_paths(out, formats)
@@ -787,7 +823,7 @@ class MovieJob:
                 and int(old.get("chunk_frames", 0)) == chunk and old["chunks_done"] > 0:
             start_chunk = old["chunks_done"]
         else:
-            encode.remove_partial(out)
+            encode.remove_partial(out); _discard(poster_partial(out))
         self.start = min(len(self.frames), start_chunk * chunk)
         bg = [255 * v for v in hex2rgb(spec.get("style", {}).get("bg", "#000000"))]
         self.writer = encode.ChunkedWriter(out, formats, self.size, self.fps, len(self.frames), self.settings, chunk, start_chunk, bg=bg)
@@ -811,6 +847,8 @@ class MovieJob:
             raise StopIteration
         if self.i >= len(self.frames):
             self.writer.close(); self.finished = self.closed = True
+            if os.path.exists(poster_partial(self.out)):  # the old poster is replaced only now, with the finished movie
+                os.replace(poster_partial(self.out), poster_path(self.out))
             raise StopIteration
         try:
             i, s = self.i, self.frames[self.i]
@@ -820,11 +858,11 @@ class MovieJob:
                 self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa,
                                          transparent=self.alpha or (self.transparent and bool(self.frames_dir)))
                 self.last_key = key
-                if self.frames_dir:
-                    imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)
+            if self.frames_dir:  # one PNG per frame, also while the picture holds still (pauses stay in the sequence)
+                imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)
             if i == self.poster_i:
                 rgb = encode.composite(self.img, self.writer.bg) if self.img.shape[2] == 4 else self.img
-                imageio.imwrite(os.path.splitext(self.out)[0] + "_poster.png", rgb)
+                imageio.imwrite(poster_partial(self.out), rgb)
             self.writer.write(self.img)
         except BaseException:
             self.close(); raise
@@ -834,7 +872,7 @@ class MovieJob:
     def close(self):
         """Stop; unless the movie is finished, its partial files are deleted."""
         if not self.closed:
-            self.closed = True; self.writer.abort()
+            self.closed = True; self.writer.abort(); _discard(poster_partial(self.out))
 
     def crash(self):
         """Stop as a crash would: the complete chunks stay on disk (for tests)."""

@@ -5,6 +5,76 @@
 - **Fixed a crash with "Shadows between structures"** on NVIDIA graphics cards. VTK's shadow shader failed for everything drawn without lighting (the tomogram slice, outlines, the scale bar, the Flat preset), which filled the terminal with shader errors and could end in a segmentation fault while turning the view. Those items are now drawn in the same colours in a way the shadow shader accepts, and the graphics card self-test checks this too.
 - **Fixed: camera path settings could be changed only once.** A second change of the camera distance, side, height or where it looks did nothing and wrote an error to the log.
 
+### Fixes from a code review by DcShepherd
+
+These fixes come from a review of 3.3.0 that DcShepherd made on the `DS_Branch` branch; they are carried over to 3.4.
+
+#### Crashes and lost work
+
+- **A failed or cancelled movie no longer replaces the old poster.** The poster is written as `name_poster.partial.png` and replaces the old one only when the movie has finished (3.4 already did this for the movie itself). If the old movie is open in another program, the message says so and names the new `.partial` movie file.
+- **Dragonfly can save a session while TomoReveal has it loaded.** The session file is no longer kept open. If the session was changed on disk, you get a clear message asking you to add it again.
+- A damaged or cut-off session gives "the session is damaged" instead of a traceback.
+- Reading a large tomogram stored in a session needs about half the memory it did before.
+- An 8-bit label file with labels 128 to 255 (for example a 0/255 mask) no longer crashes the load.
+- A file that fails to load is no longer kept in the list. Before, every later step failed with the same error until Start over.
+- A movie part without a type gives an error that names the part, instead of a KeyError.
+- A close-up with a one-voxel clip box or a one-voxel structure no longer crashes.
+
+#### Wrong results
+
+- Dragonfly labels above 32767, and more than 127 plain ROIs, keep their numbers. `extract` writes labels above 32767 as a float32 MRC, because MRC has no 32-bit integer type.
+- The tomogram, `--labels` and `--features` that you give on the command line are always used as you gave them. A float label file no longer replaces your tomogram. Opening a project also uses each file as it was saved (labels stay labels).
+- Files are recognised better: whole-number float files are labels, a multi-label `__labels` file is not an empty score map, an 8-bit tomogram with a narrow range stays a tomogram, and RGB TIFFs are refused.
+- When Dragonfly flipped or binned its copy of your tomogram, score and label files made from your original file are now lined up the same way. A label file on Dragonfly's grid is used as it is, with a note that it can be mirrored.
+- The lower face of the clip box also cuts the structures when the slice is hidden, faded, or above the box.
+- A tomogram fade that is longer than the fly-in no longer jumps back.
+- Explore shows the new mask after you change a score threshold.
+- `extract` without `--roi` picks the 3D segmentation, not a one-slice preview.
+- The same file typed in another letter case is loaded only once.
+- `--frames-dir` writes a PNG for every frame, so pauses are kept in the sequence. A frames folder that still holds frames numbered past the end of the new movie is refused.
+- A close-up whose structures are all switched off in the Structures tab is left out with the note "structure switched off in the Structures tab". Before, it showed an empty scene.
+- The flight back from the last close-up belongs to the last part that drew frames, not to a later part that was left out.
+- The voxel size (the "z = ... nm" readout) follows the current tomogram, or the segmentation when the tomogram has none.
+- `inspect` names a property slot without a GUID in the same way that the app reads it.
+- Two uploads with the same name in the browser version are both kept.
+
+#### Security
+
+- **The browser version answers only its own page.** Requests from other web pages, and requests with a wrong host name, are refused.
+- In the browser version, a bad Content-Length or invalid JSON gets a 400 answer, and a backwards Range gets a 416. Before, a negative Content-Length still ran the request.
+
+#### Windows
+
+- After a preview error, the window no longer switches to software rendering, which crashed the program on Windows. It shows the error instead.
+- `environment.yml` uses OpenBLAS, because some MKL versions crash NumPy on Windows.
+- A second `tomoreveal app` moves to the next free port instead of sharing the busy one.
+- Command output that goes to a file or a pipe no longer crashes on names with characters that the Windows code page does not have.
+- JSON files (names next to label files, and `--classes`) are read as UTF-8, with or without a byte-order mark. Names with accents are no longer garbled.
+- Running the installer again now also updates the libraries (on Windows and Linux). It also completes a first install that was stopped part way.
+- The installer works for a user folder with an apostrophe, such as `O'Brien`. If the shortcuts cannot be made, it says that the installation failed, instead of "Done".
+
+#### Command line
+
+- `movie` and `preview` print label numbers, with the source name when several sources are loaded. `--only`, `--exclude`, `--focus` and `--classes` use these numbers. A number that matches nothing, or that is in two sources, gives an error that lists the structures. `--classes` also accepts names.
+- Bad values for `--size`, `--contrast`, `--z-range` and `--clip` give a clear message instead of a traceback, and a backwards `--z-range` or `--clip` is refused.
+- `--fps` must be at least 1, and `--fov` between 1 and 179. An odd `--size` prints a note that the size is rounded down.
+- `preview -o out` writes `out.png` instead of crashing.
+- The `--view` help says to write a negative tilt as `--view=-30:20`.
+- `--headless` uses normal off-screen rendering where software rendering is not available, for example on Windows, instead of crashing.
+
+#### Window
+
+- Undo straight after a change no longer also takes back the change before it.
+- During a load, the timeline, Play, picking and the Explore page are switched off, so they cannot crash the window.
+- Closing the window during playback or during a load no longer gives an error.
+- "+ Click a structure" no longer fails when the part it was to follow was undone or deleted. The close-up goes at the playhead.
+- After you resize a part on the timeline (or use Undo), its open Duration and Object boxes show the new values.
+- The notes in the parts list match the current movie after a change in the Data tab.
+
+#### Tests
+
+- The test suite runs on Windows. Real errors are no longer reported as "3D rendering is not available", the tests no longer write into your real settings, and the real-session tests fail when they find no sessions. A test of the score threshold no longer fails at random when the computer is slow.
+
 ## 3.4.0
 
 - **Projects and crash safety (R3).** File > Save / Save as / Open / Open recent / Revert. A project (`.tomoreveal`) stores where the data files are and every setting, not the data. Moved data folders are found again; missing or changed files are listed in one dialog (Locate, Skip, Use it anyway). Your work is autosaved a few seconds after each change; after a crash TomoReveal offers to restore it. Movies are written in pieces, so a movie interrupted by a crash can be continued instead of started again. Errors are written to a log (Help > Show log folder).

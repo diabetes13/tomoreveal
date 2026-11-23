@@ -11,7 +11,7 @@ import numpy as np
 
 from .common import UserError, VIEWS
 from .demo import make_demo
-from .render import movie_frames
+from .render import movie_frames, poster_path, software_rendering_available
 from .storyboard import focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
@@ -231,7 +231,7 @@ def build_gui(args):
     class Main(QtW.QMainWindow):
         def __init__(self):
             super().__init__()
-            self.settings = QtC.QSettings("TomoReveal", "TomoReveal")
+            self.settings = QtC.QSettings()  # organisation and application names are set in build_gui (tests: the default format)
             outdir = args.outdir or self.settings.value("outdir", "") or os.path.join(os.path.expanduser("~"), "TomoReveal movies")
             self.st = Studio(headless=args.headless, outdir=outdir)
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
@@ -608,11 +608,11 @@ def build_gui(args):
         def set_busy(self, flag, msg=None):
             """While files are read: the Data tab shows a progress line and the other tabs are disabled."""
             self.busy = flag; self.go_btn.setEnabled(not flag and self.st.can_show)
-            for i, page in enumerate(self.pages):
-                if i != self.TAB_DATA:
-                    page.setEnabled(not flag)
+            for w in [p for i, p in enumerate(self.pages) if i != self.TAB_DATA] + [self.timeline, self.play_btn, self.explore.page]:
+                w.setEnabled(not flag)  # nothing may use Studio or the renderer while the worker replaces them
             self.data.set_busy(flag, msg or "")
             if flag:
+                self.stop_play(); self.pick_btn.setChecked(False)
                 QtW.QApplication.setOverrideCursor(QtC.Qt.BusyCursor); self.say(msg)
             else:
                 QtW.QApplication.restoreOverrideCursor()
@@ -1030,17 +1030,18 @@ def build_gui(args):
             try:
                 img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
-                traceback.print_exc()
-                if not self.st.headless:
+                traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
+                if not self.st.headless and soft:
                     self.st.headless = True; self.st._stale = True; self.st.ensure_renderer(); self.req = req
                     self.say("Graphics problem: switched to software rendering (slower).", "err")
                     return self.do_preview(quick)
-                self.say(f"Preview failed: {exc}", "err"); return
+                self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
                 self.selected_part = None
             self.timeline.set_plan(plan, self.spec, self.st.ds); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
+            self.parts_panel.refresh_lines()  # the notes come from this plan
             vp = self.view_part()
             self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
             empty = not any(p.get("on", True) for p in self.spec["shots"])
@@ -1162,6 +1163,8 @@ def build_gui(args):
             self.say(f"{len(items)} in focus. Click more, or press Esc when done.", "ok")
 
         def on_click(self, fx, fy):
+            if self.busy:  # the worker is replacing the data and the renderer
+                return
             if self.waypoint_pick and self.gen is None:
                 pt = self.st.ren.pick_point(fx, fy) if self.st.ren is not None else None
                 part = self.parts_panel.part(self.waypoint_pick)
@@ -1268,7 +1271,7 @@ def build_gui(args):
                 resume = self.ask_resume(part, same)
                 if resume is None:
                     return
-            there = [os.path.basename(p) for p in outs.values() if os.path.exists(p)]
+            there = [os.path.basename(p) for p in list(outs.values()) + [poster_path(path)] if os.path.exists(p)]  # the poster is replaced too
             if there and not resume:  # asked once for all of them
                 r = QtW.QMessageBox.question(self, "TomoReveal", f"{', '.join(there)} already exist{'s' if len(there) == 1 else ''} in that "
                                              f"folder. Replace {'it' if len(there) == 1 else 'them'}?")
@@ -1335,12 +1338,7 @@ def build_gui(args):
             self._rendering(False)
 
         def cancel_render(self):
-            self._render_stop()  # deletes the partial files; a finished movie of the same name is left alone
-            if not any(os.path.exists(p) for p in self.gen_paths.values()):
-                try:
-                    os.remove(os.path.splitext(self.render_path)[0] + "_poster.png")
-                except OSError:
-                    pass
+            self._render_stop()  # deletes the partial files and the new poster; the old movie and poster are left alone
             self.status_lbl.setText("Cancelled."); self.schedule(0)
 
         def _render_done(self):
@@ -1365,14 +1363,20 @@ def build_gui(args):
                 self.cancel_render()
             elif not self.project.confirm_discard("closing TomoReveal"):
                 e.ignore(); return
-            if self.worker is not None and self.worker.isRunning():
-                self.worker.wait(60000)
+            self.playing = None; self.play_timer.stop(); self.prev_timer.stop(); self.thr_timer.stop()  # nothing draws after this
+            if self.worker is not None and self.worker.isRunning():  # let the load end, but never make a renderer for it
+                for sig in (self.worker.done, self.worker.failed, self.worker.log):
+                    try:
+                        sig.disconnect()
+                    except (RuntimeError, TypeError):  # nothing connected
+                        pass
+                self.hide(); self.worker.wait()
             self.project.clean_exit(); self.st._drop_renderer(); e.accept()
 
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])
     app.setApplicationName("TomoReveal"); app.setOrganizationName("TomoReveal")
     app.setWindowIcon(QtG.QIcon(QtG.QPixmap.fromImage(to_qimage(np.asarray(make_icon(256))))))
-    apply_theme(app, QtC.QSettings("TomoReveal", "TomoReveal").value("theme", "system"))  # before the window is made
+    apply_theme(app, QtC.QSettings().value("theme", "system"))  # before the window is made
     setup_crash_log()
     win = Main(); win.show()
 

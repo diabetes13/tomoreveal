@@ -145,7 +145,10 @@ def cmd_movie(args):
             if i % 25 == 0 or i == n:
                 print(f"\r  {name}: {i}/{n} frames", end="", flush=True)
         n, secs = render_movie(st.ren, spec, out, frames_dir=fdir, transparent=args.transparent_frames, progress=prog, poster=not args.no_poster)
-        print(f"\r  wrote {out}  ({n} frames, {secs:.1f} s, {os.path.getsize(out) / 1e6:.1f} MB)")
+        from .encode import output_paths
+        print(f"\r  {n} frames, {secs:.1f} s" + " " * 40)
+        for path in output_paths(out, spec["output"]["formats"]).values():
+            print(f"  wrote {path}  ({os.path.getsize(path) / 1e6:.1f} MB)")
 
 
 def cmd_preview(args):

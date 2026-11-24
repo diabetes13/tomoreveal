@@ -473,7 +473,7 @@ class TimelineCanvas(QtW.QWidget):
         te = self.transition_edge_at(pos)
         if te is not None:
             pid, key, sg = te; part = self.part(pid) or {}
-            from .storyboard import transition_of
+            from .transitions import transition_of
             self._drag = dict(kind="tedge", pid=pid, key=key, x0=pos.x(), base=float(transition_of(part)[key]), last=None, sg=sg)
             self.selected = pid; self.part_selected.emit(pid); self.update(); return
         edge = self.edge_at(pos)

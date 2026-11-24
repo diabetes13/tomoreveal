@@ -29,7 +29,8 @@ import numpy as np
 from .common import UserError, VIEWS, __version__, read_json
 from .dragonfly import OrsSession, describe_session, guess_roi
 from .gui import cmd_demo, cmd_gui, cmd_icon
-from .render import get_font, render_movie
+from .movie import render_movie
+from .render import get_font
 from .storyboard import build_plan, default_spec, focus_shot, main_range
 from .studio import Studio
 from .volumes import write_mrc

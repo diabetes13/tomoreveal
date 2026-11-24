@@ -9,6 +9,7 @@ import pytest
 
 import tomoreveal as tr
 from tomoreveal import storyboard as sb
+from tomoreveal import paths
 
 FOC = [128.0, 160.0, 24.0]
 
@@ -58,7 +59,7 @@ def test_keep_zoom_along_the_next_points(studio):
     P0 = [60.0, 60.0, 150.0]; base = np.linalg.norm(np.array(P0) - FOC)
     wps = [dict(pos=P0, focal=FOC), dict(pos=P0, focal=FOC, zoom=2.0), dict(pos=P0, focal=FOC), dict(pos=P0, focal=FOC, zoom=1.0)]
     part = sb.new_part("path", seconds=6, source=dict(kind="points", items=[]), waypoints=wps)
-    zs, own = sb.point_values(part, "zoom", 1.0)
+    zs, own = paths.point_values(part, "zoom", 1.0)
     assert zs == [1.0, 2.0, 2.0, 1.0] and own == [False, True, False, True]
     z = base / dists(poses_of(studio.ds, wps))
     at2 = np.nonzero(np.abs(z / 2.0 - 1) < 1e-3)[0]  # from point 2 to point 3 the zoom stays at 2x
@@ -66,9 +67,9 @@ def test_keep_zoom_along_the_next_points(studio):
     assert len(at2) == i3 - i2 + 1 and len(at2) > 0.25 * len(z)
     assert np.all(np.diff(z[i3:]) <= 1e-9) and z[-1] == pytest.approx(1.0, rel=1e-3)  # then smoothly back to 1x
     wps[1]["zoom_only_here"] = True  # "only here": the next point goes back to the kept zoom
-    assert sb.point_values(dict(part, waypoints=wps), "zoom", 1.0)[0] == [1.0, 2.0, 1.0, 1.0]
+    assert paths.point_values(dict(part, waypoints=wps), "zoom", 1.0)[0] == [1.0, 2.0, 1.0, 1.0]
     same = dict(part, waypoints=wps, same_zoom=True, path_zoom=1.5)
-    assert sb.point_values(same, "zoom", 1.0)[0] == [1.5] * 4
+    assert paths.point_values(same, "zoom", 1.0)[0] == [1.5] * 4
     zs2 = base / dists(poses_of(studio.ds, wps, same_zoom=True, path_zoom=1.5))
     assert np.abs(zs2 / 1.5 - 1).max() < 1e-3  # one zoom along the whole path
 
@@ -192,7 +193,7 @@ def test_a_field_of_view_change_is_not_a_frozen_movie(studio, tmp_path):
 
 
 def test_motion_blur_keeps_the_field_of_view(studio):
-    from tomoreveal.render import motion_blurred
+    from tomoreveal.movie import motion_blurred
     spec, part = fov_spec(studio)
     main = [f for f in sb.build_plan(spec, studio.ds).frames if f["part"] == part["id"] and f["phase"] == "main"]
     s, nxt = main[-2], main[-1]

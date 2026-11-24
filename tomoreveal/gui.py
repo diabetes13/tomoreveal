@@ -11,7 +11,8 @@ import numpy as np
 
 from .common import UserError, VIEWS
 from .demo import make_demo
-from .render import movie_frames, poster_path, software_rendering_available
+from .movie import movie_frames, poster_path
+from .render import software_rendering_available
 from .storyboard import focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
@@ -705,7 +706,7 @@ def build_gui(args):
 
         def _test_real_shadows(self):
             """Find out once, off the window's thread, whether VTK shadow maps work here (never with software rendering)."""
-            from .render import real_shadows_available
+            from .shadows import real_shadows_available
             if self.st.headless:
                 self.st.real_shadows_ok, self.st.real_shadows_note = real_shadows_available(True)
                 self.look_controls.sync(); return
@@ -1240,8 +1241,8 @@ def build_gui(args):
             """Centre lines of camera paths are worked out in a worker thread (a large membrane can take seconds)."""
             if self._path_worker is not None and self._path_worker.isRunning():
                 return
-            from .storyboard import clip_box, path_key
-            from .paths import centre_line
+            from .paths import centre_line, path_key
+            from .storyboard import clip_box
             ds = self.st.ds; cb = clip_box(spec, ds.shape); todo = []
             for p in spec["shots"]:
                 if p.get("type") == "path" and (p.get("source") or {}).get("kind", "follow") == "follow":
@@ -1332,7 +1333,7 @@ def build_gui(args):
 
         def set_transition(self, pid, key, value):
             """A transition's end dragged on the timeline: one undo step."""
-            from .storyboard import transition_of
+            from .transitions import transition_of
             part = self.parts_panel.part(pid)
             if part is None:
                 return

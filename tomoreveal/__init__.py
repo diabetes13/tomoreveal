@@ -4,7 +4,8 @@ from .dragonfly import OrsSession
 from .volumes import Dataset, load_volume, write_mrc
 from .matching import apply_match, match_volume
 from .storyboard import build_timeline, clip_box, default_spec, focus_shot, merge_settings
-from .render import Renderer, movie_frames, render_movie
+from .movie import movie_frames, render_movie
+from .render import Renderer
 from .demo import make_demo
 from .studio import Studio
 

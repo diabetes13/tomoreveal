@@ -6,6 +6,7 @@ import pytest
 
 import tomoreveal as tr
 from tomoreveal import storyboard as sb
+from tomoreveal import animations
 
 
 def closeup(ds, seconds=4, **kw):
@@ -43,7 +44,7 @@ def test_wiggle_starts_and_ends_at_rest(studio):
     assert np.allclose(fr[0]["pose"]["pos"], fr[-1]["pose"]["pos"], atol=1e-2)  # ends where it began
     T = (len(fr) - 1) / 30
     assert round(0.35 * T) == 2  # 5.3 s at speed 0.35: two whole cycles
-    assert sb.wiggle_offsets(part["wiggle"], T / 2, T)[0] == pytest.approx(0.0, abs=1e-6)  # half-way through two cycles
+    assert animations.wiggle_offsets(part["wiggle"], T / 2, T)[0] == pytest.approx(0.0, abs=1e-6)  # half-way through two cycles
 
 
 def test_wiggle_from_the_top_does_not_spin_the_picture(studio):
@@ -63,7 +64,7 @@ def test_60_fps_doubles_frames_and_keeps_durations(studio):
 
 
 def test_motion_blur_only_where_things_move(studio, tmp_path):
-    from tomoreveal.render import motion_blurred
+    from tomoreveal.movie import motion_blurred
     spec = tr.default_spec(studio.ds); spec["style"].update(legend=False, slice_label=False)
     spec["shots"] = [sb.new_part("overview", motion="spin", seconds=2)]
     frames = sb.build_plan(spec, studio.ds).frames

@@ -6,6 +6,7 @@ import pytest
 
 import tomoreveal as tr
 from tomoreveal import storyboard as sb
+from tomoreveal import edits, transitions
 
 
 def closeup(st, legacy=False, **kw):
@@ -15,7 +16,7 @@ def closeup(st, legacy=False, **kw):
     part = sb.new_part("focus", **fields)
     if legacy:  # as saved by 3.4
         part = sb.as_legacy(part)
-    sb.insert_part(spec, part)
+    edits.insert_part(spec, part)
     frames, _ = tr.build_timeline(spec, st.ds)
     return spec, part, [f for f in frames if f["part"] == part["id"] and f["phase"] == "main"]
 
@@ -25,7 +26,7 @@ def test_wiggle_follows_the_formula_and_eases(studio):
     T = (len(fr) - 1) / 30
     base = fr[0]["pose"]["az"]
     for i, f in enumerate(fr):
-        t = i / 30; A = 8 * sb.smooth01(t / 0.5) * sb.smooth01((T - t) / 0.5)
+        t = i / 30; A = 8 * transitions.smooth01(t / 0.5) * transitions.smooth01((T - t) / 0.5)
         assert f["pose"]["az"] - base == pytest.approx(A * math.cos(math.pi * t), abs=1e-6)
         assert f["fx"]["wiggle"][1] == pytest.approx(A * math.sin(math.pi * t), abs=1e-3)
     assert fr[0]["fx"]["wiggle"] == [0.0, 0.0] and fr[-1]["fx"]["wiggle"] == [0.0, 0.0]

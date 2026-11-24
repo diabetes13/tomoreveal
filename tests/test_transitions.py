@@ -4,6 +4,7 @@ import pytest
 
 import tomoreveal as tr
 from tomoreveal import storyboard as sb
+from tomoreveal import transitions
 
 
 def campos(p, fr):
@@ -28,11 +29,11 @@ def two_overviews(ds, **tin):
 
 def test_ease_curves():
     u = np.linspace(0, 1, 101)
-    assert np.allclose([sb.ease_curve(x) for x in u], [sb.smooth01(x) for x in u])  # gentle / gentle as before
-    assert np.allclose([sb.ease_curve(x, "sudden", "sudden") for x in u], u)
-    for a in sb.EASES:
-        for b in sb.EASES:
-            v = [sb.ease_curve(x, a, b) for x in u]
+    assert np.allclose([transitions.ease_curve(x) for x in u], [transitions.smooth01(x) for x in u])  # gentle / gentle as before
+    assert np.allclose([transitions.ease_curve(x, "sudden", "sudden") for x in u], u)
+    for a in transitions.EASES:
+        for b in transitions.EASES:
+            v = [transitions.ease_curve(x, a, b) for x in u]
             assert v[0] == pytest.approx(0, abs=1e-6) and v[-1] == pytest.approx(1, abs=1e-6)
             assert all(x <= y + 1e-9 for x, y in zip(v, v[1:]))
 
@@ -40,7 +41,7 @@ def test_ease_curves():
 def test_default_transition_is_unchanged(studio):
     spec, a, b = two_overviews(studio.ds)
     plain = sb.build_plan(spec, studio.ds).frames
-    b["transition_in"] = dict(sb.TRANSITION_DEFAULTS)
+    b["transition_in"] = dict(transitions.TRANSITION_DEFAULTS)
     assert [sb.state_key(f) for f in sb.build_plan(spec, studio.ds).frames] == [sb.state_key(f) for f in plain]
 
 
@@ -153,7 +154,7 @@ def test_drag_the_end_of_a_transition_on_the_timeline(tmp_path, demo, needs_3d):
             app.processEvents()
         part = win.parts_panel.part(pid)
         expect = round(round(30 / (c.ppf * 30) / 0.1) * 0.1, 2)
-        assert sb.transition_of(part)["overlap_next"] == pytest.approx(expect) and expect > 0
+        assert transitions.transition_of(part)["overlap_next"] == pytest.approx(expect) and expect > 0
         assert len(win.editor.history.states) == n_hist + 1
         win.parts_panel.open(pid)  # the transition settings build
         assert "Transition from part" in win.parts_panel.rows[pid]["transition_head"].text()

@@ -18,7 +18,8 @@ import numpy as np
 from .common import UserError, VIEWS, __version__
 from .dragonfly import OrsSession, guess_roi
 from .matching import apply_match, match_volume
-from .render import Renderer, render_movie
+from .movie import render_movie
+from .render import Renderer
 from .storyboard import build_plan, build_timeline, class_spec, default_spec
 from .volumes import Dataset, clean_labels, guess_kind, load_volume, looks_like_scores, regrid, score_scale, sidecar_classes
 

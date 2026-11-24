@@ -7,13 +7,14 @@ import pytest
 import tomoreveal as tr
 from tomoreveal import project as pj
 from tomoreveal import storyboard as sb
+from tomoreveal import edits
 
 
 def with_cards(ds):
     spec = tr.default_spec(ds)
     n0 = len(tr.build_timeline(spec, ds)[0])
-    sb.insert_part(spec, sb.new_part("title_card", title="Endolysosomes"), after="start")
-    sb.insert_part(spec, sb.new_part("end_card"), after=spec["shots"][-1]["id"])
+    edits.insert_part(spec, sb.new_part("title_card", title="Endolysosomes"), after="start")
+    edits.insert_part(spec, sb.new_part("end_card"), after=spec["shots"][-1]["id"])
     return spec, n0
 
 
@@ -63,7 +64,7 @@ def test_logo_is_drawn_with_its_transparency(studio, tmp_path):
     spec = tr.default_spec(studio.ds)
     card = sb.new_part("card", background=dict(kind="color", color="#ffffff"), fade_in=0, fade_out=0)
     card["blocks"].append(sb.image_block(path, height=0.5, x=0.5, y=0.5, anchor="middle-center"))
-    sb.insert_part(spec, card, after="start")
+    edits.insert_part(spec, card, after="start")
     f = tr.build_timeline(spec, studio.ds)[0][0]
     img = studio.ren.draw(f, spec, (200, 100)).astype(int)
     x0, y0, x1, y1 = studio.ren.last_rects["block:0"]["box"]
@@ -73,7 +74,7 @@ def test_logo_is_drawn_with_its_transparency(studio, tmp_path):
 
 def test_dissolve_blends_into_the_next_part(studio):
     spec = tr.default_spec(studio.ds)
-    sb.insert_part(spec, sb.new_part("title_card", title="T", transition_to_next="dissolve", fade_in=0), after="start")
+    edits.insert_part(spec, sb.new_part("title_card", title="T", transition_to_next="dissolve", fade_in=0), after="start")
     frames, _ = tr.build_timeline(spec, studio.ds)
     cf = card_frames(frames, spec["shots"][0]["id"])
     last = cf[-1]; assert 0 < last["dissolve"] < 1 and last["dissolve_to"] is frames[len(cf)]
@@ -87,7 +88,7 @@ def test_project_keeps_card_pictures(studio, tmp_path):
     from PIL import Image
     path = str(tmp_path / "logo.png"); Image.new("RGBA", (10, 10), (0, 0, 255, 255)).save(path)
     spec = tr.default_spec(studio.ds)
-    card = sb.new_part("end_card"); card["blocks"].append(sb.image_block(path)); sb.insert_part(spec, card)
+    card = sb.new_part("end_card"); card["blocks"].append(sb.image_block(path)); edits.insert_part(spec, card)
     data = pj.make_project(studio, spec, project_path=str(tmp_path / "p.tomoreveal"))
     p = str(tmp_path / "p.tomoreveal"); pj.write_atomic(p, data)
     back = pj.read_project(p)

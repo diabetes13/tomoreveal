@@ -8,6 +8,7 @@ import pytest
 import tomoreveal as tr
 from tomoreveal import look as lk
 from tomoreveal import storyboard as sb
+from tomoreveal import edits
 
 
 def main_frame(st, spec, pid, i=None):
@@ -20,7 +21,7 @@ def test_two_whole_structures_in_focus(studio):
     ds = studio.ds; spec = tr.default_spec(ds)
     mem, ves, fil = ds.key_of(1), ds.key_of(2), ds.key_of(3)
     part = sb.new_part("focus", target=sb.make_target([(mem, None), (ves, None)]), others=dict(colour="grey", opacity=0.3), motion="none")
-    sb.insert_part(spec, part)
+    edits.insert_part(spec, part)
     f = main_frame(studio, spec, part["id"])
     studio.ren.draw(f, spec, (320, 180))
     a = studio.ren.actors
@@ -62,7 +63,7 @@ def test_vignette_darkens_edges_but_not_the_text(studio):
 def test_background_blur_keeps_the_focused_object_sharp(studio):
     ds = studio.ds; spec = tr.default_spec(ds); spec["style"].update(legend=False, slice_label=False)
     part = sb.new_part("focus", target=sb.make_target([(ds.key_of(2), 1)]), others=dict(colour="keep", opacity=1.0), motion="none", caption="")
-    sb.insert_part(spec, part)
+    edits.insert_part(spec, part)
     f = main_frame(studio, spec, part["id"])
     sharp = studio.ren.draw(f, spec, (480, 270)).astype(float).sum(2)
     part["vignette"] = dict(on=True, strength=0.0, blur=dict(on=True, strength=1.0))
@@ -166,7 +167,7 @@ def test_hide_the_others_and_start_from_the_top(studio):
     assert part["tilt"] == 0.0 and "tilt" not in sb.as_legacy(part)
     part["others"] = sb.set_others_choice(part["others"], colour="hide")
     assert sb.others_choice(part["others"]) == ("hide", 1.0) and sb.others_of(part["others"]) == ("keep", 0.0)
-    sb.insert_part(spec, part)
+    edits.insert_part(spec, part)
     f = main_frame(studio, spec, part["id"])
     assert f["pose"]["tilt"] == pytest.approx(0.0)  # looking straight down
     studio.ren.draw(f, spec, (320, 180))

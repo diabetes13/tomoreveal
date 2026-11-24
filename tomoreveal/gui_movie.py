@@ -3,11 +3,13 @@ import copy
 
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
-from . import storyboard as sb
+from . import edits, storyboard as sb
+from .animations import fx_settings
 from .common import UserError
 from .gui_data import clear_layout
 from .gui_fold import Fold, fold_rows
 from .gui_theme import DIM
+from .transitions import ease_curve, transition_of
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
                ("Overview", "overview"), ("View from here", "view"), ("Hold (pause)", "hold"))
@@ -19,7 +21,7 @@ class MovieEditor(QtC.QObject):
 
     def __init__(self, win):
         super().__init__(win)
-        self.win = win; self.history = sb.History(); self.pending_after = None
+        self.win = win; self.history = edits.History(); self.pending_after = None
         tl = win.timeline
         self.add_btn = QtW.QPushButton("+ Add part"); self.add_menu = QtW.QMenu(self.add_btn)
         self.add_menu.aboutToShow.connect(lambda: self.fill_add_menu(self.add_menu)); self.add_btn.setMenu(self.add_menu)
@@ -131,7 +133,7 @@ class MovieEditor(QtC.QObject):
         if after not in (None, "start") and after not in [p["id"] for p in self.spec["shots"]]:
             after = None  # that part was undone or deleted since: put it at the playhead instead
         after = after or self.anchor()
-        sb.insert_part(self.spec, part, after=after)
+        edits.insert_part(self.spec, part, after=after)
         self.commit(select=part["id"], show=part["id"])
 
     def add(self, kind, after=None):
@@ -158,7 +160,7 @@ class MovieEditor(QtC.QObject):
         if pid is None:
             return
         ids = [p["id"] for p in self.spec["shots"]]; i = ids.index(pid)
-        sb.remove_part(self.spec, pid)
+        edits.remove_part(self.spec, pid)
         rest = self.spec["shots"]
         nxt = rest[i]["id"] if i < len(rest) else (rest[-1]["id"] if rest else None)
         self.commit(select=nxt, show=nxt)
@@ -168,7 +170,7 @@ class MovieEditor(QtC.QObject):
         pid = self.target(pid)
         if pid is None:
             return
-        sb.duplicate_part(self.spec, pid)
+        edits.duplicate_part(self.spec, pid)
         new = self.spec["shots"][[p["id"] for p in self.spec["shots"]].index(pid) + 1]["id"]
         self.commit(select=new, show=new)
 
@@ -177,7 +179,7 @@ class MovieEditor(QtC.QObject):
         try:
             if pid is None:
                 raise UserError("Put the playhead inside a slide or a hold to split it.")
-            sb.split_part(self.spec, self.win.st.ds, pid, f)
+            edits.split_part(self.spec, self.win.st.ds, pid, f)
         except UserError as exc:
             self.win.say(str(exc), "err"); return
         # the first half stays selected with the playhead at its end, so + Add part goes between the halves
@@ -202,7 +204,7 @@ class MovieEditor(QtC.QObject):
     def move_by(self, pid, delta):
         ids = [p["id"] for p in self.spec["shots"]]; i = ids.index(pid)
         if 0 <= i + delta < len(ids):
-            sb.move_part(self.spec, pid, i + delta); self.commit(select=pid)
+            edits.move_part(self.spec, pid, i + delta); self.commit(select=pid)
 
     def toggle(self, pid):
         p = self.spec["shots"][[q["id"] for q in self.spec["shots"]].index(pid)]
@@ -231,11 +233,11 @@ class MovieEditor(QtC.QObject):
 
     # ---- timeline gestures ----
     def resizing(self, pid, secs):
-        sb.set_part(self.spec, pid, seconds=secs)
+        edits.set_part(self.spec, pid, seconds=secs)
         self.win.timeline.set_plan(sb.build_plan(self.spec, self.win.st.ds), self.spec, self.win.st.ds)  # the preview waits for the release
 
     def resized(self, pid, secs):
-        sb.set_part(self.spec, pid, seconds=secs); self.commit(select=pid)
+        edits.set_part(self.spec, pid, seconds=secs); self.commit(select=pid)
 
     def moved(self, pid, pos):
         shots = self.spec["shots"]; visible = [p["id"] for p in shots if p["id"] in self.win.timeline.canvas.parts]
@@ -248,7 +250,7 @@ class MovieEditor(QtC.QObject):
             return
         rest = [v for v in visible if v != pid]; ids = [p["id"] for p in shots if p["id"] != pid]
         new_index = ids.index(rest[pos]) if pos < len(rest) else len(ids)
-        sb.move_part(self.spec, pid, new_index); self.commit(select=pid)
+        edits.move_part(self.spec, pid, new_index); self.commit(select=pid)
 
     def command(self, cmd):
         {"delete": lambda: self.delete(), "duplicate": lambda: self.duplicate(), "split": self.split,
@@ -350,7 +352,7 @@ def speed_picture(tin, w=56, h=20):
     """A small picture of the speed over the transition: flat, bell-shaped or one-sided."""
     pm = QtG.QPixmap(w, h); pm.fill(QtC.Qt.transparent); p = QtG.QPainter(pm); p.setRenderHint(QtG.QPainter.Antialiasing)
     us = [i / 40 for i in range(41)]
-    ys = [sb.ease_curve(u, tin["ease_out_prev"], tin["ease_in_next"]) for u in us]
+    ys = [ease_curve(u, tin["ease_out_prev"], tin["ease_in_next"]) for u in us]
     v = [(ys[min(40, i + 1)] - ys[max(0, i - 1)]) for i in range(41)]; top = max(v) or 1.0
     path = QtG.QPainterPath(QtC.QPointF(0, h - 1))
     for i, x in enumerate(v):
@@ -532,7 +534,7 @@ class PartsPanel(QtW.QWidget):
 
     # ---- settings ----
     def set_on(self, pid, on):
-        sb.set_part(self.win.spec, pid, on=bool(on)); self.win.editor.commit(select=pid)
+        edits.set_part(self.win.spec, pid, on=bool(on)); self.win.editor.commit(select=pid)
 
     def set(self, pid, key, value, rebuild=False):
         p = self.part(pid)
@@ -599,12 +601,12 @@ class PartsPanel(QtW.QWidget):
 
     def _transition_rows(self, pid, p, form):
         """The transition into this part (3.5): kind, length, how it leaves and arrives, overlaps, straight or arc."""
-        r = self.rows[pid]; tin = sb.transition_of(p)
+        r = self.rows[pid]; tin = transition_of(p)
 
         def set_tr(**kw):
             q = self.part(pid)
             if q is not None:
-                cur = sb.transition_of(q); cur.update(kw)
+                cur = transition_of(q); cur.update(kw)
                 self.set(pid, "transition_in", cur); pic.setPixmap(speed_picture(cur))
         head = QtW.QLabel(f"<b>{self.transition_heading(pid)}</b>"); r["transition_head"] = head
         fd = Fold("", key="part_transition", header=head, tip="How the movie gets from the previous part to this one")
@@ -766,11 +768,11 @@ class PartsPanel(QtW.QWidget):
     def _fx(self, pid, key, rebuild=False, **kw):
         q = self.part(pid)
         if q is not None:
-            cur = dict(sb.fx_settings(q)[key]); cur.update(kw); self.set(pid, key, cur, rebuild=rebuild)
+            cur = dict(fx_settings(q)[key]); cur.update(kw); self.set(pid, key, cur, rebuild=rebuild)
 
     def _animation_rows(self, pid, p, form):
         """Wiggle amounts, push-in, highlight and object effect of a close-up (they can be combined)."""
-        S = sb.fx_settings(p)
+        S = fx_settings(p)
 
         def row(*ws):
             w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)

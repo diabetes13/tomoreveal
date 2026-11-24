@@ -3,6 +3,7 @@ import numpy as np
 from PySide6 import QtCore as QtC, QtWidgets as QtW
 
 from . import storyboard as sb
+from .paths import PATH_CAMERA, point_values
 from .gui_theme import DIM
 
 SIDES = (("above", "above"), ("from the left", "left"), ("from the right", "right"), ("behind, looking along it", "behind"),
@@ -83,7 +84,7 @@ def path_rows(panel, pid, p, form):
     def setcam(**kw):
         q = part()
         if q is not None:
-            panel.set(pid, "camera", {**sb.PATH_CAMERA, **(q.get("camera") or {}), **kw})
+            panel.set(pid, "camera", {**PATH_CAMERA, **(q.get("camera") or {}), **kw})
     src = p.get("source") or {}; kind = src.get("kind", "follow")
     form.addRow("The camera", _combo((("follows a structure", "follow"), ("moves through points", "points")), kind,
                                      lambda v: panel.set(pid, "source", dict(part().get("source") or {}, kind=v), rebuild=True)))
@@ -127,8 +128,8 @@ def path_rows(panel, pid, p, form):
             n = QtW.QLabel(why); n.setStyleSheet(DIM); n.setWordWrap(True); form.addRow("", n)
     else:
         wps = p.get("waypoints") or []
-        zs, own_z = sb.point_values(p, "zoom", 1.0)
-        fs, own_f = sb.point_values(p, "fov", float(win.spec.get("style", {}).get("fov", 30)))
+        zs, own_z = point_values(p, "zoom", 1.0)
+        fs, own_f = point_values(p, "fov", float(win.spec.get("style", {}).get("fov", 30)))
         new_interp = p.get("interp") == 2
 
         def upd(i, rebuild=False, **kw):
@@ -206,7 +207,7 @@ def path_rows(panel, pid, p, form):
         click.toggled.connect(lambda on: win.start_waypoint_pick(pid) if on else win.end_waypoint_pick())
         form.addRow("" if wps else "Points", _row(here, click))
         click.setToolTip(click.toolTip() + " In the preview, drag a numbered point to move it on the slice; right-click it to delete it.")
-    cam = dict(sb.PATH_CAMERA, **(p.get("camera") or {}))
+    cam = dict(PATH_CAMERA, **(p.get("camera") or {}))
     dist = _spin(0.2, 5, cam["distance"], lambda v: setcam(distance=float(v)), suffix=" x")
     dist.setToolTip("How far the camera stays from the path, relative to the size of what is followed")
     side = _combo(SIDES, cam.get("side", "above"), lambda v: setcam(side=v))
@@ -364,8 +365,8 @@ class PointPanel(QtW.QFrame):
         if p is None or self.i is None or self.i >= len(p.get("waypoints") or []):
             self.hide(); return
         self._busy = True
-        zs, own_z = sb.point_values(p, "zoom", 1.0)
-        fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        zs, own_z = point_values(p, "zoom", 1.0)
+        fs, _ = point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
         w = p["waypoints"][self.i]
         self.title.setText(f"Point {self.i + 1}" + (f" · {w['note']}" if w.get("note") else ""))
         self.zoom.setValue(self.z_to_slider(zs[self.i])); self.zoom_lbl.setText(f"{zs[self.i]:.2f}x")
@@ -409,8 +410,8 @@ class PointPanel(QtW.QFrame):
         p, w = self._wp()
         if w is None:
             return
-        fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
-        zs, _ = sb.point_values(p, "zoom", 1.0)
+        fs, _ = point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        zs, _ = point_values(p, "zoom", 1.0)
         old = fs[self.i]; w["fov"] = float(v); self.fov_lbl.setText(f"{v}°")
         if self.same_size.isChecked():  # d * tan(fov / 2) stays the same: the target keeps its size on screen
             z = zs[self.i] * np.tan(np.radians(v) / 2) / np.tan(np.radians(old) / 2)
@@ -423,7 +424,7 @@ class PointPanel(QtW.QFrame):
         p, w = self._wp()
         if w is None:
             return
-        zs, _ = sb.point_values(p, "zoom", 1.0); fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        zs, _ = point_values(p, "zoom", 1.0); fs, _ = point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
         w["zoom"] = zs[self.i]; w["fov"] = fs[self.i]  # the point gets its own values
         w["zoom_only_here"] = w["fov_only_here"] = not on
         self._commit()

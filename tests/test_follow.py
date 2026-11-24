@@ -60,11 +60,11 @@ def test_steady_on_a_noisy_tube(noisy_tube):
 @pytest.mark.parametrize("side", ["above", "left", "behind"])
 def test_upright_and_limited_turning(studio, side):
     ds = studio.ds
-    spec, part, poses = follow(ds, ds.key_of(1), camera=dict(sb.PATH_CAMERA, side=side))
+    spec, part, poses = follow(ds, ds.key_of(1), camera=dict(paths.PATH_CAMERA, side=side))
     ups = np.array([p["up"] for p in poses])
     assert turn_deg(ups).max() < 1.0  # the picture never rolls
     dirs = np.array([np.asarray(p["c"]) - p["pos"] for p in poses])
-    assert turn_deg(dirs).max() <= sb.TURN_LIMIT / 30 * 1.1  # 20 degrees per second at most
+    assert turn_deg(dirs).max() <= paths.TURN_LIMIT / 30 * 1.1  # 20 degrees per second at most
     if side != "above":
         z = np.array([p["pos"][2] for p in poses])
         assert np.ptp(z[5:-5]) < 3  # a constant height

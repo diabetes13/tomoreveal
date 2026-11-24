@@ -76,7 +76,7 @@ def studio_labels(studio):
 
 
 def test_real_shadows_are_not_offered_with_software_rendering(studio):
-    assert tr.render.real_shadows_available(True) == (False, "Not available with software rendering on this computer")
+    assert tr.shadows.real_shadows_available(True) == (False, "Not available with software rendering on this computer")
 
 
 def test_unlit_actors_look_the_same_drawn_by_ambient_light(studio):
@@ -84,7 +84,7 @@ def test_unlit_actors_look_the_same_drawn_by_ambient_light(studio):
     VTK's shadow shader fails for unlit actors on NVIDIA cards. The colours must not change, and the actors are unlit again
     afterwards."""
     from tomoreveal.overlays import set_show
-    from tomoreveal.render import restore_unlit, unlit_to_ambient
+    from tomoreveal.shadows import restore_unlit, unlit_to_ambient
     spec = plain(tr.default_spec(studio.ds)); set_show(spec, "scale_bar", True); f = overview(studio, spec)
     for preset in ("simple", "flat"):
         spec.setdefault("look", lk.look_settings(spec))["lighting"]["preset"] = preset

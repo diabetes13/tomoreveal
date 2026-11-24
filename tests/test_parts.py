@@ -8,6 +8,7 @@ import pytest
 
 import tomoreveal as tr
 from tomoreveal import storyboard as sb
+from tomoreveal import edits
 from tomoreveal.common import UserError
 from tomoreveal.volumes import load_volume, write_mrc
 
@@ -63,23 +64,23 @@ def test_old_settings_are_migrated_once(st):
 def test_insert_remove_duplicate_move(st):
     spec = tr.default_spec(st.ds); a, b, c = (p["id"] for p in spec["shots"])
     h = sb.new_part("hold")
-    sb.insert_part(spec, h, after=a)
+    edits.insert_part(spec, h, after=a)
     assert [p["id"] for p in spec["shots"]] == [a, h["id"], b, c]
-    sb.insert_part(spec, sb.new_part("hold", seconds=1), after="start"); first = spec["shots"][0]["id"]
-    sb.duplicate_part(spec, b)
+    edits.insert_part(spec, sb.new_part("hold", seconds=1), after="start"); first = spec["shots"][0]["id"]
+    edits.duplicate_part(spec, b)
     ids = [p["id"] for p in spec["shots"]]
     assert ids[:4] == [first, a, h["id"], b] and ids[5] == c and ids[4] not in (b, c)
     assert spec["shots"][4] == dict(spec["shots"][3], id=ids[4])
-    sb.move_part(spec, c, 0)
+    edits.move_part(spec, c, 0)
     assert spec["shots"][0]["id"] == c
-    sb.set_part(spec, c, seconds=3.5)
+    edits.set_part(spec, c, seconds=3.5)
     assert spec["shots"][0]["seconds"] == 3.5
     for pid in [p["id"] for p in spec["shots"]]:
-        sb.remove_part(spec, pid)
+        edits.remove_part(spec, pid)
         plan = sb.build_plan(spec, st.ds); check_segments(plan)
     assert spec["shots"] == [] and len(plan.frames) == 1
     with pytest.raises(UserError):
-        sb.remove_part(spec, a)
+        edits.remove_part(spec, a)
 
 
 def test_any_order_gives_a_sensible_movie(st):
@@ -118,7 +119,7 @@ def test_split_a_slide_and_pause_in_the_middle(st):
     plan = sb.build_plan(spec, ds); start, count = sb.main_range(plan, up)
     whole = [f["k"] for f in plan.frames if f["part"] == up and f["phase"] == "main"]
     mid = start + count // 2; k_mid = plan.frames[mid]["k"]
-    sb.split_part(spec, ds, up, mid)
+    edits.split_part(spec, ds, up, mid)
     a, b = spec["shots"][0], spec["shots"][1]
     plan2 = sb.build_plan(spec, ds)
     halves = [f["k"] for f in plan2.frames if f["part"] in (a["id"], b["id"]) and f["phase"] == "main"]
@@ -126,14 +127,14 @@ def test_split_a_slide_and_pause_in_the_middle(st):
     assert abs(len(plan2.frames) - len(plan.frames)) <= 1
     assert a["id"] == up and a["to"] == k_mid and b["from"] == "current"
     hold = sb.new_part("hold", seconds=2)
-    sb.insert_part(spec, hold, after=a["id"])
+    edits.insert_part(spec, hold, after=a["id"])
     plan3 = sb.build_plan(spec, ds)
     ks = {f["k"] for f in plan3.frames if f["part"] == hold["id"]}
     assert ks == {k_mid}  # the movie pauses at the middle slice
     with pytest.raises(UserError):
-        sb.split_part(spec, ds, spec["shots"][-1]["id"], len(plan3.frames) - 5)  # an overview cannot be split
+        edits.split_part(spec, ds, spec["shots"][-1]["id"], len(plan3.frames) - 5)  # an overview cannot be split
     with pytest.raises(UserError):
-        sb.split_part(spec, ds, hold["id"], 0)  # the playhead is not inside it
+        edits.split_part(spec, ds, hold["id"], 0)  # the playhead is not inside it
 
 
 def test_closeup_of_unloaded_structure_is_skipped_and_comes_back(demo, tmp_path):
@@ -171,9 +172,9 @@ def test_untick_and_tick_again_keeps_name_and_colour(demo, tmp_path):
 
 
 def test_history(st):
-    spec = tr.default_spec(st.ds); h = sb.History()
+    spec = tr.default_spec(st.ds); h = edits.History()
     h.push(spec); gone = spec["shots"][1]["id"]
-    sb.remove_part(spec, gone); h.push(spec)
+    edits.remove_part(spec, gone); h.push(spec)
     assert h.can_undo and not h.can_redo
     back = h.undo()
     assert [p["id"] for p in back["shots"]][1] == gone and h.can_redo

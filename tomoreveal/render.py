@@ -286,10 +286,18 @@ class Renderer(PreviewPicking):
         try:
             self.pl.render()
             fr_img = self.pl.screenshot(None, transparent_background=bool(transparent))
+            blur_zb = None
+            if self._vig is not None and self._vig["blur"] > 0.001:  # before the outline pass draws over the depth buffer
+                from vtkmodules.util.numpy_support import vtk_to_numpy
+                W_, H_ = size; arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W_ - 1, H_ - 1, arr)
+                blur_zb = vtk_to_numpy(arr).reshape(H_, W_)[::-1].copy()
         finally:
             restore_unlit(lit)
+        self._last_id = None
         if L35["outline"] != "off" or L35["depth_fade"] != "off":  # 3.5 looks: outlines and depth fade, from the depth buffer
             fr_img = self._outlines_and_fade(fr_img, s, spec, size, L35, transparent)
+        if blur_zb is not None:
+            fr_img = self._background_blur(fr_img, self._vig, blur_zb, size)
         if self._vig is not None and self._vig["a"] > 0.001:
             fr_img = self._apply_vignette(fr_img, self._vig, transparent)
         if not annotate:
@@ -333,11 +341,35 @@ class Renderer(PreviewPicking):
                 m.SetColorModeToDirectScalars()
             act.mapper.ScalarVisibilityOn()
 
+    def _slice_depth(self, W, H):
+        """Distance from the camera (along its view direction) of the tomogram slice at every pixel (rows from the top),
+        inf where the slice is not. Worked out from the camera, so it is right also while the slice is see-through."""
+        cam = self.pl.renderer.GetActiveCamera()
+        M = cam.GetCompositeProjectionTransformMatrix(W / H, -1, 1)
+        inv = np.linalg.inv(np.array([[M.GetElement(i, j) for j in range(4)] for i in range(4)]))
+        xs = (np.arange(W) + 0.5) / W * 2 - 1; ys = 1 - (np.arange(H) + 0.5) / H * 2
+        X, Y = np.meshgrid(xs, ys)
+        def unproject(zn):
+            p = np.stack([X, Y, np.full_like(X, zn), np.ones_like(X)], -1) @ inv.T
+            return p[..., :3] / p[..., 3:4]
+        a, b = unproject(-1.0), unproject(1.0)
+        z = float(self.img.origin[2]); dz = b[..., 2] - a[..., 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (z - a[..., 2]) / dz
+        P = a + (b - a) * t[..., None]
+        nz, ny, nx = self.shape
+        xl, xh = max(0.0, self.cplanes[0].GetOrigin()[0]), min(nx - 1.0, self.cplanes[1].GetOrigin()[0])
+        yl, yh = max(0.0, self.cplanes[2].GetOrigin()[1]), min(ny - 1.0, self.cplanes[3].GetOrigin()[1])
+        inside = np.isfinite(t) & (t >= 0) & (t <= 1) & (P[..., 0] >= xl) & (P[..., 0] <= xh) & (P[..., 1] >= yl) & (P[..., 1] <= yh)
+        pos = np.array(cam.GetPosition()); d = np.array(cam.GetDirectionOfProjection())
+        depth = (P - pos) @ d
+        return np.where(inside, depth, np.inf)
+
     def _id_pass(self, size):
         """Draw every shown structure in a flat colour of its own, opaque, without the slice: (RGB image, depth buffer
         (rows from the top), {id colour: structure id}). For outlines between touching structures and of see-through ones."""
         from vtkmodules.util.numpy_support import vtk_to_numpy
-        saved = []; W, H = size; ids = {}
+        saved = []; W, H = size; ids = {}; self._id_actors = {}
         objs = [(kk, a) for kk, a in self.actors.items() if a.GetVisibility()] + \
                [(k[0], a) for k, a in self.comp_actors.items() if a is not None and a.GetVisibility()]
         others = [self.slice_actor, self.bar_actor, *self.sil_actors.values(), *self.glow_actors.values(), *self.cut_actors.values()]
@@ -349,11 +381,15 @@ class Renderer(PreviewPicking):
             saved.append(("prop", a, (pr.GetColor(), pr.GetLighting(), pr.GetOpacity(), a.mapper.GetScalarVisibility(), pr.GetAmbient(),
                                       pr.GetDiffuse(), pr.GetSpecular(), pr.GetFrontfaceCulling(), pr.GetRepresentation())))
             c = (40 * (i % 6) + 30, 40 * ((i // 6) % 6) + 30, 40 * ((i // 36) % 6) + 30)  # well apart, so edges are clear
-            ids[c] = kk
+            ids[c] = kk; self._id_actors[c] = a
             pr.SetColor(c[0] / 255, c[1] / 255, c[2] / 255); pr.SetLighting(False); pr.SetOpacity(1.0); a.mapper.ScalarVisibilityOff()
             pr.SetAmbient(1.0); pr.SetDiffuse(0.0); pr.SetSpecular(0.0); pr.SetFrontfaceCulling(False)
         peel = self.peeling; self._set_peeling(False)
         self.pl.set_background((0, 0, 0)); self.bg = None  # set again by the next frame
+        # Plain drawing for this pass: without the shadow, SSAO and blur passes. Real shadows with these unlit flat
+        # colours gave "Could not set shader program" errors on NVIDIA (see shadows.unlit_to_ambient), and SSAO would
+        # darken the colours that name each structure.
+        ren = self.pl.renderer; passes = ren.GetPass(); ren.SetPass(None)
         try:
             self.pl.render(); img = self.pl.screenshot(None)
             arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
@@ -366,7 +402,9 @@ class Renderer(PreviewPicking):
                     pr = a.GetProperty(); col, lit, op, sv, amb, dif, spc, cull, rep = v
                     pr.SetColor(*col); pr.SetLighting(lit); pr.SetOpacity(op); a.mapper.SetScalarVisibility(sv)
                     pr.SetAmbient(amb); pr.SetDiffuse(dif); pr.SetSpecular(spc); pr.SetFrontfaceCulling(cull); pr.SetRepresentation(rep)
+            ren.SetPass(passes)
             self._set_peeling(peel)
+        self._last_id = (img[..., :3], zb)
         return img[..., :3], zb, ids
 
     def _outlines_and_fade(self, img, s, spec, size, L35, transparent):
@@ -384,10 +422,25 @@ class Renderer(PreviewPicking):
         bgc = np.array(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) * 255
         if L35["depth_fade"] != "off":  # far things fade towards the background (towards white over the slice)
             arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-            zb = vtk_to_numpy(arr).reshape(H, W)[::-1]; fg = zb < 0.99999
-            near, far = s.get("dr") or (float(np.min(linear(zb[fg]))) if fg.any() else n, float(np.max(linear(zb[fg]))) if fg.any() else f)
-            t = np.clip((linear(zb) - (near + 0.4 * (far - near))) / max(1e-6, 0.6 * (far - near)), 0, 1) * FADE_AMOUNT[L35["depth_fade"]]
-            t[~fg] = 0; m = t > 0.002
+            zb = vtk_to_numpy(arr).reshape(H, W)[::-1]; fg = zb < 0.99999; lin = linear(zb)
+            amount = FADE_AMOUNT[L35["depth_fade"]]
+
+            def fade_of(lin, fg):
+                near, far = s.get("dr") or (float(np.min(lin[fg])) if fg.any() else n, float(np.max(lin[fg])) if fg.any() else f)
+                t = np.clip((lin - (near + 0.4 * (far - near))) / max(1e-6, 0.6 * (far - near)), 0, 1) * amount
+                t[~fg] = 0
+                return t
+            op = float(s.get("slice", 0)) if self.slice_actor.GetVisibility() else 0.0
+            if 0.0 < op < 1.0:
+                # A see-through slice is not in the depth buffer: without this the far slice lost its fade (and the picture
+                # jumped) the moment the slice began to fade out. Its depth is worked out here instead, and the fade
+                # goes smoothly from "with the slice" (opaque) to "without it" (gone).
+                sd = self._slice_depth(W, H)
+                ok = np.isfinite(sd) & (~fg | (sd < lin))
+                t = op * fade_of(np.where(ok, sd, lin), fg | ok) + (1 - op) * fade_of(lin, fg)
+            else:
+                t = fade_of(lin, fg)
+            m = t > 0.002
             to = np.array([255.0, 255.0, 255.0]) if L35["background"] == "tomogram" else bgc
             out[..., :3][m] = out[..., :3][m] * (1 - t[m][:, None]) + to * t[m][:, None]
         if L35["outline"] != "off":
@@ -453,7 +506,10 @@ class Renderer(PreviewPicking):
             f = e if in_close else 0.0
         else:
             f = 0.0
-        if f <= 0:
+        # background blur: in close-ups only, whatever the vignette does (the close-up's own choice, else the Look tab's)
+        own_blur = (own.get("blur") or {}).get("on") if own is not None and "blur" in own else None
+        fb = e if in_close and (lv["blur"].get("on") if own_blur is None else own_blur) else 0.0
+        if f <= 0 and fb <= 0:
             return None
         W, H = size; cx, cy = W / 2, H / 2
         if in_close:  # centred on the focused objects, wherever they are in the frame
@@ -464,9 +520,9 @@ class Renderer(PreviewPicking):
             except (KeyError, IndexError, TypeError, ValueError):
                 pass
         col = (0, 0, 0) if cfg.get("colour", "black") == "black" else tuple(255 * v for v in hex2rgb(spec.get("style", {}).get("bg", "#000000")))
-        blur = float(cfg["blur"]["strength"]) * f if cfg["blur"].get("on") else 0.0
-        return dict(a=float(cfg["strength"]) * f, cx=cx, cy=cy, size=float(cfg["size"]), soft=float(cfg["softness"]),
-                    shape=cfg.get("shape", "round"), colour=col, blur=blur)
+        blur = float(cfg["blur"].get("strength", 0.5)) * fb
+        return dict(a=float(cfg["strength"]) * max(0.0, f), cx=cx, cy=cy, size=float(cfg["size"]), soft=float(cfg["softness"]),
+                    shape=cfg.get("shape", "round"), colour=col, blur=blur, target=s["target"])
 
     def _apply_vignette(self, img, v, transparent):
         from .look import vignette_weight
@@ -483,14 +539,55 @@ class Renderer(PreviewPicking):
         return out.astype(np.uint8)
 
     def _apply_blur(self, v):
-        """Background blur in close-ups: VTK depth of field, focused at the camera's focal point (the focused objects)."""
-        amount = v["blur"] if v else 0.0
-        on = amount > 0.001
-        if on != getattr(self, "_dof", False):
-            self.pl.enable_depth_of_field(automatic_focal_distance=True) if on else self.pl.disable_depth_of_field()
-            self._dof = on
-        if on:
-            self.pl.camera.SetFocalDisk(amount * 0.08 * max(self.shape))
+        """Before drawing: VTK's own depth of field is never used (it kept only a thin slab sharp, so it blurred
+        nearly everything); see `_background_blur`."""
+        if getattr(self, "_dof", False):
+            self.pl.disable_depth_of_field(); self._dof = False
+
+    def _background_blur(self, img, v, zb, size):
+        """Background blur in close-ups (3.5): the objects in focus stay sharp and everything else (the tomogram, the
+        other structures, the background) is blurred: a little where it is as far from the camera as the objects, fully
+        where it is clearly in front of them or behind them. Sharp pixels are left out of the blur, so no halo spreads
+        around the objects."""
+        from scipy import ndimage
+        H, W = img.shape[:2]
+        cam = self.pl.renderer.GetActiveCamera(); n, f = cam.GetClippingRange(); ortho = cam.GetParallelProjection()
+        if ortho:
+            lin = n + zb * (f - n)
+        else:
+            lin = 2.0 * n * f / np.maximum(1e-9, f + n - (2.0 * zb - 1.0) * (f - n))
+        lin = np.where(zb >= 0.99999, np.inf, lin)
+        pos = np.array(cam.GetPosition()); d = np.array(cam.GetDirectionOfProjection())
+        try:
+            lo, hi = self.ds.targets_box(v["target"], pad=False)
+            corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])], float)
+            dep = (corners - pos) @ d; near, far = float(dep.min()), float(dep.max())
+        except (KeyError, IndexError, TypeError, ValueError):
+            near = far = float(np.linalg.norm(np.array(cam.GetFocalPoint()) - pos))
+        span = max(0.25 * (far - near), 0.03 * max(far, 1e-6))
+        wd = np.clip(np.maximum(lin - far, near - lin) / span, 0, 1)  # 0 at the objects' depth .. 1 well away from it
+        # the objects in focus: their pixels in the flat-colour pass (the outline pass may have drawn it already)
+        if getattr(self, "_last_id", None) is None:
+            self._id_pass(size)
+        idimg = self._last_id[0]
+        want = set()
+        for k, comp in self._focus_items(v["target"]):
+            a = None if comp is None else self.comp_actors.get((k, int(comp)))
+            if a is None or not a.GetVisibility():  # a whole structure, or its objects drawn by the structure itself ("keep")
+                a = self.actors.get(k)
+            want.update(c for c, act in self._id_actors.items() if act is a)
+        sharp = np.zeros((H, W), bool)
+        for c in want:
+            sharp |= (idimg[..., 0] == c[0]) & (idimg[..., 1] == c[1]) & (idimg[..., 2] == c[2])
+        w = np.where(sharp, 0.0, 0.55 + 0.45 * wd).astype(np.float32)
+        w = ndimage.gaussian_filter(w, 0.8 * H / 1080.0 + 0.4)
+        sigma = (2.0 + 16.0 * float(v["blur"])) * H / 1080.0
+        out = img.astype(np.float32)
+        keep = (~sharp).astype(np.float32); wt = ndimage.gaussian_filter(keep, sigma)
+        for c in range(out.shape[2]):
+            bl = ndimage.gaussian_filter(out[..., c] * keep, sigma) / np.maximum(wt, 1e-4)
+            out[..., c] = out[..., c] * (1 - w) + bl * w
+        return np.clip(np.round(out), 0, 255).astype(np.uint8)
 
     # ---------- camera paths: drawn in the preview only ----------
     def _show_path(self, s, spec, preview):

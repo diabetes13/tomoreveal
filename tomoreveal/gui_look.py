@@ -131,9 +131,13 @@ class LookControls(QtC.QObject):
         self.vig_shape.activated.connect(lambda j: self.set_vig(shape=self.vig_shape.itemData(j)))
         h.addWidget(self.vig_col); h.addWidget(self.vig_shape); h.addStretch(1); f.addRow("Colour and shape", row)
         self.vig_blur = QtW.QCheckBox("Blur the background in close-ups")
-        self.vig_blur.setToolTip("Things nearer or further away than the objects in focus are blurred (depth of field)")
+        self.vig_blur.setToolTip("The objects in focus stay sharp; things in front of them and behind them (the tomogram, other "
+                                 "structures) are blurred, more the further away they are")
         self.vig_blur.toggled.connect(lambda v: self.set_vig(blur=dict(lk.look_settings(self.win.spec)["vignette"]["blur"], on=bool(v))))
         f.addRow(self.vig_blur)
+        self.blur_amount = _slider(0, 100, lambda v: f"{v} %",
+                                   lambda v: self.set_vig(blur=dict(lk.look_settings(self.win.spec)["vignette"]["blur"], strength=v / 100)))
+        self.blur_amount.s.setToolTip("How strongly the background is blurred in close-ups"); f.addRow("Blur amount", self.blur_amount)
         # anti-aliasing in the preview
         g = Section("Smooth edges (anti-aliasing)", "smooth_edges", False); layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.aa_prev = QtW.QComboBox()
@@ -220,6 +224,7 @@ class LookControls(QtC.QObject):
         _setv(self.vig_strength, 100 * float(v["strength"])); _setv(self.vig_size, 100 * float(v["size"])); _setv(self.vig_soft, 100 * float(v["softness"]))
         self.vig_col.setCurrentIndex(1 if v.get("colour") == "background" else 0); self.vig_shape.setCurrentIndex(1 if v.get("shape") == "frame" else 0)
         _quiet(self.vig_blur, lambda: self.vig_blur.setChecked(bool(v["blur"].get("on"))))
+        _setv(self.blur_amount, 100 * float(v["blur"].get("strength", 0.5)))
 
 
 def style_rows(win, form, key):

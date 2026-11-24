@@ -68,12 +68,17 @@ def test_background_blur_keeps_the_focused_object_sharp(studio):
     sharp = studio.ren.draw(f, spec, (480, 270)).astype(float).sum(2)
     part["vignette"] = dict(on=True, strength=0.0, blur=dict(on=True, strength=1.0))
     blurred = studio.ren.draw(f, spec, (480, 270)).astype(float).sum(2)
-    part["vignette"] = None; studio.ren.draw(f, spec, (480, 270))  # DOF off again for the other tests
+    part["vignette"] = None; studio.ren.draw(f, spec, (480, 270))
+    from scipy import ndimage
+    idimg = studio.ren._id_pass((480, 270))[0]  # the focused vesicle's own pixels
+    col = next(c for c, a in studio.ren._id_actors.items() if a is studio.ren.actors[2])  # "keep": drawn by the structure
+    m = np.all(idimg == col, axis=2); inner = ndimage.binary_erosion(m, iterations=3)
+    outside = ~ndimage.binary_dilation(m, iterations=8); outside[:20] = outside[-20:] = False
     energy = lambda im: np.abs(np.diff(im, axis=1))[:-1, :] + np.abs(np.diff(im, axis=0))[:, :-1]
     es, eb = energy(sharp), energy(blurred)
-    centre = (slice(80, 190), slice(160, 320))  # the focused vesicle fills the middle of the frame
-    outside = np.ones_like(es, bool); outside[centre] = False; outside[:20] = outside[-20:] = False
-    assert eb[centre].mean() / es[centre].mean() > eb[outside].mean() / es[outside].mean() + 0.1
+    assert inner.sum() > 200
+    assert np.abs(sharp - blurred)[inner].mean() < 1.0                   # sharp: unchanged
+    assert eb[outside[:-1, :-1]].mean() < 0.6 * es[outside[:-1, :-1]].mean()  # the rest: blurred
 
 
 QtCore = pytest.importorskip("PySide6.QtCore")

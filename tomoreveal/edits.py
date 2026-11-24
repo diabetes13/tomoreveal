@@ -61,6 +61,8 @@ def split_part(spec, ds, part_id, frame):
     second["id"] = new_id()
     first["seconds"] = secs * f; second["seconds"] = secs * (1 - f)
     first["pause_after"] = 0.0; second["pause_before"] = 0.0; second["transition"] = 0
+    if "ease_end" in first:  # the first half carries on into the second without slowing down at the join
+        first["ease_end"] = "sudden"
     if p["type"] == "slide":
         k = int(plan.frames[frame]["k"])
         first["to"] = k; second["from"] = "current"

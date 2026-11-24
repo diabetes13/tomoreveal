@@ -840,9 +840,10 @@ class PartsPanel(QtW.QWidget):
             st = QtW.QSpinBox(); st.setRange(0, 100); st.setSuffix(" %"); st.setPrefix("strength "); st.setValue(round(100 * float(v.get("strength", 0.6))))
             st.valueChanged.connect(lambda x: self.set(pid, "vignette", dict(self.part(pid)["vignette"], strength=x / 100)))
             bl = QtW.QCheckBox("blur"); bl.setChecked(bool((v.get("blur") or {}).get("on")))
-            bl.setToolTip("Things nearer or further away than the objects in focus are blurred (depth of field)")
+            bl.setToolTip("Blur the background: the objects in focus stay sharp, things in front of them and behind them are blurred "
+                          "(amount: Look tab ▸ Vignette)")
             bl.toggled.connect(lambda on: self.set(pid, "vignette", dict(self.part(pid)["vignette"],
-                                                                         blur=dict((self.part(pid)["vignette"].get("blur") or {}), on=bool(on), strength=0.5))))
+                                                                         blur=dict((self.part(pid)["vignette"].get("blur") or {}), on=bool(on)))))
             h.addWidget(st); h.addWidget(bl)
         h.addStretch(1)
         return w

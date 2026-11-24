@@ -525,6 +525,8 @@ def build_plan(spec, ds):
 
     def start_fade(part, fade=None):
         t = shot_tomogram(part); f = t["fade"] if fade is None else fade
+        if fade is None and t.get("whole"):  # fade gently over the whole part (for example while the segmentation is revealed)
+            f = float(part.get("seconds", 5)) + float(part.get("pause_before") or 0)
         ramp.clear(); ramp.update(start=len(frames), s0=st["slice"], s1=target_of(part), n=max(1, round(fps * max(0.0, float(f)))))
 
     last = {}   # pending dissolve / fade, waiting for the next part's first frames

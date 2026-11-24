@@ -1042,7 +1042,15 @@ def build_gui(args):
             cb.activated.connect(mode_changed)
             op.valueChanged.connect(lambda v: (t.__setitem__("opacity", v / 100), self.schedule()))
             fade.valueChanged.connect(lambda v: (t.__setitem__("fade", float(v)), self.schedule()))
-            row.addWidget(cb); row.addWidget(op); row.addWidget(fade); row.addStretch(1)
+            whole = QtW.QCheckBox("whole part"); whole.setChecked(bool(t.get("whole")))
+            whole.setToolTip("Change the tomogram slowly over the whole part instead of in the first seconds. Good for a slide that "
+                             "reveals the segmentation while the tomogram fades away.")
+            fade.setEnabled(not whole.isChecked())
+
+            def whole_changed(on):
+                t["whole"] = bool(on); fade.setEnabled(not on); self.schedule()
+            whole.toggled.connect(whole_changed)
+            row.addWidget(cb); row.addWidget(op); row.addWidget(fade); row.addWidget(whole); row.addStretch(1)
             has_t = bool(self.info and self.info.get("has_tomogram"))
             w.setEnabled(has_t); w.setToolTip("" if has_t else "needs a tomogram")
             return w

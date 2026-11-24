@@ -165,3 +165,49 @@ def test_edit_points_in_the_window(window):
 def QtCore_mods():
     from PySide6 import QtCore
     return QtCore.Qt.NoModifier
+
+
+# ---- field of view per point in the movie (3.5.0 review): it must reach every frame, motion blur and the flight out ----
+
+def fov_spec(studio, fps=10, then=None):
+    spec = tr.default_spec(studio.ds); spec["output"] = dict(spec["output"], size=[320, 180], fps=fps)
+    P0 = [60.0, 60.0, 150.0]  # the camera stands still: only the field of view changes
+    part = sb.new_part("path", seconds=2, source=dict(kind="points", items=[]),
+                       waypoints=[dict(pos=P0, focal=FOC, fov=30.0), dict(pos=P0, focal=FOC, fov=60.0)])
+    spec["shots"] = [part] + ([then] if then else [])
+    return spec, part
+
+
+def test_a_field_of_view_change_is_not_a_frozen_movie(studio, tmp_path):
+    spec, part = fov_spec(studio)
+    job = tr.movie_frames(studio.ren, spec, str(tmp_path / "m.mp4"), poster=False)
+    imgs, frames = [], job.frames
+    for _, _, img in job:
+        imgs.append(img.copy())
+    main = [i for i, f in enumerate(frames) if f["part"] == part["id"] and f["phase"] == "main"]
+    changed = [i for i in main[1:] if abs(frames[i]["pose"].get("fov", 30.0) - frames[i - 1]["pose"].get("fov", 30.0)) > 0.1]
+    assert len(changed) > 5
+    repeated = [i for i in changed if np.array_equal(imgs[i], imgs[i - 1])]
+    assert not repeated, f"{len(repeated)} of {len(changed)} frames repeat the picture before them"
+
+
+def test_motion_blur_keeps_the_field_of_view(studio):
+    from tomoreveal.render import motion_blurred
+    spec, part = fov_spec(studio)
+    main = [f for f in sb.build_plan(spec, studio.ds).frames if f["part"] == part["id"] and f["phase"] == "main"]
+    s, nxt = main[-2], main[-1]
+    assert s["pose"]["fov"] > 55
+    size = (320, 180)
+    blur = motion_blurred(studio.ren, s, nxt, spec, size, False, False).astype(int)
+    sharp = studio.ren.draw(s, spec, size).astype(int)
+    at_30 = studio.ren.draw(dict(s, pose={k: v for k, v in s["pose"].items() if k != "fov"}), spec, size).astype(int)
+    assert np.abs(blur - sharp).mean() < 0.2 * np.abs(blur - at_30).mean()
+
+
+def test_the_flight_out_of_a_path_changes_the_field_of_view_gently(studio):
+    spec, part = fov_spec(studio, fps=30, then=sb.new_part("overview", seconds=1))
+    frames = sb.build_plan(spec, studio.ds).frames
+    end = [f for f in frames if f["part"] == part["id"]][-1]["pose"]["fov"]
+    fl = [f["pose"].get("fov", 30.0) for f in frames if f["part"] == spec["shots"][1]["id"] and f["phase"] == "transition"]
+    assert end == pytest.approx(60.0) and fl[0] > 58 and fl[-1] == pytest.approx(30.0, abs=0.5)
+    assert np.abs(np.diff([end] + fl)).max() < 2 * 30.0 / len(fl)  # eased over the whole flight, no jump back to 30 degrees

@@ -83,11 +83,19 @@ def view_framing(spec, shape, lo, hi, tilt, az):
     return float(z), [float(v) for v in want["c"] - base["c"]]
 
 
-def lerp_pose(a, b, u, d_az=None):
-    """Pose between a and b; the azimuth takes the shorter way round unless d_az (the turn from a to b) is given."""
+def lerp_pose(a, b, u, d_az=None, fov=None):
+    """Pose between a and b; the azimuth takes the shorter way round unless d_az (the turn from a to b) is given.
+    A field of view of its own (3.5: per point of a camera path) changes gradually too; fov is the movie's, for the
+    pose without one. The result has its own field of view only when a or b has one."""
     d = ((b["az"] - a["az"] + 180.0) % 360.0) - 180.0 if d_az is None else float(d_az)
-    return dict(c=a["c"] + (b["c"] - a["c"]) * u, tilt=a["tilt"] + (b["tilt"] - a["tilt"]) * u, az=a["az"] + d * u,
-                dist=a["dist"] * (b["dist"] / a["dist"]) ** u, scale=a["scale"] * (b["scale"] / a["scale"]) ** u)
+    out = dict(c=a["c"] + (b["c"] - a["c"]) * u, tilt=a["tilt"] + (b["tilt"] - a["tilt"]) * u, az=a["az"] + d * u,
+               dist=a["dist"] * (b["dist"] / a["dist"]) ** u, scale=a["scale"] * (b["scale"] / a["scale"]) ** u)
+    fa, fb = a.get("fov"), b.get("fov")
+    if fa is not None or fb is not None:
+        fa = float(fa if fa is not None else (fov if fov is not None else fb))
+        fb = float(fb if fb is not None else (fov if fov is not None else fa))
+        out["fov"] = fa + (fb - fa) * u
+    return out
 
 
 def smooth01(u):
@@ -664,7 +672,7 @@ def build_plan(spec, ds):
             b = nxt((m2 - 1) * (i / (n - 1)) ** k)["pose"]
         # the turn: the shorter way from where we leave to where the next part starts, plus however far that part has
         # turned on its own since (a spin can turn more than half a circle during the overlap)
-        p = lerp_pose(a, b, q, d_az=(((p1["az"] - a["az"] + 180.0) % 360.0) - 180.0) + (b["az"] - p1["az"]))
+        p = lerp_pose(a, b, q, d_az=(((p1["az"] - a["az"] + 180.0) % 360.0) - 180.0) + (b["az"] - p1["az"]), fov=fr.fov)
         if tr["path"] == "arc":  # fly a little higher in the middle
             da, ua = fr.axes(a["tilt"], a["az"]); db, _ = fr.axes(b["tilt"], b["az"])
             span = float(np.linalg.norm((a["c"] + a["dist"] * da) - (b["c"] + b["dist"] * db)))
@@ -804,7 +812,7 @@ def build_plan(spec, ds):
 
             def fly(u, p0=p0, p1=p1, e0=e0, old=old, oldmode=oldmode, s0=s0, s1=s1, tgt=tgt, mode=mode, cap=cap, A=A, m2=m2, nt=nt, nxt=nxt, tr=tr):
                 q = ease_curve(u, tr["ease_out_prev"], tr["ease_in_next"]); i = int(round(u * (nt - 1))) if nt > 1 else 0
-                d = dict(pose=flight_pose(i, nt, q, p0, p1, A, m2, nxt, tr) if (A or m2 or tr["path"] == "arc") else lerp_pose(p0, p1, q),
+                d = dict(pose=flight_pose(i, nt, q, p0, p1, A, m2, nxt, tr) if (A or m2 or tr["path"] == "arc") else lerp_pose(p0, p1, q, fov=fr.fov),
                          slice=s0 + (s1 - s0) * q)
                 if e0 > 0 and old is not None:  # hand over from the previous close-up
                     if u < 0.5:
@@ -881,7 +889,7 @@ def build_plan(spec, ds):
     if st["e"] > 0 and spec.get("return_to_overview", True):
         ramp.clear(); cur.update(shown, index=len(shots))  # the flight back belongs to the last part shown
         p0, e0, s0 = pose[0], st["e"], st["slice"]
-        emit(round(fps * CLOSEUP_TRANSITION), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u)), e=e0 * (1 - smooth01(u)),
+        emit(round(fps * CLOSEUP_TRANSITION), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u), fov=fr.fov), e=e0 * (1 - smooth01(u)),
                                                                slice=s0 + (base - s0) * smooth01(u), caption=""), "transition")
         st.update(target=None, e=0.0); pose[0] = ov()
         emit(max(1, round(fps * 0.5)), lambda u: {}, "pause")
@@ -1485,5 +1493,9 @@ def state_key(s):
         extra += (json.dumps(s["ann"], sort_keys=True),)
     if s.get("blend"):  # dissolves and fades between parts (3.5)
         extra += (s["blend"]["via"], s["blend"]["q"], state_key(s["blend"]["src"]))
+    if p.get("fov") is not None:  # field of view per point of a camera path (3.5)
+        extra += (round(float(p["fov"]), 3),)
+    if p.get("pos") is not None:  # camera paths and the 3.5 wiggle give the camera position and up direction themselves
+        extra += (tuple(np.round(np.asarray(p["pos"], float), 2)), tuple(np.round(np.asarray(p["up"], float), 4)))
     return extra + (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), oth,
             s["caption"], tuple(np.round(p["c"], 2)), round(p["tilt"], 3), round(p["az"] % 360.0, 3), round(p["dist"], 2))

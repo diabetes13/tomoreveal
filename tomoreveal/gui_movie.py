@@ -293,6 +293,7 @@ class MovieEditor(QtC.QObject):
             sub.addAction(QtG.QIcon(pm), name, lambda key=c["key"], name=name: self.add_closeup(key, name, after))
         sub.addSeparator()
         sub.addAction("an object I click in the preview...", lambda: self.pick_closeup(after))
+        sub.addAction("a region I draw in the preview...", lambda: self.win.start_region_pick(None, after or self.anchor()))
 
     def context_menu(self, pid, pos):
         if self.spec is None:
@@ -802,8 +803,18 @@ class PartsPanel(QtW.QWidget):
         pick = QtW.QPushButton("+ Click objects in the preview"); pick.setCheckable(True); pick.setChecked(self.win.multi_pick == pid)
         pick.setToolTip("Click objects to add them; click again to take one out; Shift-click adds the whole structure. Esc ends.")
         pick.toggled.connect(lambda on: self.win.start_multi_pick(pid) if on else self.win.end_multi_pick())
+        frame = QtW.QPushButton("Frame a region..."); frame.setToolTip(
+            "Draw a frame in the preview: the close-up shows only what is inside it, for example where two objects touch.")
+        frame.clicked.connect(lambda: self.win.start_region_pick(pid))
         h.addWidget(b); h.addWidget(pick); h.addStretch(1)
-        return w
+        out = QtW.QWidget(); v = QtW.QVBoxLayout(out); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2); v.addWidget(w)
+        h2 = QtW.QHBoxLayout(); h2.addWidget(frame)
+        if sb.part_region(p) is not None:
+            lab = QtW.QLabel("shows the frame you drew"); lab.setStyleSheet(DIM); h2.addWidget(lab)
+            clr = QtW.QToolButton(); clr.setText("×"); clr.setToolTip("Forget the drawn frame: frame the objects in focus again")
+            clr.clicked.connect(lambda: self.set(pid, "region", None, rebuild=True)); h2.addWidget(clr)
+        h2.addStretch(1); v.addLayout(h2)
+        return out
 
     def _single_target_rows(self, pid, p, form):
         win = self.win; ds = win.st.ds

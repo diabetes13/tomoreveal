@@ -4,6 +4,7 @@
 
 - **Fixed: a new close-up could add its object to an earlier close-up.** If "+ Click objects in the preview" was still on for one close-up, later clicks (also those meant for a new close-up) went into that first close-up. Only one way of clicking in the preview is now active at a time, and selecting another part ends it. You can still add objects to a close-up later.
 - **Close-ups can hide the other structures:** "Other structures" now offers grey, darker, unchanged colour and **hidden**.
+- **Close-up of a frame you draw:** "Frame a region..." in a close-up's settings (or + Add part ▸ Close-up ▸ a region I draw in the preview) lets you drag a frame over the preview; the close-up then shows only what is inside it, for example where two objects touch, instead of whole objects.
 - **New close-ups look from the top** (tilt 0°). Close-ups in older projects keep their automatic tilt.
 - **Timeline zoom is easy to find:** a zoom bar (−, slider, +, Fit all, Zoom to part, Compact), an overview strip of the whole movie, Ctrl + mouse wheel or touchpad pinch to zoom, the wheel or a two-finger swipe to scroll, Ctrl + minus / plus / 0. The zoom is saved with the project.
 - **Opacity makes a structure see-through.** Lowering a structure's opacity used to make it vanish or only lighten its outline; now it becomes see-through, its outline fades with it, and 0 % hides it completely.

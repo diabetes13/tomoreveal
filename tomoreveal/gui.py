@@ -86,12 +86,14 @@ def build_gui(args):
 
     class Preview(QtW.QLabel):
         clicked = QtC.Signal(float, float); dragged = QtC.Signal(int, int); released = QtC.Signal(); wheel = QtC.Signal(int)
+        boxed = QtC.Signal(float, float, float, float)  # a frame drawn with the mouse (fractions of the image)
 
         def __init__(self):
             super().__init__(); self.setAlignment(QtC.Qt.AlignCenter); self.setWordWrap(True)
             self.setMinimumSize(320, 180); self.setSizePolicy(QtW.QSizePolicy.Ignored, QtW.QSizePolicy.Ignored)
             self.setStyleSheet("background: palette(base); color: palette(placeholder-text); border-radius:8px; padding:6px")
             self._img = None; self._press = None; self._moved = False; self.overlay = None; self._ov = False
+            self.box_mode = False; self._box = None  # drawing a frame for a close-up of a region
             self.setMouseTracking(True)
             self.note = QtW.QLabel(self); self.note.setStyleSheet(
                 "background: rgba(0, 0, 0, 160); color: #ffffff; border-radius: 4px; padding: 3px 8px")
@@ -136,8 +138,19 @@ def build_gui(args):
             super().paintEvent(e)
             if self.overlay is not None and self.image_px():
                 p = QtG.QPainter(self); self.overlay.paint(p, self.to_widget); p.end()
+            if self._box is not None and self.image_px():
+                p = QtG.QPainter(self); r = QtC.QRectF(self.to_widget(*self._box[0]), self.to_widget(*self._box[1])).normalized()
+                p.fillRect(r, QtG.QColor(255, 210, 63, 50))
+                for col, dash in ((QtG.QColor(0, 0, 0), QtC.Qt.SolidLine), (QtG.QColor(255, 210, 63), QtC.Qt.DashLine)):
+                    pen = QtG.QPen(col, 2 if dash == QtC.Qt.SolidLine else 1.5, dash); p.setPen(pen); p.drawRect(r)
+                p.end()
 
         def mousePressEvent(self, e):
+            if self.box_mode and e.button() == QtC.Qt.LeftButton:
+                f = self.frac(e.position().toPoint())
+                if f:
+                    self._box = [f, f]; self.update()
+                return
             if e.button() == QtC.Qt.LeftButton:
                 pos = e.position().toPoint()
                 self._ov = bool(self.overlay and self.overlay.press(self.frac(pos), e.modifiers()))
@@ -145,6 +158,9 @@ def build_gui(args):
 
         def mouseMoveEvent(self, e):
             pos = e.position().toPoint()
+            if self._box is not None:
+                f = self.frac(pos, free=True); self._box[1] = (min(max(f[0], 0.0), 1.0), min(max(f[1], 0.0), 1.0)); self.update()
+                return
             if self._press is None:
                 if self.overlay is not None:
                     self.overlay.hover(self.frac(pos))
@@ -166,6 +182,11 @@ def build_gui(args):
                 self.overlay.double(self.frac(e.position().toPoint()))
 
         def mouseReleaseEvent(self, e):
+            if self._box is not None:
+                (a, b), (c, d) = self._box; self._box = None; self.update()
+                if abs(c - a) > 0.01 and abs(d - b) > 0.01:
+                    self.boxed.emit(min(a, c), min(b, d), max(a, c), max(b, d))
+                return
             if self._press is None:
                 return
             if self._ov:
@@ -239,6 +260,7 @@ def build_gui(args):
             self.pick_for = None       # (part id, structure key) while picking the object of a close-up
             self.multi_pick = None     # part id while clicking objects for a close-up of several objects
             self.waypoint_pick = None  # part id while clicking points for a camera path
+            self.region_pick = None    # (part id or None for a new close-up, insert after) while drawing a frame
             self.path_pick = None      # part id while clicking the object a camera path follows
             self._path_worker = None
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
@@ -458,6 +480,7 @@ def build_gui(args):
             self.prev.overlay = OverlayDrag(self)
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
+            self.prev.boxed.connect(self.on_boxed)
             rl.addWidget(self.prev, 1)
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
@@ -1094,6 +1117,8 @@ def build_gui(args):
                 self.end_waypoint_pick()
             if self.path_pick is not None and self.path_pick != keep:
                 self.path_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
+            if self.region_pick is not None and (self.region_pick[0] is None or self.region_pick[0] != keep):
+                self.end_region_pick()
 
         def open_part(self, pid):
             """Double-click on a block: show the part's settings in the Movie tab."""
@@ -1139,6 +1164,39 @@ def build_gui(args):
                 self.parts_panel.fill_details(pid)
             self.req = {"at": {"part": pid, "u": 0.5}}; self.schedule(0); self.say("")
 
+        def start_region_pick(self, pid=None, after=None):
+            """Draw a frame in the preview: the close-up `pid` (or a new close-up after `after`) frames what is inside."""
+            self.pick_btn.setChecked(False); self.end_picks()
+            self.region_pick = (pid, after if pid is None else None)
+            self.prev.box_mode = True; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.say("Draw a frame around what the close-up should show: press the mouse button and drag. Esc cancels.")
+
+        def end_region_pick(self):
+            self.region_pick = None; self.prev.box_mode = False; self.prev._box = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
+
+        def on_boxed(self, fx0, fy0, fx1, fy1):
+            if self.region_pick is None or self.st.ren is None or self.gen is not None:
+                self.end_region_pick(); return
+            pid, after = self.region_pick; self.end_region_pick()
+            plan, i = self.st.plan_frame(self.spec_for(), {"frame": self.frame})
+            self.st.ren.draw(plan.frames[i], self.spec_for(), self.st.ren.size, annotate=False)  # the frame that was drawn
+            box = self.st.ren.region_box(fx0, fy0, fx1, fy1)
+            if box is None:
+                self.say("There is nothing inside that frame. Draw it around structures or the slice.", "err"); return
+            region = dict(lo=[round(float(v), 2) for v in box[0]], hi=[round(float(v), 2) for v in box[1]])
+            if pid is None:
+                from .storyboard import make_target, new_part
+                part = new_part("focus", target=make_target([]), others=dict(colour="keep", opacity=1.0), region=region,
+                                motion="wiggle", caption="")
+                self.editor.insert(part, after)
+                self.say("Added a close-up of the frame you drew.", "ok")
+            else:
+                part = self.parts_panel.part(pid)
+                if part is None:
+                    return
+                part["region"] = region; self.editor.commit(select=pid, show=pid)
+                self.say("The close-up now shows the frame you drew.", "ok")
+
         def start_waypoint_pick(self, pid):
             self.pick_btn.setChecked(False); self.end_picks(keep=pid); self.waypoint_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
             self.say("Click a structure or the slice to add a point. Press Esc when done.")
@@ -1154,8 +1212,9 @@ def build_gui(args):
             self.say("Click the object the camera should follow.")
 
         def keyPressEvent(self, e):
-            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick):
-                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.pick_btn.setChecked(False); return
+            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick):
+                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.pick_btn.setChecked(False)
+                return
             super().keyPressEvent(e)
 
         def _multi_click(self, fx, fy):

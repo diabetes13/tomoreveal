@@ -175,3 +175,42 @@ def test_hide_the_others_and_start_from_the_top(studio):
     back = sb.set_others_choice(part["others"], colour="grey")
     assert back == dict(colour="grey", opacity=1.0)  # the opacity comes back when another colour is chosen
     assert sb.others_choice("hide") == ("hide", 1.0)
+
+
+def test_region_box_matches_what_is_seen(studio):
+    ds = studio.ds; spec = tr.default_spec(ds)
+    f = [x for x in tr.build_timeline(spec, ds)[0] if x["type"] == "overview" and x["phase"] == "main"][0]
+    studio.ren.draw(f, spec, (480, 270), annotate=False)
+    lo, hi = studio.ren.region_box(0.4, 0.4, 0.6, 0.6)
+    for fx, fy in ((0.45, 0.45), (0.5, 0.5), (0.55, 0.55)):
+        p = studio.ren.pick_point(fx, fy)
+        if p is not None:
+            assert np.all(p >= lo - 3) and np.all(p <= hi + 3), (p, lo, hi)
+    whole = np.array(ds.shape[::-1], float)
+    assert np.all(hi - lo < 0.6 * whole[:2].max())  # much smaller than the whole volume
+    assert studio.ren.region_box(0.0, 0.0, 0.004, 0.004) is None
+
+
+def test_close_up_of_a_drawn_frame(window):
+    app, win, errs = window
+    win.prev_timer.stop(); win.do_preview()
+    for _ in range(10):
+        app.processEvents()
+    n = len(win.spec["shots"]); win.start_region_pick(None, win.spec["shots"][-1]["id"])
+    assert win.prev.box_mode
+    win.on_boxed(0.42, 0.42, 0.58, 0.58)
+    assert not win.prev.box_mode and len(win.spec["shots"]) == n + 1
+    part = win.spec["shots"][-1]
+    assert part["type"] == "focus" and sb.part_region(part) is not None and not sb.target_items(part["target"])
+    plan = sb.build_plan(win.spec_for(), win.st.ds)
+    assert part["id"] not in plan.problems
+    pose = [f["pose"] for f in plan.frames if f["part"] == part["id"] and f["phase"] == "main"][0]
+    lo, hi = sb.part_region(part)
+    assert np.allclose(pose["c"], (lo + hi) / 2)
+    ov = [f["pose"] for f in plan.frames if f["type"] == "overview"][0]
+    assert pose["dist"] < 0.5 * ov["dist"]  # closes in on the frame
+    assert sb.part_name(part, win.spec, win.st.ds) == "Close-up: framed region"
+    win.parts_panel.open(part["id"])  # its settings build without errors
+    win.start_region_pick(part["id"]); win.on_boxed(0.45, 0.45, 0.5, 0.5)
+    assert not np.allclose(sb.part_region(win.spec["shots"][-1])[0], lo)
+    assert not errs, errs

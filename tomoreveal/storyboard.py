@@ -87,6 +87,23 @@ def target_items(tgt):
     return []
 
 
+def part_region(part):
+    """The box (lo, hi) in voxels (x, y, z) of a close-up framed on a region drawn in the preview (3.5), or None."""
+    r = part.get("region") if isinstance(part, dict) else None
+    if not isinstance(r, dict) or r.get("lo") is None or r.get("hi") is None:
+        return None
+    lo, hi = np.asarray(r["lo"], float), np.asarray(r["hi"], float)
+    return np.minimum(lo, hi), np.maximum(np.maximum(lo, hi), np.minimum(lo, hi) + 1.0)
+
+
+def focus_box(part, ds, pad=True):
+    """The box a close-up frames: the drawn region when there is one, else the box of the objects in focus."""
+    r = part_region(part)
+    if r is not None:
+        return r
+    return ds.targets_box(part.get("target") or {}, pad=pad)
+
+
 def make_target(items):
     """A close-up target from [(structure key, component or None)]."""
     return {"items": [{"structure": k, "component": None if c is None else int(c)} for k, c in items]}
@@ -346,6 +363,8 @@ def part_name(p, spec=None, ds=None):
         return f"Overview ({ {'rock': 'rock', 'spin': 'full spin', 'none': 'still'}.get(p.get('motion'), p.get('motion')) })"
     if t == "focus":
         items = target_items(p.get("target"))
+        if part_region(p) is not None and not items:
+            return f"Close-up: {p.get('caption') or 'framed region'}"
         names = []
         if spec is not None and ds is not None:
             for key, _ in items:
@@ -553,11 +572,11 @@ def build_plan(spec, ds):
         elif typ == "focus":
             tgt = part.get("target") or {}
             try:
-                blo, bhi = ds.targets_box(tgt)
+                blo, bhi = focus_box(part, ds)
             except (KeyError, IndexError, TypeError, ValueError):
-                problems[part.get("id")] = "structure not loaded"
+                problems[part.get("id")] = "structure not loaded" if target_items(tgt) else "choose what to show: objects, or draw a frame"
                 continue
-            if not any(class_spec(spec, ds, ds.id_of(key)).get("show", True) for key, _ in target_items(tgt)):  # every object is off
+            if target_items(tgt) and not any(class_spec(spec, ds, ds.id_of(key)).get("show", True) for key, _ in target_items(tgt)):  # every object is off
                 problems[part.get("id")] = "structure switched off in the Structures tab"
                 continue
             start_fade(part)
@@ -694,7 +713,7 @@ def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
     if m != "wiggle" and not push.get("on") and hl["kind"] == "none" and eff["kind"] == "none":
         return None
     T = max(1e-6, (n - 1) / fps); tgt = part.get("target") or {}
-    base = fp(); obj_lo, obj_hi = ds.targets_box(tgt, pad=False)
+    base = fp(); obj_lo, obj_hi = focus_box(part, ds, pad=False)
     lo, hi = np.asarray(obj_lo, float) - 0.5, np.asarray(obj_hi, float) + 0.5
     centre = (lo + hi) / 2; radius = float(np.linalg.norm(hi - lo)) / 2
     axis = ds.main_axis(tgt) if eff["kind"] == "section" and eff.get("direction") == "axis" else None

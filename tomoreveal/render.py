@@ -407,6 +407,33 @@ class Renderer:
             self.slice_actor.SetPickable(False)
         return np.array(pk.GetPickPosition()) if ok and pk.GetActor() is not None else None
 
+    def region_box(self, fx0, fy0, fx1, fy1, max_points=40000):
+        """The 3D box (lo, hi) in voxels (x, y, z) around what is visible inside a rectangle of the last frame (fractions
+        of the frame), from the depth buffer: structures and the slice there, not the empty background. None if the
+        rectangle shows nothing. Used to frame a close-up on a region drawn in the preview (3.5)."""
+        W, H = self.size
+        x0, x1 = sorted((int(round(min(max(fx0, 0), 1) * (W - 1))), int(round(min(max(fx1, 0), 1) * (W - 1)))))
+        y0, y1 = sorted((int(round((1 - min(max(fy0, 0), 1)) * (H - 1))), int(round((1 - min(max(fy1, 0), 1)) * (H - 1)))))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return None
+        vtk = self.vtk; arr = vtk.vtkFloatArray()
+        self.pl.ren_win.GetZbufferData(x0, y0, x1, y1, arr)
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+        z = vtk_to_numpy(arr).reshape(y1 - y0 + 1, x1 - x0 + 1)
+        ys, xs = np.nonzero(z < 0.99999)
+        if len(xs) < 10:
+            return None
+        step = max(1, len(xs) // max_points); ys, xs = ys[::step], xs[::step]
+        d = z[ys, xs].astype(float)
+        cam = self.pl.renderer.GetActiveCamera()
+        m = cam.GetCompositeProjectionTransformMatrix(W / H, -1, 1)
+        M = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)]); Minv = np.linalg.inv(M)
+        ndc = np.c_[2 * (xs + x0 + 0.5) / W - 1, 2 * (ys + y0 + 0.5) / H - 1, 2 * d - 1, np.ones(len(d))]
+        w = ndc @ Minv.T; pts = w[:, :3] / w[:, 3:4]
+        lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
+        c = (lo + hi) / 2; half = np.maximum((hi - lo) / 2, 3.0)
+        return c - half, c + half
+
     # ---------- close-up animations (fx) ----------
     def _fx_mesh(self, k, cid, kind="item"):
         """Surfaces used by the effects, cached: the item itself, the item with outward-facing polygons (for capped

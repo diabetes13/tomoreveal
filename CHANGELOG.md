@@ -1,6 +1,6 @@
 # Change log
 
-## 3.5.0 (in progress)
+## 3.5.0
 
 - **Fixed: a new close-up could add its object to an earlier close-up.** If "+ Click objects in the preview" was still on for one close-up, later clicks (also those meant for a new close-up) went into that first close-up. Only one way of clicking in the preview is now active at a time, and selecting another part ends it. You can still add objects to a close-up later.
 - **Close-ups can hide the other structures:** "Other structures" now offers grey, darker, unchanged colour and **hidden**.

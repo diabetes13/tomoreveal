@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.4.1. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.5.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -191,7 +191,21 @@ Three buttons pass what you found to the movie: **Start the slice sweep here**, 
 
 ### 4. Set the view
 
-In the **Movie** tab, set the **main view**: click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. You can also drag in the preview to rotate, and scroll to zoom.
+In the **Movie** tab, set the **main view**: click a view button, or use the **Tilt**, **Rotate** and **Zoom** bars. Or move around in the preview with the mouse:
+
+| In the preview | Does |
+|---|---|
+| Left drag | Rotates |
+| Right drag (or middle drag, or Shift + left drag) | Moves the view sideways and up and down; the spot under the mouse stays under it |
+| Mouse wheel | Zooms towards the spot under the mouse |
+| Ctrl + right drag up or down | Zooms smoothly |
+| Double-click a structure | The view turns around that spot from now on |
+| Right click (without moving) | A menu: centre here, look from above / the side / the front, fit everything, fit the clip box, zoom to / hide / show only / close-up of the structure under the mouse, add an arrow or text here, use this view for the selected part, undo or redo a view change |
+| Arrow keys, Shift + arrow keys | Move, rotate (click the preview first) |
+| + and −, F, Home | Zoom in and out, fit everything, back to the main view |
+| 1, 3, 7 | Front, side, top view |
+
+The **?** in the corner of the preview lists these. **View ▸ Moving around in the preview** can swap the left and right buttons or turn the mouse wheel the other way.
 
 ### 5. Clip the tomogram
 
@@ -227,7 +241,10 @@ The default movie has three parts: **Slide up through the slices**, **Slide back
 | Drag the right edge of a block | Changes its duration (0.1 s steps; with Shift 0.5 s) |
 | Drag a block sideways | Moves it; Esc cancels |
 | Right-click a block | Add part after, Duplicate, Split here, Move left, Move right, Switch off, Delete |
-| Ctrl + mouse wheel | Zooms in time; **Fit** shows the whole movie again |
+| Ctrl + mouse wheel, touchpad pinch, Ctrl + plus / minus | Zooms in time, around the mouse |
+| Mouse wheel, Shift + wheel, two-finger swipe, middle drag | Scrolls |
+| Ctrl + 0, or Shift + Z | Shows the whole movie (**Fit all**) |
+| Drag either end of a transition | Starts it before the previous part ends, or lets it run into the next part (overlap) |
 | Left / Right arrow | One frame back / forward (with Shift: one second) |
 | Up / Down arrow | Previous / next part |
 | Home / End | Start / end of the movie |
@@ -238,6 +255,10 @@ The default movie has three parts: **Slide up through the slices**, **Slide back
 | Ctrl+Z, Ctrl+Shift+Z (or Ctrl+Y) | Undo, redo |
 
 The keys work while the timeline has the focus (click on it first), so they never change the movie while you type a caption.
+
+**Zoom**: the bar at the right end of the timeline has **−**, a slider, **+**, **Fit all**, **Zoom to part** and **Compact** (lower blocks for long movies). When you are zoomed in, a thin strip above the timeline shows the whole movie with a light box for the part you see: drag the box to scroll, drag its edges to zoom, click elsewhere to jump there. Very short parts merge into a grey "several parts" mark when zoomed out; its tooltip lists them. The zoom is saved with the project.
+
+![The timeline zoomed in, with the overview strip](docs/images/17-timeline-zoom.png)
 
 **Play** plays the movie in the preview from the playhead, in real time. When drawing is slow (large tomograms, software rendering), it skips frames to keep time; the movie file always has every frame.
 
@@ -256,6 +277,17 @@ The **Movie** tab lists the same parts, one line each. Click a line to open its 
 
 Every part also has **On the picture**: show or hide the legend, slice number and scale bar during this part only.
 
+**Transitions.** Each part's settings end with "Transition from part 3 to part 4":
+
+- **Kind**: camera flight, cut, cross-dissolve, fade through black or white, and its length (automatic, or seconds).
+- **Leave / arrive**: how gently the camera leaves the previous part and arrives at this one (sudden, gentle, very gentle); the small picture shows the speed.
+- **Overlap**: start the transition before the previous part ends, or let this part's own motion start before the transition ends (also by dragging the ends of the transition on the timeline).
+- **Flight path**: straight, or an arc a little higher in the middle.
+
+Slides, spins and orbits also have **Slow down at the end**.
+
+![A transition and its settings](docs/images/18-transition.png)
+
 ![A close-up open in the Movie tab](docs/images/04-closeup.png)
 
 #### Close-ups
@@ -265,14 +297,16 @@ Every part also has **On the picture**: show or hide the legend, slice number an
 - To change what a close-up shows, open it and choose another **Structure** or **Object** from the lists. The caption follows the structure unless you typed your own.
 - A close-up of a structure that you switched off in the Data tab stays in the list, marked "structure not loaded", and is left out of the movie until the structure is back.
 - **Several objects together**: open the close-up, tick whole structures under **Structures in focus**, or click **+ Click objects in the preview** and click objects one by one (click again to take one out, Shift-click for the whole structure, Esc when done). The camera frames all of them; each keeps its colour. **Make a close-up for each** (in the part's ⋮ menu) turns them into one close-up each, a quick tour.
-- **Other structures**: their colour (grey, darker, unchanged) and their opacity (0 % hides them).
+- **A close-up of a frame you draw**: **Frame a region...** in a close-up's settings (or **+ Add part > Close-up of > a region I draw in the preview**), then drag a frame over the preview: the close-up shows only what is inside it, for example where two objects touch.
+- **Other structures**: grey, darker, unchanged colour, or **hidden**, and their opacity.
+- New close-ups look from the top (Tilt 0°). **Keep zoom steady** keeps the camera at one distance, so the object does not grow and shrink while the camera moves.
 - **Vignette**: darker edges around the objects in focus, as set in the Look tab or for this close-up only, with an optional **blur** of what is nearer or further away.
 
 #### Close-up animations
 
 They can be combined:
 
-- **Camera movement: wiggle**: the camera circles slightly around the object, so its 3D shape shows while it stays in place.
+- **Camera movement: wiggle**: the camera circles slightly around the object, so its 3D shape shows while it stays in place. It starts and ends at rest, and fits whole circles into the close-up so it ends where it began. Choose the size, the speed (slow to fast) and the shape: circle, figure eight, or drift (slow, never repeating).
 - **Camera push-in**: the camera moves slowly closer (it never goes so close that the objects leave the picture).
 - **Highlight**: the objects pulse brighter, or get a glowing outline.
 - **Object effect: cross-section sweep**: a cut moves through the objects and shows their inside, for example the lumen of a vesicle. With **move the tomogram slice with the cut**, the slice follows the cut, so you see the density inside the object exactly where it is cut. The cut can also come from the viewer's side or run along the object's longest axis.
@@ -291,6 +325,17 @@ They can be combined:
 **+ Add part > Camera path through points** makes the camera fly through points that you set: **Add point at the current view** stores where the camera is in the preview; **Add point by clicking in the preview** picks a spot on a structure or on the slice, which the camera passes looking at it. Each point can **stop** the camera for some seconds. In the preview, drag a numbered point to move it, or right-click it to delete it.
 
 For both: **Camera** sets the distance and the side the camera looks from, **Looks** whether it looks at the path or a little ahead and whether it moves at even speed or slows down at the ends. The path is drawn in the preview while the part is selected, never in the movie.
+
+**Following a structure calmly**: **Steadiness** chooses close (follows the bends), steady (the default) or very steady, with a slider for fine control. The camera glides on a smoothed rail at a constant height, keeps the picture upright and turns at most 20° per second. **Edit as points** turns the path into a path through points you can adjust.
+
+**The path editor** (a path through points, while its part is selected):
+
+- The path is drawn as a thin line with arrows, the points as numbered circles (green **S**, red **E**), each with a small camera mark and a crosshair where it looks.
+- Click on a structure or the slice to add a point after the selected one. Drag a point to move the camera (with Alt: up and down), and drag its crosshair to change where it looks. Double-click a point to look from there. Esc ends editing.
+- Click a point to open its panel: **Zoom** and **Field of view** at that point, **Keep** this zoom for the next points or only here, and **Keep the size the same** when the field of view changes (a dolly zoom). Ctrl + wheel and Alt + wheel change them.
+- The list of points in the Movie tab has a description, the zoom (grey with a chain when it is kept from an earlier point), the speed to the next point and **stop gently**. There is also one zoom for all points and **Play path**.
+
+![The path editor with numbered points](docs/images/19-path-editor.png)
 
 ![A camera path through three points](docs/images/15-camera-path.png)
 
@@ -319,15 +364,39 @@ The Look tab group **On the picture**, and the buttons above the preview, switch
 
 ![Moving the legend; the scale bar](docs/images/11-overlays.png)
 
+### Arrows and text
+
+In the Look tab, **Arrows and text** lists them:
+
+- **+ Add arrow**, then click the spot the arrow should point to (or right-click in the preview ▸ **Add arrow here**). The tip stays on that spot while the camera moves. The label is the structure's name; type over it.
+- **+ Add text** adds a text box; drag it into place.
+- In the preview: drag an arrow's tail to turn it or make it longer, and drag its tip to another spot. Right-click an arrow or a text box for its shape (arrow, thin arrow, pointer, ring, bracket), box, colour, Duplicate, Copy to another part, Delete, and **Make all arrows look like this one**. Ctrl + click selects several; with several text boxes, **Align** lines them up.
+- Each item has its own **from** and **to** time in its part (**⏵** and **⏹** take the playhead). It fades in, grows or pops. Its bar on the timeline can be dragged.
+- Arrows hide while their structure is switched off, not yet revealed by the slide, outside the clip box, or out of the picture. Labels never cover each other.
+
+![Two arrows with labels](docs/images/20-arrows.png)
+
 ### 9. Title and end cards
 
 **+ Add part > Title card** puts a card with the tomogram's name at the start; **End card (thank you)** puts one at the end; **Blank card** puts one at the playhead. Open the card in the Movie tab to set its **background** (a colour, a gradient, a picture, or see-through), its **blocks** of text (with line breaks, size, colour, bold) and pictures (logos with their transparency), and its **fades**: fade in from black, fade out, or dissolve into the next part. Drag the blocks in the preview to place them. Cards hide the legend, slice number and scale bar unless you switch them on for the card.
 
 ![A title card](docs/images/12-title-card.png)
 
-### 10. Lighting, shadows and smooth edges
+### 10. Look, lighting, shadows and smooth edges
 
 In the Look tab:
+
+- **Look**: one choice sets several things at once:
+  - **Classic**: as in earlier versions.
+  - **Soft**: white background, soft shadows in creases, thin outlines, far things paler. New projects start with Soft.
+  - **Glass membranes**: Soft with pale, see-through membranes.
+  - **Illustration**: thick black outlines.
+  - **On the tomogram**: the structures over the grey slice.
+
+  You can then change **Soft shadows** (strength and reach; they are part of the surfaces, so they never flicker in movies), **Outlines** (thin, medium, thick; dark, black or a darker shade; also between touching structures), **See-through membranes** (which structures count as membranes: **Treat as membrane** in the Structures tab), **Depth fade**, **Richer colours on white backgrounds** and **Matte lighting**. The look then shows "Custom". **Background** offers black, white, light grey, dark grey, a gradient, or the tomogram slice.
+- **Opacity** of a structure (Structures tab) makes it see-through, and its outline fades with it.
+
+![The five looks](docs/images/21-looks.png)
 
 - **Lighting**: the **Preset** Default is the lighting of earlier versions. Simple uses one light; Soft adds soft shadows in creases (ambient occlusion; it works on the whole picture); Full adds slice shadows; Flat shows colours only. Set the **direction** with the sliders or by dragging on the ball, and **Brightness**, **Fill light**, **Ambient** and **Shininess**. **Light moves with the camera** keeps the light where the viewer is; without it, the light stays in place and highlights move when the camera turns.
 - **Shadows**: **Structures cast shadows on the tomogram slice**, with **Strength** and **Softness**, lit from the direction above. **Shadows between structures** needs a graphics card and is offered only where TomoReveal's test of the graphics card passes.
@@ -343,6 +412,7 @@ At the end of the **Movie** tab, select the quality, the name and the folder.
 - **File size**: Balanced, Larger (best quality) or Smaller (about a quarter smaller at nearly the same quality). The resolution never changes.
 - **Codec**: H.264 plays everywhere. **H.265** gives about half the file size at the same quality; it plays on recent Macs, iPhones and in VLC, but Windows may need the HEVC extension and some PowerPoint versions cannot play it. Check before a talk.
 - Transparent backgrounds work in Keynote, Final Cut, Premiere and DaVinci Resolve. Check your presentation program before relying on it.
+- **Frame rate** 60 frames/s gives smoother motion (files about 1.6 times larger, rendering twice as long). **Motion blur** blurs fast-moving detail a little, as a camera would; it renders 4 pictures per frame, so it is used for the movie only.
 - The **estimated file sizes** for every quality and ticked format appear under these choices a few seconds after you stop changing settings. They come from a few frames of your movie; "rough" ones are scaled from HD.
 
 Click **Make movie**. The movie is exactly what the timeline shows. A bar shows the progress and the time that remains. When the movie is complete, the real sizes appear next to the estimates; click **Play movie** to open it in your video player, or **Show folder**.

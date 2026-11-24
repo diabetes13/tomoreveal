@@ -597,7 +597,7 @@ def build_gui(args):
                                     "camera moves. Renders 4 pictures per frame (4 times slower); used for the movie only, not the preview.")
             self.blur_cb.toggled.connect(lambda on: self.spec is not None and (self.spec["output"].__setitem__("motion_blur", bool(on)),
                                                                               self.schedule()))
-            grid.addWidget(self.fps_cb, 6, 2); grid.addWidget(self.blur_cb, 6, 3, 1, 2)
+            grid.addWidget(QtW.QLabel("Smoother"), 7, 0); grid.addWidget(self.fps_cb, 7, 1); grid.addWidget(self.blur_cb, 7, 2, 1, 3)
             self.go_btn = QtW.QPushButton("Make movie"); self.go_btn.setStyleSheet("font-weight:600; padding:6px 18px"); self.go_btn.clicked.connect(self.make_movie)
             self.cancel_btn = QtW.QPushButton("Cancel"); self.cancel_btn.clicked.connect(self.cancel_render)
             self.open_btn = QtW.QPushButton("Play movie"); self.open_btn.clicked.connect(lambda: self._open(self.last_movie))
@@ -605,9 +605,9 @@ def build_gui(args):
             row = QtW.QHBoxLayout()
             for w in (self.go_btn, self.cancel_btn, self.open_btn, self.dir_btn):
                 row.addWidget(w)
-            row.addStretch(1); grid.addLayout(row, 7, 0, 1, 5)
-            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 8, 0, 1, 5)
-            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 9, 0, 1, 5)
+            row.addStretch(1); grid.addLayout(row, 8, 0, 1, 5)
+            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 9, 0, 1, 5)
+            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 10, 0, 1, 5)
             mk.addWidget(g); mk.addStretch(1)
             split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([560, 920])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)

@@ -42,6 +42,20 @@ def software_rendering_available():
     return bool(ctypes.util.find_library("OSMesa") or glob.glob(os.path.join(sys.prefix, "lib", "libOSMesa*")))
 
 
+PEELS = 10  # layers of see-through surfaces drawn correctly
+
+
+def set_opacity(act, op):
+    """Opacity of a structure's actor (3.5 phase 1A). Opacity 0 hides it, so its outline (which follows the actor's
+    visibility and opacity) and its shadow go too. A see-through closed surface would show its near and its far wall,
+    so 40 % would look like 64 %: see-through surfaces draw only the walls that face the camera. Our surfaces are wound
+    inwards, so those are the faces VTK calls back faces, and the front faces are culled."""
+    op = float(min(1.0, max(0.0, op)))
+    pr = act.GetProperty(); pr.SetOpacity(op); pr.SetFrontfaceCulling(op < 0.999)
+    if op <= 0.002:
+        act.SetVisibility(False)
+
+
 class Renderer:
     def __init__(self, ds, headless=False):
         if headless and software_rendering_available():
@@ -55,6 +69,7 @@ class Renderer:
         self._markers, self._path_actors, self.preview_part = [], [], None
         self._slice_grey, self._shadow_key = None, None
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
+        self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
         self.img = pv.ImageData(dimensions=(nx, ny, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
         self.img.point_data["I"] = np.zeros(nx * ny, np.uint8); self._slice_key = None
@@ -145,7 +160,7 @@ class Renderer:
                 with warnings.catch_warnings():  # with OSMesa, VTK uses SSAA for FXAA and says so
                     warnings.simplefilter("ignore")
                     self.pl.enable_anti_aliasing(mode)
-            self.aa = mode
+            self.aa = mode; self._ms_aa = self.pl.ren_win.GetMultiSamples()
         bg = style.get("bg", "#000000")
         if bg != self.bg:
             self.pl.set_background(hex2rgb(bg)); self.bg = bg
@@ -193,7 +208,7 @@ class Renderer:
                 to = (0.27, 0.27, 0.27) if ocol == "grey" else tuple(v * 0.3 for v in col) if ocol == "darken" else col
                 col = tuple(a + (b - a) * e for a, b in zip(col, to))
                 op *= 1.0 - e * (1.0 - oop); act.SetVisibility(op > 0.002)
-            act.GetProperty().SetOpacity(op); translucent |= op < 0.999 and act.GetVisibility()
+            set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
         translucent |= self._apply_styles(spec, lk, all_op)
         for act in self.comp_actors.values():
@@ -207,14 +222,12 @@ class Renderer:
                 act.SetVisibility(True)
                 act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
                 op = float(min(1.0, max(0.0, class_spec(spec, ds, tid).get("opacity", 1.0)))) * all_op
-                act.GetProperty().SetOpacity(op); translucent |= op < 0.999
+                set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
         translucent |= self._apply_fx(s.get("fx") or {}, items, spec, e, keep, all_op)
         # Depth peeling only while some structure is see-through and the slice is opaque or hidden: with OSMesa (VTK 9.6)
         # peeling plus a see-through slice gives an all-black frame when drawn without anti-aliasing (3.2 and 3.4 pitfall).
         translucent = translucent and not (show_slice and float(s["slice"]) < 0.999)
-        if translucent != self.peeling:
-            self.pl.enable_depth_peeling(4) if translucent else self.pl.disable_depth_peeling()
-            self.peeling = translucent
+        self._set_peeling(translucent)
         # camera
         p = s["pose"]; fr = Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
         d, up = fr.axes(p["tilt"], p["az"]); cam = self.pl.camera
@@ -249,6 +262,21 @@ class Renderer:
         if self._markers:
             img = self._draw_markers(img, size)
         return img
+
+    def _set_peeling(self, on):
+        """Depth peeling for see-through structures, set up by hand (3.5 phase 1A). PyVista's enable_depth_peeling()
+        leaves multisampling on, and peeling with multisampling drew every see-through mesh invisible (OSMesa, VTK 9.6):
+        so multisampling is off while peeling, and back to what the anti-aliasing mode wants afterwards."""
+        rw, ren = self.pl.ren_win, self.pl.renderer
+        rw.SetMultiSamples(0 if on else self._ms_aa)
+        if on == self.peeling:
+            return
+        if on:
+            rw.SetAlphaBitPlanes(1)
+            ren.SetUseDepthPeeling(1); ren.SetMaximumNumberOfPeels(PEELS); ren.SetOcclusionRatio(0.0)
+        else:
+            ren.SetUseDepthPeeling(0)
+        self.peeling = on
 
     def _vignette_state(self, s, spec, lk, size):
         """Vignette (and background blur) of this frame, or None: the close-up's own settings, else the Look tab's."""
@@ -449,7 +477,7 @@ class Renderer:
                 h, sat, v = rgb_to_hsv(*pr.GetColor()); v = min(1.0, v * (1 + 0.35 * float(fx["pulse"])))
                 pr.SetColor(*hsv_to_rgb(h, sat, v))
             if "fade" in fx:
-                pr.SetOpacity(pr.GetOpacity() * float(fx["fade"])); act.SetVisibility(act.GetVisibility() and fx["fade"] > 0.002)
+                pr.SetOpacity(pr.GetOpacity() * float(fx["fade"])); pr.SetFrontfaceCulling(pr.GetOpacity() < 0.999); act.SetVisibility(act.GetVisibility() and fx["fade"] > 0.002)
                 translucent |= float(fx["fade"]) < 0.999
             if "cut" in fx:
                 c = fx["cut"]; body, cap = self._clipped(k, cid, c["normal"], c["origin"]); cut_body = body
@@ -567,6 +595,7 @@ class Renderer:
                 sp.SetOpacity(pr.GetOpacity()); sil.SetVisibility(act.GetVisibility())
             elif sil is not None:
                 sil.SetVisibility(False)
+            pr.SetFrontfaceCulling(pr.GetOpacity() < 0.999)  # see-through: one layer per wall (see set_opacity)
         return glass
 
     def _dots_mesh(self, k, mesh, size):

@@ -9,10 +9,19 @@ TYPE_COLOURS = {"slide": "#4e79a7", "overview": "#59a14f", "focus": "#d1495b", "
 PLAYHEAD = "#ff9f1c"
 RULER_H, ROW_TOP, ROW_H, MARGIN = 18, 22, 36, 8
 COMPACT_H = 20      # row height with "Compact" on
-LANE_H = 9          # one lane of arrow / text bars under the parts
+LANE_H = 20         # one lane of arrow / text bars under the parts
+LANE_GAP = 6        # space between the parts and the first lane
+ANN_COLOURS = {"arrow": "#f0a020", "text": "#5b9bf0"}
 MIN_BLOCK = 3.0     # never draw a part narrower than this; narrower neighbours merge into one "several parts" mark
 ZOOM_STEP = 1.5     # the - and + buttons
 SEVERAL = "#9a9a9a"
+
+
+def ann_label(a):
+    """Short name of an arrow or text box on the timeline: its kind and its words."""
+    words = ((a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")).strip()
+    kind = "Arrow" if a["kind"] == "arrow" else "Text"
+    return f"{kind}: {' '.join(words.split())}" if words else kind
 
 
 class TimelineCanvas(QtW.QWidget):
@@ -229,11 +238,11 @@ class TimelineCanvas(QtW.QWidget):
         return bars
 
     def lanes_top(self):
-        return ROW_TOP + self.row_h + 4
+        return ROW_TOP + self.row_h + LANE_GAP
 
     def update_height(self):
         n = max([b[4] for b in self.ann_bars()] + [-1]) + 1
-        h = ROW_TOP + self.row_h + 6 + (n * LANE_H + 4 if n else 0)
+        h = ROW_TOP + self.row_h + 6 + (n * LANE_H + LANE_GAP if n else 0)
         if self.minimumHeight() != h:
             self.setMinimumHeight(h); self.updateGeometry()
 
@@ -356,18 +365,26 @@ class TimelineCanvas(QtW.QWidget):
             order = sorted(self.parts, key=lambda pid: self.parts[pid]["start"]); t = d["target"]
             xi = self.x_of(self.parts[order[t]]["start"]) if t < len(order) else self.x_of(self.total)
             p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 3)); p.drawLine(QtC.QPointF(xi, ROW_TOP - 3), QtC.QPointF(xi, ROW_TOP + self.row_h + 3))
-        # arrows and text boxes: thin bars in lanes under the parts
-        top = self.lanes_top(); fm2 = p.fontMetrics(); sel_ann = getattr(self, "selected_ann", None)
-        for aid, pid, x0, x1, lane, s0, s1, a in self.ann_bars():
-            r = QtC.QRectF(x0, top + lane * LANE_H, max(3.0, x1 - x0), LANE_H - 2)
-            col = QtG.QColor("#ffb000" if a["kind"] == "arrow" else "#7fb3ff"); col.setAlpha(200 if a.get("visible", True) else 70)
-            p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 1.5) if aid == sel_ann else QtC.Qt.NoPen); p.setBrush(col)
-            p.drawRoundedRect(r, 2, 2)
-            word = ((a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")).split()
-            lab = ("→ " if a["kind"] == "arrow" else "T ") + (word[0] if word else "")
-            if r.width() > 24:
-                f2 = p.font(); f2.setPointSizeF(max(6.0, f2.pointSizeF() * 0.8)); p.setFont(f2); p.setPen(QtG.QColor("#000000"))
-                p.drawText(r.adjusted(3, -2, -2, 2), QtC.Qt.AlignVCenter | QtC.Qt.AlignLeft, fm2.elidedText(lab, QtC.Qt.ElideRight, int(r.width() - 4)))
+        # arrows and text boxes: one row each under the parts, in a lightly shaded band
+        bars = self.ann_bars(); top = self.lanes_top(); sel_ann = getattr(self, "selected_ann", None)
+        if bars:
+            n = max(b[4] for b in bars) + 1
+            band = QtG.QColor(pal.color(QtG.QPalette.AlternateBase)); p.fillRect(QtC.QRectF(0, top - 3, self.width(), n * LANE_H + 4), band)
+            p.setPen(dim); p.drawLine(QtC.QPointF(0, top - 3), QtC.QPointF(self.width(), top - 3))
+        f2 = p.font(); f2.setPointSizeF(max(7.0, f2.pointSizeF() * 0.95)); p.setFont(f2); fm2 = p.fontMetrics()
+        for aid, pid, x0, x1, lane, s0, s1, a in bars:
+            r = QtC.QRectF(x0, top + lane * LANE_H + 1, max(4.0, x1 - x0), LANE_H - 3)
+            col = QtG.QColor(ANN_COLOURS["arrow" if a["kind"] == "arrow" else "text"]); col.setAlpha(230 if a.get("visible", True) else 80)
+            p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 2) if aid == sel_ann else QtG.QPen(col.darker(140), 1)); p.setBrush(col)
+            p.drawRoundedRect(r, 4, 4)
+            if r.width() >= 10:  # grips at both ends: drag to change when it shows
+                p.setPen(QtC.Qt.NoPen); p.setBrush(QtG.QColor(0, 0, 0, 70))
+                for gx in (r.left() + 2, r.right() - 4):
+                    p.drawRoundedRect(QtC.QRectF(gx, r.top() + 4, 2, r.height() - 8), 1, 1)
+            lab = ann_label(a)
+            if r.width() > 22:
+                p.setPen(QtG.QColor("#111111"))
+                p.drawText(r.adjusted(7, 0, -6, 0), QtC.Qt.AlignVCenter | QtC.Qt.AlignLeft, fm2.elidedText(lab, QtC.Qt.ElideRight, int(r.width() - 13)))
         # playhead with a handle on the ruler; the handle carries a + (add a part here)
         x = self._playhead_x()
         p.setPen(QtG.QPen(QtG.QColor(PLAYHEAD), 2)); p.drawLine(QtC.QPointF(x, 2), QtC.QPointF(x, self.height()))
@@ -608,6 +625,12 @@ class TimelineCanvas(QtW.QWidget):
             if several:
                 names = [f"{self.parts[q]['index'] + 1}. {part_name(self.part(q), self.spec, self.ds)}" for q in several if self.part(q)]
                 QtW.QToolTip.showText(e.globalPos(), "Several parts (zoom in to see them):\n" + "\n".join(names), self)
+                return True
+            ab = self.ann_at(pos)
+            if ab:
+                b = ab[0]
+                QtW.QToolTip.showText(e.globalPos(), f"{ann_label(b[7])}\nshown {b[5]:.1f} s to {b[6]:.1f} s into the part\n"
+                                      "Drag it to move it, drag an end to change when it shows", self)
                 return True
             pid = self.part_at(e.position() if hasattr(e, "position") else QtC.QPointF(e.pos()))
             part = self.part(pid) if pid else None

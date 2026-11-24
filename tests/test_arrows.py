@@ -161,9 +161,10 @@ def test_add_arrows_and_text_in_the_window(window, monkeypatch):
     lefts = [rects[f"ann:{t['id']}"][0][0] for t in texts]
     assert max(lefts) - min(lefts) < 0.005 and len(win.editor.history.states) == n_hist + 1
     # the timeline shows overlapping items in separate lanes; dragging a bar's end changes its time
+    from tomoreveal.gui_timeline import LANE_H
     c = win.timeline.canvas; bars = c.ann_bars()
     assert len({b[4] for b in bars}) >= 2
-    b = bars[0]; y = c.lanes_top() + b[4] * 9 + 4; x = int(round(b[3]))
+    b = bars[0]; y = c.lanes_top() + b[4] * LANE_H + LANE_H // 2; x = int(round(b[3]))
     n_hist = len(win.editor.history.states)
     from PySide6 import QtTest
     QtTest.QTest.mousePress(c, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(x, y))

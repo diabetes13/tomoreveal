@@ -67,10 +67,29 @@ def build_gui(args):
         t = int(round(t))
         return f"{t // 60} min {t % 60:02d} s" if t >= 90 else f"{t} s"
 
+    WHEEL_PROOF = (QtW.QComboBox, QtW.QAbstractSpinBox, QtW.QAbstractSlider)
+
     class TipFilter(QtC.QObject):
-        """Swallows tooltips while Help > Show tips on hover is off."""
+        """The one application-wide filter: swallows tooltips while Help > Show tips on hover is off, and keeps the mouse
+        wheel from changing drop-down lists, number boxes and sliders (3.5): the wheel scrolls the panel instead."""
         def eventFilter(self, obj, e):
-            return e.type() == QtC.QEvent.ToolTip and QtW.QApplication.instance().property("tomoreveal_tips") is False
+            t = e.type()
+            if t == QtC.QEvent.Wheel:
+                return wheel_to_panel(obj, e)
+            return t == QtC.QEvent.ToolTip and QtW.QApplication.instance().property("tomoreveal_tips") is False
+
+    def wheel_to_panel(obj, e):
+        """A wheel turn over a setting scrolls the panel around it; the setting itself never changes. True = handled."""
+        if not isinstance(obj, WHEEL_PROOF) or isinstance(obj, QtW.QScrollBar) or obj.property("tomoreveal_wheel"):
+            return False
+        w = obj.parentWidget()
+        while w is not None and not isinstance(w, QtW.QAbstractScrollArea):
+            w = w.parentWidget()
+        if w is not None:
+            bar = w.verticalScrollBar()
+            if bar is not None and bar.maximum() > bar.minimum():
+                bar.setValue(bar.value() - round(e.angleDelta().y() / 120 * bar.singleStep() * 3))
+        e.accept(); return True
 
     class Worker(QtC.QThread):
         """Runs file reading and surface building off the window's thread."""
@@ -354,8 +373,10 @@ def build_gui(args):
                 hints.colorSchemeChanged.connect(lambda *_: self.theme == "system" and self.set_theme("system"))
 
         # ---------- layout ----------
-        def _group(self, title, parent):
-            g = QtW.QGroupBox(title); lay = QtW.QVBoxLayout(g); parent.addWidget(g)
+        def _group(self, title, parent, key=None, open=True, tip=None):
+            """A settings group; with a key it folds (click its title) and remembers whether it is open (3.5)."""
+            from .gui_fold import Section
+            g = Section(title, key, open, tip); lay = QtW.QVBoxLayout(g.body); parent.addWidget(g)
             return g, lay
 
         def _note(self, text, parent):
@@ -456,8 +477,8 @@ def build_gui(args):
             self.struct_box = QtW.QWidget(); self.struct_grid = QtW.QGridLayout(self.struct_box); self.struct_grid.setContentsMargins(0, 0, 0, 0)
             self.struct_grid.setColumnStretch(2, 1); sl.addWidget(self.struct_box)
             self.struct_note = QtW.QLabel("No segmentation loaded. Add one in the Data tab."); sl.addWidget(self.struct_note)
-            self.struct_help = self._note("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures "
-                                          "have a threshold: the surface is drawn where the network's score is above it.", sl)
+            self.struct_group.setToolTip("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures "
+                                         "have a threshold: the surface is drawn where the network's score is above it.")
             lay.addStretch(1)
             # explore
             lay = self._tab("Explore")
@@ -474,9 +495,11 @@ def build_gui(args):
             self.tilt_s = self._slider(vl, "Tilt", 0, 85, lambda v: self.set_view(tilt=v), lambda v: f"{v}\u00b0")
             self.az_s = self._slider(vl, "Rotate", -180, 180, lambda v: self.set_view(az=v), lambda v: f"{v}\u00b0")
             self.zoom_s = self._slider(vl, "Zoom", 50, 300, lambda v: self.set_view(zoom=v / 100), lambda v: f"{v / 100:.2f}x")
-            self._note("Tip: drag in the preview to rotate, scroll to zoom.", vl)
+            self.view_group.setToolTip("Tip: drag in the preview to rotate, scroll to zoom.")
             # clip
-            self.clip_group, cl = self._group("Clip: show only part of the tomogram", lay)
+            self.clip_group, cl = self._group("Clip: show only part of the tomogram", lay, "clip", False,
+                                              "Like the clip box in Dragonfly: drag the two handles of a bar to keep only that range. "
+                                              "Everything outside is left out of the preview and the movie.")
             self.clip_s = {}
             for ax, text in (("x", "X"), ("y", "Y"), ("z", "Z (slices)")):
                 row = QtW.QHBoxLayout(); lab = QtW.QLabel(text); lab.setFixedWidth(64)
@@ -486,8 +509,6 @@ def build_gui(args):
             row = QtW.QHBoxLayout(); self.clipfit_cb = QtW.QCheckBox("Fit the view to the kept part")
             self.clipfit_cb.toggled.connect(self._clipfit_changed)
             b = QtW.QPushButton("Reset"); b.clicked.connect(self.reset_clip); row.addWidget(self.clipfit_cb, 1); row.addWidget(b); cl.addLayout(row)
-            self._note("Like the clip box in Dragonfly: drag the two handles of a bar to keep only that range. "
-                       "Everything outside is left out of the preview and the movie.", cl)
             # movie
             self.movie_group, ml = self._group("Movie", lay)
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("<b>Parts of the movie</b>"), 1)
@@ -497,7 +518,7 @@ def build_gui(args):
             self.parts_panel = PartsPanel(self); ml.addWidget(self.parts_panel)
             self.sweep_hint = self._note("A slide-up shows only the moving slice; with the tomogram hidden it shows nothing.", ml)
             self.sweep_hint.setVisible(False)
-            self._note("Add, remove, split and reorder parts on the timeline under the preview, or with its right-click menu.", ml)
+            self.movie_group.setToolTip("Add, remove, split and reorder parts on the timeline under the preview, or with its right-click menu.")
             self.pick_btn = QtW.QPushButton("+ Click a structure in the preview"); self.pick_btn.setCheckable(True)
             self.pick_btn.toggled.connect(self.set_pick); ml.addWidget(self.pick_btn)
             self.rto_cb = QtW.QCheckBox("Return to the overview at the end"); self.rto_cb.toggled.connect(lambda v: self._spec_set("return_to_overview", v))
@@ -505,13 +526,13 @@ def build_gui(args):
             # look
             mk = lay  # the Make the movie box goes at the end of this tab
             lay = self._tab("Look")
-            self.tslice_group, tg = self._group("Tomogram slice", lay)
+            self.tslice_group, tg = self._group("Tomogram slice", lay, "tomogram_slice", True,
+                                                "The default for the whole movie and the preview. Each part in the Movie tab can show, "
+                                                "fade or hide the tomogram on its own.")
             self.tshow_cb = QtW.QCheckBox("Show the tomogram slice"); self.tshow_cb.toggled.connect(lambda v: self._tomo_style("show", v))
             tg.addWidget(self.tshow_cb)
             self.topac_s = self._slider(tg, "Opacity", 0, 100, lambda v: self._tomo_style("opacity", v / 100), lambda v: f"{v} %")
-            self._note("The default for the whole movie and the preview. Each shot in the Movie tab can show, fade or hide "
-                       "the tomogram on its own.", tg)
-            self.look_group, ll = self._group("Look", lay)
+            self.look_group, ll = self._group("Background and contrast", lay, "background", False)
             row = QtW.QHBoxLayout(); self.invert_cb = QtW.QCheckBox("Invert contrast")
             self.invert_cb.toggled.connect(lambda v: self._style_set("invert", v)); row.addWidget(self.invert_cb); row.addStretch(1)
             ll.addLayout(row)
@@ -533,19 +554,20 @@ def build_gui(args):
             form.addRow("Title", self.title_le); ll.addLayout(form)
             from .gui_look import Look35Controls
             self.look35 = Look35Controls(self, lay)
+            lay.removeWidget(self.look35.group); lay.insertWidget(0, self.look35.group)  # the look first: it sets most of the rest
             self.overlay_controls = OverlayControls(self, lay)
             from .gui_annotations import AnnotationMouse, AnnotationPanel, preview_menu
             self.ann_panel = AnnotationPanel(self, lay); self.ann_mouse = AnnotationMouse(self)
             self.arrow_pick = False; self.label_editor = None; self.preview_menu_extras = [preview_menu(self)]
             self.look_controls = LookControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
-            wg, wl = self._group("Window", lay)
+            wg, wl = self._group("Window", lay, "window", False, "Light or dark window. This does not change the movie: its "
+                                 "background is set in the Look.")
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
             for t, d in THEMES:
                 self.theme_cb.addItem(t, d)
             self.theme_cb.activated.connect(lambda j: self.set_theme(self.theme_cb.itemData(j))); row.addWidget(self.theme_cb); row.addStretch(1)
             wl.addLayout(row)
-            self._note("Light or dark window. This does not change the movie: its background is set above.", wl)
             lay.addStretch(1)
             # preview side
             self.right = QtW.QStackedWidget()
@@ -829,6 +851,9 @@ def build_gui(args):
                 if self.project.pending is None:  # a new project (not one being opened): the Soft look (3.5, the user's choice)
                     from .look import apply_look
                     apply_look(self.spec, "soft")
+                    for part in self.spec.get("shots", []):  # and still overviews (3.5: the user's choice)
+                        if part.get("type") == "overview" and part.get("motion") == "rock" and part.get("view") is None:
+                            part["motion"] = "none"
             else:  # keep the user's settings of every structure that is still there
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
             self.editor.reset_history()  # loading other data starts a new history
@@ -957,7 +982,7 @@ def build_gui(args):
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()
             has_t, has_s = self.info.get("has_tomogram"), self.info.get("has_segmentation")
-            self.struct_help.setVisible(bool(has_s))
+            pass  # (3.5: the help text is the group's tooltip)
             self.parts_panel.sync()
             tst = sp["style"].setdefault("tomogram", dict(show=True, opacity=1.0))
             self._setv(self.tshow_cb, tst.get("show", True)); self._setv(self.topac_s, 100 * float(tst.get("opacity", 1.0)))

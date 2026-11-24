@@ -4,6 +4,7 @@ import numpy as np
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import overlays as ov
+from .gui_fold import Section
 from .gui_theme import DIM
 
 SNAP = 0.015      # fraction of the frame within which an item snaps to an edge, a corner or a centre line
@@ -39,7 +40,7 @@ class OverlayControls(QtC.QObject):
 
     def __init__(self, win, layout):
         super().__init__(win); self.win = win
-        g = QtW.QGroupBox("On the picture"); self.group = g; layout.addWidget(g); grid = QtW.QGridLayout(g)
+        g = Section("On the picture", "on_the_picture", False); self.group = g; layout.addWidget(g); grid = QtW.QGridLayout(g.body)
         self.cb, self.size = {}, {}
         for r, n in enumerate(ov.NAMES):
             cb = QtW.QCheckBox(ov.LABELS[n]); cb.toggled.connect(lambda v, n=n: self.set_show(n, v))
@@ -78,9 +79,8 @@ class OverlayControls(QtC.QObject):
         sb.addWidget(QtW.QLabel("Scale bar:")); sb.addWidget(self.bar_auto); sb.addWidget(self.bar_len); sb.addWidget(self.bar_mode)
         sb.addWidget(self.bar_label); sb.addStretch(1)
         self.bar_note = QtW.QLabel(""); self.bar_note.setStyleSheet(DIM); self.bar_note.setWordWrap(True); grid.addWidget(self.bar_note, r, 0, 1, 3); r += 1
-        note = QtW.QLabel("Drag an item in the preview to move it; drag its corner handle to change its size (hold Shift for steps "
-                          "of 0.1). Right-click an item for more.")
-        note.setStyleSheet(DIM); note.setWordWrap(True); grid.addWidget(note, r, 0, 1, 3)
+        g.setToolTip("Drag an item in the preview to move it; drag its corner handle to change its size (hold Shift for steps "
+                     "of 0.1). Right-click an item for more.")
 
     # ---- changes ----
     def _ok(self):
@@ -123,10 +123,11 @@ class OverlayControls(QtC.QObject):
         _quiet(self.bar_label, lambda: self.bar_label.setChecked(bool(b.get("label", True))))
         vox = ov.voxel_size(self.win.spec, self.win.st.ds)
         ortho = bool(self.win.spec.get("style", {}).get("ortho"))
-        self.bar_note.setText("The scale bar needs the voxel size (Data tab)." if not vox else
-                              "Lying on the slice, the bar is exact in every view. Flat on the picture, it is exact "
-                              + ("everywhere (orthographic view)." if ortho else "at the centre of view; things nearer or further "
-                                 "away look bigger or smaller. Switch on Orthographic view for an exact bar everywhere."))
+        self.bar_note.setText("" if vox else "The scale bar needs the voxel size (Data tab).")
+        self.bar_note.setVisible(not vox)  # (3.5: the explanation is the tooltip of the choice)
+        self.bar_mode.setToolTip("Lying on the slice, the bar is exact in every view. Flat on the picture, it is exact "
+                                 + ("everywhere (orthographic view)." if ortho else "at the centre of view; things nearer or "
+                                    "further away look bigger or smaller. Switch on Orthographic view for an exact bar everywhere."))
 
 
 class OverlayToolbar(QtW.QWidget):

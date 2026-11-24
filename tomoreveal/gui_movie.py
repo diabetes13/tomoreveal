@@ -6,6 +6,7 @@ from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 from . import storyboard as sb
 from .common import UserError
 from .gui_data import clear_layout
+from .gui_fold import Fold, fold_rows
 from .gui_theme import DIM
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
@@ -208,7 +209,7 @@ class MovieEditor(QtC.QObject):
         p["on"] = not p.get("on", True); self.commit(select=pid)
 
     def reset_default(self):
-        self.spec["shots"] = sb.default_parts(); self.commit(select=None)
+        self.spec["shots"] = sb.default_parts(rock=False); self.commit(select=None)
         self.win.say("The movie is back to the three default parts. Undo brings your parts back.", "ok")
 
     def undo(self):
@@ -369,7 +370,16 @@ def _spin(lo, hi, value, on_change, step=0.5, suffix=" s", decimals=2, special=N
 
 SLIDE_ENDS = (("first slice", "first"), ("last slice", "last"), ("where the slice is", "current"), ("a slice number", "number"))
 STRUCTURES = (("hidden", "none"), ("above the slice", "above"), ("all", "all"), ("leave as they are", "keep"))
-MOTIONS = (("rock", "rock"), ("full spin", "spin"), ("still", "none"))
+MOTIONS = (("still", "none"), ("rock", "rock"), ("full spin", "spin"))
+# rows of a part's settings that go under "More settings" (3.5), by part type; the unnamed rows after one go with it
+MORE_ROWS = {
+    "focus": ("Camera push-in", "Highlight", "Object effect", "Zoom", "Tilt", "Vignette", "Caption", "On the picture", "Slow down at the end"),
+    "overview": ("Caption", "On the picture", "Slow down at the end"),
+    "slide": ("Pause before", "Pause after", "Caption", "On the picture", "Slow down at the end"),
+    "path": ("Looks", "Other structures", "Caption", "On the picture"),
+    "hold": ("Caption", "On the picture"),
+    "card": ("Caption", "On the picture"),
+}
 FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("wiggle", "wiggle"), ("hold still", "none"))
 HIGHLIGHTS = (("none", "none"), ("pulse (brighter and back)", "pulse"), ("glowing outline", "glow"))
 EFFECTS = (("none", "none"), ("cross-section sweep", "section"), ("grow in", "grow"))
@@ -562,12 +572,21 @@ class PartsPanel(QtW.QWidget):
         from .gui_overlays import part_overlay_row
         ovr = part_overlay_row(self.win, pid, p); r["overlays"] = ovr
         if t == "card":
-            add("On the picture", ovr); return
+            add("On the picture", ovr); self._fold_more(t, form); return
         tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
         add("On the picture", ovr)
         if t in ("slide", "overview", "focus"):
             add("Slow down at the end", _combo(ENDS, p.get("ease_end", "sudden"), lambda v: self.set(pid, "ease_end", v)))
+        self._fold_more(t, form)
         self._transition_rows(pid, p, form)
+
+    def _fold_more(self, t, form):
+        """Put the less used rows of a part under "More settings" (closed unless the user opened it before)."""
+        fd = Fold("More settings", key=f"part_more_{t}", tip="Captions, what is shown on the picture, and finer settings of this part")
+        if fold_rows(form, MORE_ROWS.get(t, ()), fd):
+            form.addRow(fd)
+        else:
+            fd.deleteLater()
 
     def transition_heading(self, pid):
         """"Transition from part 3 to part 4" (positions among all parts, as numbered on the timeline)."""
@@ -586,7 +605,9 @@ class PartsPanel(QtW.QWidget):
             if q is not None:
                 cur = sb.transition_of(q); cur.update(kw)
                 self.set(pid, "transition_in", cur); pic.setPixmap(speed_picture(cur))
-        head = QtW.QLabel(f"<b>{self.transition_heading(pid)}</b>"); form.addRow(head); r["transition_head"] = head
+        head = QtW.QLabel(f"<b>{self.transition_heading(pid)}</b>"); r["transition_head"] = head
+        fd = Fold("", key="part_transition", header=head, tip="How the movie gets from the previous part to this one")
+        form.addRow(fd); form = fd.form
         trs = p.get("transition")
         secs = _spin(-0.1, 10, -0.1 if trs is None else float(trs), lambda v: self.set(pid, "transition", None if v < 0 else v),
                      step=0.1, special="automatic")
@@ -616,7 +637,10 @@ class PartsPanel(QtW.QWidget):
         def choose(v):
             self.set(pid, "view", dict(tilt=float(main["tilt"]), az=float(main["az"]), zoom=float(main["zoom"])) if v == "own" else None,
                      rebuild=True)
-        form.addRow("View", _combo((("main view", "main"), ("own view", "own")), "own" if own else "main", choose))
+        vc = _combo((("main view", "main"), ("own view", "own")), "own" if own else "main", choose)
+        vc.setToolTip("The main view, or a camera position of this part's own. With its own view, you can also drag in the "
+                      "preview while this part is selected and the playhead is in it.")
+        form.addRow("View", vc)
         if not own:
             return
         vw = p["view"]; self.view_sliders = {}
@@ -635,8 +659,6 @@ class PartsPanel(QtW.QWidget):
         form.addRow("Tilt", slider("tilt", 0, 85, 1, lambda x: f"{x}\u00b0"))
         form.addRow("Rotate", slider("az", -180, 180, 1, lambda x: f"{x}\u00b0"))
         form.addRow("Zoom", slider("zoom", 50, 300, 100, lambda x: f"{x / 100:.2f}x"))
-        tip = QtW.QLabel("Or drag in the preview while this part is selected and the playhead is in it.")
-        tip.setStyleSheet(DIM); tip.setWordWrap(True); form.addRow("", tip)
 
     def show_view(self, pid):
         """The part's view was changed by dragging in the preview: move its sliders along (without changing it again)."""

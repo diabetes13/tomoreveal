@@ -4,6 +4,7 @@ import math
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import look as lk
+from .gui_fold import Section
 from .gui_theme import DIM
 
 
@@ -68,12 +69,13 @@ class LookControls(QtC.QObject):
 
     def __init__(self, win, layout):
         super().__init__(win); self.win = win
-        g = QtW.QGroupBox("Lighting"); self.light_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        g = Section("Lighting", "lighting", False); self.light_group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.preset = QtW.QComboBox()
         for t, d in lk.PRESETS:
             self.preset.addItem(t, d)
-        self.preset.setToolTip("Default: as in earlier versions. Simple: one light. Soft: soft shadows in creases (ambient "
-                               "occlusion, for the whole picture). Full: soft plus slice shadows. Flat: colours only, no shading.")
+        self.preset_tip = ("Default: as in earlier versions. Simple: one light. Soft: soft shadows in creases (ambient "
+                           "occlusion, for the whole picture). Full: soft plus slice shadows. Flat: colours only, no shading.")
+        self.preset.setToolTip(self.preset_tip)
         self.preset.activated.connect(lambda j: self.set_preset(self.preset.itemData(j)))
         f.addRow("Preset", self.preset)
         row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
@@ -99,7 +101,7 @@ class LookControls(QtC.QObject):
         self.ssao.setToolTip("How far the soft shadows in creases reach (Soft and Full presets)"); f.addRow("Soft shadow size", self.ssao)
         self.light_note = QtW.QLabel(""); self.light_note.setStyleSheet(DIM); self.light_note.setWordWrap(True); f.addRow(self.light_note)
         # shadows
-        g = QtW.QGroupBox("Shadows"); self.shadow_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        g = Section("Shadows", "shadows", False); self.shadow_group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.slice_sh = QtW.QCheckBox("Structures cast shadows on the tomogram slice")
         self.slice_sh.setToolTip("Soft shadows on the slice, as if lit from the direction above")
         self.slice_sh.toggled.connect(lambda v: self.set_shadow("slice", on=bool(v))); f.addRow(self.slice_sh)
@@ -111,7 +113,7 @@ class LookControls(QtC.QObject):
         self.real_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_shadow("real", strength=v / 100))
         f.addRow("Strength", self.real_strength)
         # vignette
-        g = QtW.QGroupBox("Vignette (darker edges)"); self.vig_group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        g = Section("Vignette (darker edges)", "vignette", False); self.vig_group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.vig_when = QtW.QComboBox()
         for t, d in lk.VIGNETTE_WHEN:
             self.vig_when.addItem(t, d)
@@ -133,7 +135,7 @@ class LookControls(QtC.QObject):
         self.vig_blur.toggled.connect(lambda v: self.set_vig(blur=dict(lk.look_settings(self.win.spec)["vignette"]["blur"], on=bool(v))))
         f.addRow(self.vig_blur)
         # anti-aliasing in the preview
-        g = QtW.QGroupBox("Smooth edges (anti-aliasing)"); layout.addWidget(g); f = QtW.QFormLayout(g)
+        g = Section("Smooth edges (anti-aliasing)", "smooth_edges", False); layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.aa_prev = QtW.QComboBox()
         for t, d in lk.AA_PREVIEW:
             self.aa_prev.addItem(t, d)
@@ -195,10 +197,11 @@ class LookControls(QtC.QObject):
         for w in (self.az, self.el, self.follow, self.ball, *self.amounts.values()):
             w.setEnabled(not default and li["preset"] != "flat")
         self.ssao.setEnabled(li["preset"] in ("soft", "full"))
-        self.light_note.setText("Default lighting is the one of earlier versions; choose another preset to change the "
+        self.light_note.setVisible(False)  # (3.5: shown as the preset's tooltip)
+        self.preset.setToolTip((self.preset_tip + "\n\n" + ("Default lighting is the one of earlier versions; choose another preset to change the "
                                 "direction and amounts. The direction also sets where slice shadows fall." if default else
                                 "Soft shadows in creases (ambient occlusion) work on the whole picture, not per structure."
-                                if li["preset"] in ("soft", "full") else "")
+                                if li["preset"] in ("soft", "full") else "")).strip())
         sh = L["shadows"]
         _quiet(self.slice_sh, lambda: self.slice_sh.setChecked(bool(sh["slice"]["on"])))
         _setv(self.sh_strength, 100 * float(sh["slice"]["strength"])); _setv(self.sh_soft, float(sh["slice"]["softness"]))
@@ -275,7 +278,7 @@ class Look35Controls(QtC.QObject):
 
     def __init__(self, win, layout):
         super().__init__(win); self.win = win
-        g = QtW.QGroupBox("Look"); self.group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+        g = Section("Look", "look", True); self.group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
 
         def combo(items, key, tip):
             cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)

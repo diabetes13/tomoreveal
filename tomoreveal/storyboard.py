@@ -303,7 +303,7 @@ def new_part(kind, **fields):
     elif kind == "slide":
         p = _common(type="slide", seconds=7, structures="keep", **{"from": "current", "to": "last"})
     elif kind == "overview":
-        p = _common(type="overview", seconds=6, motion="rock", angle=25, view=None)
+        p = _common(type="overview", seconds=6, motion="none", angle=25, view=None)  # still (3.5; was rock)
     elif kind == "view":  # "View from here": a still overview with its own camera position (pass view={tilt, az, zoom})
         p = _common(type="overview", seconds=3, motion="none", angle=25, view=dict(tilt=42.0, az=0.0, zoom=1.0),
                     transition=VIEW_TRANSITION)
@@ -349,9 +349,10 @@ def as_legacy(part):
     return p
 
 
-def default_parts():
-    """Slide up, slide back revealing the segmentation, overview: the default movie."""
-    return [new_part("slide_up"), new_part("reveal"), new_part("overview")]
+def default_parts(rock=True):
+    """Slide up, slide back revealing the segmentation, overview: the default movie. The command line keeps the
+    rocking overview of every earlier version; the window asks for a still one (rock=False)."""
+    return [new_part("slide_up"), new_part("reveal"), new_part("overview", motion="rock" if rock else "none")]
 
 
 def focus_shot(target, caption, **kw):

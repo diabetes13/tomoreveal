@@ -27,11 +27,11 @@ def legacy(p):
 def specs(ds):
     out = {}
     s = tr.default_spec(ds)
-    s["shots"] = [legacy(sb.new_part("overview")), legacy(sb.new_part("focus", target={"class": ds.key_of(2), "component": 1},
+    s["shots"] = [legacy(sb.new_part("overview", motion="rock")), legacy(sb.new_part("focus", target={"class": ds.key_of(2), "component": 1},
                                                                        caption="one vesicle", motion="wiggle", seconds=4))]
     out["wiggle"] = s
     s = tr.default_spec(ds)
-    s["shots"] = [legacy(sb.new_part("overview")), legacy(sb.new_part("focus", target={"class": ds.key_of(1)}, motion="orbit", seconds=4))]
+    s["shots"] = [legacy(sb.new_part("overview", motion="rock")), legacy(sb.new_part("focus", target={"class": ds.key_of(1)}, motion="orbit", seconds=4))]
     out["orbit"] = s
     s = tr.default_spec(ds)
     s["shots"] = [legacy(sb.new_part("path", seconds=4, source=dict(kind="follow", items=[{"structure": ds.key_of(1), "component": None}])))]

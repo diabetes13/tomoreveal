@@ -5,6 +5,7 @@ import math
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import annotations as an
+from .gui_fold import Section
 from .gui_theme import DIM
 
 COLOURS = (("automatic (white or black)", "auto"), ("white", "#ffffff"), ("black", "#000000"), ("yellow", "#ffd23f"),
@@ -296,8 +297,10 @@ def preview_menu(win):
 class AnnotationPanel(QtC.QObject):
     def __init__(self, win, layout):
         super().__init__(win); self.win = win
-        g = QtW.QGroupBox("Arrows and text"); self.group = g; layout.addWidget(g)
-        v = QtW.QVBoxLayout(g)
+        g = Section("Arrows and text", "arrows_text", True, "Arrows point at a spot on a structure and stay on it while the camera "
+                    "moves. Right-click one in the preview for its shape, colour and more.")
+        self.group = g; layout.addWidget(g)
+        v = QtW.QVBoxLayout(g.body)
         h = QtW.QHBoxLayout(); v.addLayout(h)
         self.add_arrow = QtW.QPushButton("+ Add arrow"); self.add_arrow.setToolTip("Then click the spot in the preview the arrow should point to")
         self.add_arrow.clicked.connect(lambda: start_add_arrow(win))
@@ -308,9 +311,7 @@ class AnnotationPanel(QtC.QObject):
         self.only_part.toggled.connect(lambda _: self.rebuild())
         h.addWidget(self.add_arrow); h.addWidget(self.add_text); h.addWidget(self.only_part); h.addStretch(1)
         self.rows = QtW.QVBoxLayout(); v.addLayout(self.rows)
-        self.note = QtW.QLabel("Arrows point at a spot on a structure and stay on it while the camera moves. Right-click one in "
-                               "the preview for its shape, colour and more.")
-        self.note.setStyleSheet(DIM); self.note.setWordWrap(True); v.addWidget(self.note)
+        self.note = QtW.QLabel(""); self.note.setVisible(False)  # (3.5: the help text is the group's tooltip)
 
     def rebuild(self):
         from .gui_data import clear_layout

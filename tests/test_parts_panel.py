@@ -49,7 +49,7 @@ def test_one_line_per_part_and_one_open_at_a_time(window):
     panel = win.parts_panel; a, b, c = ids(win)
     assert list(panel.rows) == [a, b, c] and len(boxes(win)) == 3
     assert [panel.rows[p]["name"].text() for p in (a, b, c)] == ["Slide up through the slices", "Slide back, revealing the segmentation",
-                                                               "Overview (rock)"]
+                                                               "Overview (still)"]
     panel.rows[b]["head"].clicked.emit(); pump(app)
     assert panel.open_id == b and not panel.rows[b]["details"].isHidden()
     panel.rows[c]["head"].clicked.emit(); win.do_preview(); pump(app)

@@ -2,6 +2,10 @@
 
 ## 3.5.0
 
+- **Fewer settings on screen at once.** Each group in the Look and Movie tabs folds: click its title. The Look tab opens with the Look, the tomogram slice and Arrows and text; the rest are folded. A part's less used settings (caption, what is on the picture, zoom, tilt, highlight, effects, vignette, pauses, slowing down at the end) are under **More settings**, and its transition is folded under its heading. The program remembers what you open. Long explanations are now tooltips.
+- **The mouse wheel no longer changes settings.** Turning the wheel over a drop-down list, number box or slider scrolls the panel instead.
+- **Arrows and text boxes are easy to see on the timeline:** each has its own full-height bar under the parts, labelled with its words and with grips at both ends. A tooltip shows when it is shown.
+- **New overviews are still** (no rocking). The default movie in the window ends with a still overview; Rock and Full spin remain in its Camera movement. The command line keeps the rocking overview.
 - **Fixed: clicking in the preview while an arrow or text box was on the picture** wrote an error (KeyError 'ann:...') and did nothing.
 - **Fixed: a new close-up could add its object to an earlier close-up.** If "+ Click objects in the preview" was still on for one close-up, later clicks (also those meant for a new close-up) went into that first close-up. Only one way of clicking in the preview is now active at a time, and selecting another part ends it. You can still add objects to a close-up later.
 - **Close-ups can hide the other structures:** "Other structures" now offers grey, darker, unchanged colour and **hidden**.

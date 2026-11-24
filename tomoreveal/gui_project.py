@@ -29,6 +29,25 @@ def setup_crash_log():
         _FAULT_FILE = None
 
 
+HANG_SECONDS = 45
+
+
+def start_hang_watch(parent):
+    """If the window stops answering for HANG_SECONDS (a freeze rather than a crash), write where every thread was to
+    the crash log, so a window the user had to force quit leaves a trace. A timer on the window's thread re-arms it."""
+    if _FAULT_FILE is None:
+        return None
+
+    def arm():
+        try:
+            faulthandler.dump_traceback_later(HANG_SECONDS, repeat=False, file=_FAULT_FILE, exit=False)
+        except (OSError, ValueError):
+            pass
+    t = QtC.QTimer(parent); t.setInterval(5000); t.timeout.connect(arm); t.start(); arm()
+    parent.destroyed.connect(lambda *_: faulthandler.cancel_dump_traceback_later())
+    return t
+
+
 def log_exception(exc_type, exc, tb):
     """Write an uncaught error with its traceback to logs/error-<date>.log; returns the log path."""
     path = os.path.join(pj.logs_dir(), f"error-{datetime.date.today().isoformat()}.log")

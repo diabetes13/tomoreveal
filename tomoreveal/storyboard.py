@@ -897,7 +897,13 @@ def main_range(plan, part_id):
 # Effects in some parts only (3.5): part["look"] = {setting: value} overrides the Look tab in that part. Missing (or
 # no part with one) = the Look tab everywhere, as before. A change between parts is blended over LOOK_BLEND seconds.
 # ---------------------------------------------------------------------------------------------------------------
+def _part_styles():
+    from .look import LOOKS
+    return (("as in the Look tab", None),) + tuple((t, d) for t, d in LOOKS if d != "tomogram")
+
+
 PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored by leaving the setting out)
+    "style": _part_styles(),  # a whole look for this part (its background stays the movie's)
     "shadow": (("as in the Look tab", None), ("none", "none"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
     "outline": (("as in the Look tab", None), ("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick")),
     "depth_fade": (("as in the Look tab", None), ("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),

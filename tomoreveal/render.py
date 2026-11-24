@@ -183,7 +183,10 @@ class Renderer(PreviewPicking, PictureLooks):
         from .look import GRADIENT_TOP, LOOK_PRESETS, style35
         L35 = style35(spec)
         own = s.get("lk") or {}
-        if own:  # this part's own effects (3.5)
+        if own:  # this part's own look and effects (3.5)
+            if own.get("style") in LOOK_PRESETS:  # a whole look for this part; the background stays the movie's
+                from .look import STYLE35_DEFAULTS
+                L35 = {**STYLE35_DEFAULTS, **LOOK_PRESETS[own["style"]], "background": L35["background"], "preset": own["style"]}
             L35 = dict(L35, **{k: v for k, v in own.items() if k in ("shadow", "outline", "depth_fade")})
             if "membranes" in own:
                 from .look import CREAM
@@ -435,7 +438,8 @@ class Renderer(PreviewPicking, PictureLooks):
             if kind == "rest":
                 from .volumes import surface
                 lbl, _, _ = ds.components(k); sl = ds.bbox[k]
-                m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step)
+                m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step,
+                            ds.param(k, "soften"), ds.shape)
             else:
                 m = ds.meshes.get(k) if cid is None else ds.comp_mesh(k, int(cid))
                 if m is not None and kind == "outward":

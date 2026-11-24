@@ -317,6 +317,11 @@ class Look35Controls(QtC.QObject):
         self.glass_line = combo(lk.GLASS_OUTLINES, "glass_outline", "Outlines of see-through membranes: every edge, only their outer "
                                 "edge (no lines across them where they fold or where something lies behind), or none")
         f.addRow("See-through edges", self.glass_line)
+        self.smooth_mem = QtW.QCheckBox("smoother membrane surfaces")
+        self.smooth_mem.setToolTip("Takes away the bumps and ridges a segmentation leaves on membranes (every structure ticked "
+                                   "'Treat as membrane'). Each structure's own setting is 'Smoother surface' in the Structures tab")
+        self.smooth_mem.toggled.connect(self.set_smooth_membranes)
+        f.addRow("", self.smooth_mem)
         more = Fold("More settings", "look_more", False, "Shadows, outlines, depth fade, surface and colours")
         f.addRow(more); f = more.form
         self.shadow = combo(lk.SHADOW_LEVELS, "shadow", "Soft shadows in creases and between neighbours. They do not change with "
@@ -364,11 +369,34 @@ class Look35Controls(QtC.QObject):
         if "background" in kw and hasattr(w, "bg_cb"):  # the same choice in "Background and contrast"
             _quiet(w.bg_cb, lambda: w.bg_cb.setCurrentIndex(max(0, w.bg_cb.findData(kw["background"]))))
 
+    def _membrane_keys(self):
+        w = self.win
+        out = []
+        for c in (w.info or {}).get("structures", []):
+            name = (w.spec["classes"].get(c["key"]) or {}).get("name", c.get("name", ""))
+            if lk.is_membrane(w.spec, c["key"], name):
+                out.append(c["key"])
+        return out
+
+    def set_smooth_membranes(self, on):
+        """Smoother surfaces ('more') for every membrane, or back to none; the surfaces are rebuilt a moment later."""
+        w = self.win
+        if w.spec is None:
+            return
+        for key in self._membrane_keys():
+            sc = w.spec["classes"].setdefault(key, {})
+            if bool(on) != bool(sc.get("soften")):
+                w._param_changed(key, "soften", 2 if on else 0)
+
     def sync(self):
         w = self.win
         if w.spec is None:
             return
         L = lk.style35(w.spec)
+        mem = self._membrane_keys()
+        _quiet(self.smooth_mem, lambda: self.smooth_mem.setChecked(bool(mem) and all(
+            (w.spec["classes"].get(k) or {}).get("soften") for k in mem)))
+        self.smooth_mem.setEnabled(bool(mem))
         for cb, v in ((self.preset, L["preset"]), (self.shadow, L["shadow"]), (self.reach, L["reach"]), (self.outline, L["outline"]),
                       (self.ocol, L["outline_colour"]), (self.fade, L["depth_fade"]), (self.bg, L["background"]),
                       (self.membranes, lk.membrane_look(L)), (self.glass_line, L["glass_outline"]), (self.material, L["material"])):

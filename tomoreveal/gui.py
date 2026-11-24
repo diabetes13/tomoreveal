@@ -49,7 +49,7 @@ def build_gui(args):
     from .gui_timeline import Timeline
     from .gui_movie import MovieEditor, PartsPanel
     from .gui_theme import CHOICES as THEMES, DIM, apply_theme, message_color
-    from .gui_project import ProjectManager, log_exception, setup_crash_log
+    from .gui_project import ProjectManager, log_exception, setup_crash_log, start_hang_watch
     from .encode import read_partial
     from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
     from .look import look_settings, AA_MOVIE, ensure as ensure_look
@@ -564,6 +564,7 @@ def build_gui(args):
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             from .gui_presets import PresetsPanel
             self.presets = PresetsPanel(self, self._tab("Presets")); self.pages[-1].layout().addStretch(1)
+            self.tabs.tabBar().moveTab(5, 3)  # choose a look before making the movie: Presets comes before Movie
             wg, wl = self._group("Window", lay, "window", False, "Light or dark window. This does not change the movie: its "
                                  "background is set in the Look.")
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
@@ -644,7 +645,7 @@ def build_gui(args):
             if text:
                 self.statusBar().showMessage(text, 10000)
 
-        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_MOVIE, TAB_LOOK, TAB_PRESETS = 0, 1, 2, 3, 4, 5
+        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_PRESETS, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4, 5
 
         # ---------- playback ----------
         def toggle_play(self):
@@ -660,6 +661,7 @@ def build_gui(args):
             w, h = self.st._psize(spec)
             self.playing = dict(t0=time.monotonic(), f0=f0, spec=spec, frames=plan.frames, fps=plan.fps,
                                 size=(w * 2 // 3, h * 2 // 3), drawn=0, last=None)
+            self.playing.update(full=self.playing["size"], small=(w // 2, h // 2))
             self.play_btn.setText("Stop"); self.prev_timer.stop(); self.play_timer.start()
 
         def play_part(self, pid):
@@ -691,12 +693,23 @@ def build_gui(args):
             f = p["f0"] + int((time.monotonic() - p["t0"]) * p["fps"])
             last = min(len(p["frames"]) - 1, p.get("stop_at", len(p["frames"]) - 1))
             end = f >= last
-            f = min(f, last)
+            # Frames that take longer to draw than the movie gives them: show every n-th frame, evenly spaced, rather
+            # than whichever frame the clock reached (that skipped 1, then 4, then 2 ... and looked jittery).
+            step = p.get("step", 1)
+            f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
             if f != p["last"]:
+                t0 = time.monotonic()
                 try:
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
+                dt = time.monotonic() - t0
+                p["avg"] = dt if p.get("avg") is None else 0.7 * p["avg"] + 0.3 * dt
+                if p["drawn"] >= 2:
+                    if p["avg"] * p["fps"] > 2.5 and p["size"] == p["full"]:  # slow: a smaller picture (scaled up to fit)
+                        p["size"] = p["small"]; p["avg"] = None
+                    else:
+                        p["step"] = max(1, min(10, int(np.ceil(p["avg"] * p["fps"] * 1.1))))
                 skipped = p["last"] is not None and f - p["last"] > 1
                 p["last"] = f; p["drawn"] += 1
                 if skipped and not p.get("noted"):  # 3.5: judge smoothness from the movie, not from the preview
@@ -899,6 +912,15 @@ def build_gui(args):
             sm.setToolTip("Surface smoothing steps; 0 shows the raw voxel steps")
             sm.valueChanged.connect(lambda v, k=k: self._param_changed(k, "smoothing", int(v)))
             f.addRow("Smoothing", sm)
+            from .volumes import SOFTEN
+            so = QtW.QComboBox(); so.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            for t, _ in SOFTEN:
+                so.addItem(t)
+            so.setCurrentIndex(next((i for i, (_, d) in enumerate(SOFTEN) if d == int(sc.get("soften", 0) or 0)), 0))
+            so.setToolTip("Smoother surface: takes away the bumps and ridges a segmentation leaves, for example on membranes. "
+                          "'Much' can lose parts thinner than 2 voxels")
+            so.activated.connect(lambda i, k=k: self._param_changed(k, "soften", SOFTEN[i][1]))
+            f.addRow("Smoother surface", so)
             style_rows(self, f, k)
             from .gui_look import membrane_row
             membrane_row(self, f, k, self.spec["classes"].get(k, {}).get("name", c.get("name", "")))
@@ -927,7 +949,8 @@ def build_gui(args):
             for c in self.info.get("structures", []):
                 sc = self.spec["classes"].get(c["key"], {}); k = c["id"]
                 want = dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
-                            smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth)
+                            smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
+                            soften=int(sc.get("soften", 0) or 0))
                 if any(self.st.ds.param(k, n) != v for n, v in want.items()):
                     try:
                         r = self.st.set_structure_params(c["key"], **want)
@@ -1693,6 +1716,9 @@ def build_gui(args):
             elif not self.project.confirm_discard("closing TomoReveal"):
                 e.ignore(); return
             self.playing = None; self.play_timer.stop(); self.prev_timer.stop(); self.thr_timer.stop()  # nothing draws after this
+            if getattr(self, "_hang_watch", None) is not None:  # closing may wait for a load: not a freeze
+                import faulthandler
+                self._hang_watch.stop(); faulthandler.cancel_dump_traceback_later()
             if self.worker is not None and self.worker.isRunning():  # let the load end, but never make a renderer for it
                 for sig in (self.worker.done, self.worker.failed, self.worker.log):
                     try:
@@ -1708,6 +1734,8 @@ def build_gui(args):
     apply_theme(app, QtC.QSettings().value("theme", "system"))  # before the window is made
     setup_crash_log()
     win = Main(); win.show()
+    if not getattr(args, "headless", False):
+        win._hang_watch = start_hang_watch(win)
 
     def excepthook(t, v, tb):  # never fail silently: log it, autosave, and say so in the window
         path = log_exception(t, v, tb); traceback.print_exception(t, v, tb)

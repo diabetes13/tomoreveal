@@ -584,16 +584,16 @@ class PartsPanel(QtW.QWidget):
         self._effects_rows(pid, p, form)
         self._transition_rows(pid, p, form)
 
-    EFFECT_ROWS = (("Soft shadows", "shadow"), ("Outlines", "outline"), ("Depth fade", "depth_fade"), ("Membranes", "membranes"),
+    EFFECT_ROWS = (("Look", "style"), ("Soft shadows", "shadow"), ("Outlines", "outline"), ("Depth fade", "depth_fade"), ("Membranes", "membranes"),
                    ("Shadows on the slice", "tomo_shadow"))
 
     def _effects_rows(self, pid, p, form):
         """Effects in this part only (3.5): shadows, outlines, depth fade, membranes. "As in the Look tab" = the whole movie."""
         own = sb.part_look(p); n = len(own)
-        fd = Fold(f"Effects in this part ({n} changed)" if n else "Effects in this part", key="part_effects",
-                  tip="Turn effects on or off in this part only, for example no shadows while the segmentation is revealed. "
-                      "'As in the Look tab' follows the Look tab, which sets them for the whole movie. Changes blend in "
-                      "smoothly at the start of the part.")
+        fd = Fold(f"Look and effects in this part ({n} changed)" if n else "Look and effects in this part", key="part_effects",
+                  tip="A look of its own for this part (for example Ceramic in the overview and see-through membranes in a "
+                      "close-up), or effects on or off in this part only. 'As in the Look tab' follows the Look tab, which "
+                      "sets them for the whole movie. Changes blend in smoothly at the start of the part.")
 
         def choose(name, v):
             q = self.part(pid)
@@ -605,7 +605,8 @@ class PartsPanel(QtW.QWidget):
             else:
                 cur[name] = v
             self.set(pid, "look", cur or None)
-            m = len(cur); fd._text = f"Effects in this part ({m} changed)" if m else "Effects in this part"; fd.button.setText(fd._text)
+            m = len(cur); fd._text = f"Look and effects in this part ({m} changed)" if m else "Look and effects in this part"
+            fd.button.setText(fd._text)
         for label, name in self.EFFECT_ROWS:
             cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
             choices = sb.PART_LOOK[name]
@@ -614,7 +615,9 @@ class PartsPanel(QtW.QWidget):
             cur = own.get(name)
             cb.setCurrentIndex(next((i for i, (_, d) in enumerate(choices) if d == cur and (cur is not None or i == 0)), 0))
             cb.activated.connect(lambda j, name=name, choices=choices: choose(name, choices[j][1]))
-            cb.setToolTip(f"{label} in this part: as in the Look tab (the whole movie), or its own choice")
+            cb.setToolTip("A whole look for this part only (the background stays the movie's); the rows below can still "
+                          "change single effects" if name == "style" else
+                          f"{label} in this part: as in the Look tab (the whole movie), or its own choice")
             fd.form.addRow(label, cb)
         form.addRow(fd)
 

@@ -109,17 +109,41 @@ def sidecar_classes(path):
     return {}
 
 
-def surface(mask, off_zyx, smooth, step):
-    """Smoothed isosurface of a boolean (z,y,x) array, returned in (x,y,z) voxel coordinates."""
+SOFTEN = (("off", 0), ("a little", 1), ("more", 2), ("much", 3))
+SOFTEN_SIGMA = {1: 0.7, 2: 1.0, 3: 1.4}  # voxels; with 1.4 a membrane 2 voxels thick still stays whole (1 voxel: up to 0.6)
+SOFTEN_STEPS = {1: 30, 2: 60, 3: 120}    # extra smoothing steps (they do not shrink the surface)
+
+
+def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None):
+    """Smoothed isosurface of a boolean (z,y,x) array, returned in (x,y,z) voxel coordinates.
+    soften (1..3): the mask is blurred a little before the surface is made, which takes away the bumps and ridges a
+    segmentation leaves on membranes far better than more smoothing steps (they keep the voxel layers). full_shape
+    (the whole grid): where the structure is cut by the edge of the grid, the blur does not pull it back from there."""
     import pyvista as pv
     from skimage.measure import marching_cubes
-    sub = np.pad(mask.astype(np.float32), 1)  # pad closes surfaces at the volume edge
+    sig = SOFTEN_SIGMA.get(int(soften or 0), 0.0)
+    if sig <= 0:
+        sub = np.pad(mask.astype(np.float32), 1); pad = 1  # pad closes surfaces at the volume edge
+    else:
+        from scipy import ndimage
+        pad = 1 + int(np.ceil(3 * sig)); off = [int(o) for o in off_zyx]
+        at_edge = [((o <= 0), full_shape is not None and o + n >= full_shape[i]) for i, (o, n) in enumerate(zip(off, mask.shape))]
+        # at the grid's edge the structure goes on (copied outwards) while it is blurred; elsewhere there is nothing
+        sub = np.pad(mask.astype(np.float32), [(pad if lo else 0, pad if hi else 0) for lo, hi in at_edge], mode="edge")
+        sub = np.pad(sub, [(0 if lo else pad, 0 if hi else pad) for lo, hi in at_edge])
+        sub = ndimage.gaussian_filter(sub, sig)
+        sub[[0, -1], :, :] = 0; sub[:, [0, -1], :] = 0; sub[:, :, [0, -1]] = 0  # closed surfaces
     try:
         v, f, _, _ = marching_cubes(sub, 0.5, step_size=step)
     except (ValueError, RuntimeError):
         return None
-    v = (v + np.asarray(off_zyx, np.float32) - 1.0)[:, ::-1].astype(np.float32)
+    v = v + np.asarray(off_zyx, np.float32) - float(pad)
+    if sig > 0:  # what went on past the grid's edge is laid flat onto it, as without the blur
+        hi = np.asarray(full_shape if full_shape is not None else np.asarray(off_zyx) + mask.shape, np.float32) - 0.5
+        v = np.clip(v, -0.5, hi)
+    v = v[:, ::-1].astype(np.float32)
     pd = pv.PolyData(v, np.hstack([np.full((len(f), 1), 3), f[:, ::-1]]).ravel())
+    smooth = int(smooth) + SOFTEN_STEPS.get(int(soften or 0), 0)
     if smooth > 0:
         pd = pd.smooth_taubin(n_iter=int(smooth), pass_band=0.1)  # removes voxel steps without shrinking thin features
     return pd.compute_normals(auto_orient_normals=False, consistent_normals=True, split_vertices=False)
@@ -138,7 +162,7 @@ class Dataset:
         self._labels = {}      # structure id -> (label array of its source, label value)
         self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing) -> surface, kept while sources change
         self.smooth, self.step = smooth, step
-        self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations} (the user's choices)
+        self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations, "soften": 0..3} (the user's choices)
         self.path_cache = {}   # camera paths along structures (paths.centre_line), computed once per change
         self.path_async = False  # the window computes missing paths in a worker thread instead of in build_plan
 
@@ -229,7 +253,7 @@ class Dataset:
                 self.meshes[k] = m
 
     def param(self, k, name):
-        """A structure's surface setting: minimum object size (voxels) or smoothing iterations."""
+        """A structure's surface setting: minimum object size (voxels), smoothing iterations, or soften (0..3)."""
         v = (self.params.get(self.classes[k]["key"]) or {}).get(name)
         if name == "smoothing":
             return int(self.smooth if v is None else v)
@@ -237,12 +261,12 @@ class Dataset:
 
     def _cache_key(self, k):
         c = self.classes[k]
-        return (c["key"], c.get("threshold"), self.param(k, "min_object_voxels"), self.param(k, "smoothing"))
+        return (c["key"], c.get("threshold"), self.param(k, "min_object_voxels"), self.param(k, "smoothing"), self.param(k, "soften"))
 
     def set_params(self, k, **kw):
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
         key = self.classes[k]["key"]; before = self._cache_key(k)
-        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing")})
+        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften")})
         self.params[key] = cur; self.path_cache = {}
         if self._cache_key(k) == before:
             return False
@@ -283,7 +307,8 @@ class Dataset:
         if sl is None or (self.classes[k]["background"] and not force):
             return
         mask = self.kept_mask(k, sl)
-        m = surface(mask, [s.start for s in sl], self.param(k, "smoothing"), self.step) if mask.any() else None
+        m = surface(mask, [s.start for s in sl], self.param(k, "smoothing"), self.step, self.param(k, "soften"),
+                                    self.shape) if mask.any() else None
         if m is not None:
             self.meshes[k] = m; self._mesh_cache[self._cache_key(k)] = m
 
@@ -336,7 +361,7 @@ class Dataset:
 
     def comp_mesh(self, k, cid):
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
-        return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1)
+        return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1, self.param(k, "soften"), self.shape)
 
     def targets_box(self, tgt, pad=True):
         """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""

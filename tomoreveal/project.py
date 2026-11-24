@@ -263,7 +263,7 @@ def load_into(st, data, resolved, log=print):
             if s is not None:
                 s["thr"] = float(r["entry"]["threshold"])
     for key, c in (remap((data.get("spec") or {}).get("classes") or {}, mapping)).items():  # surfaces built as saved
-        kw = {n: c[n] for n in ("min_object_voxels", "smoothing") if c.get(n) is not None}
+        kw = {n: c[n] for n in ("min_object_voxels", "smoothing", "soften") if c.get(n) is not None}
         if kw:
             st.ds.params[key] = kw
     enabled = remap(data.get("segmentation_enabled") or {}, mapping)

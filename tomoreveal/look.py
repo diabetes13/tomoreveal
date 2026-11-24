@@ -259,30 +259,55 @@ class BakedShadows:
 
     def __init__(self):
         self.key = None; self.fields = None; self.occ = None; self._factor = {}
+        self._coarse = {}  # structure -> its occupancy at half resolution (the slow part), kept while its surface stays
+        self._sets = []    # the last few sets of shown structures with their blurred fields (close-ups hide and show some)
+
+    KEEP_SETS = 3
+
+    def _coarse_of(self, ds, k):
+        key = (k, id(ds), id(ds.meshes.get(k)))
+        hit = self._coarse.get(k)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        sl = ds.bbox.get(k); q = self.Q
+        if sl is None:
+            self._coarse[k] = (key, None); return None
+        m = ds.kept_mask(k, sl).astype(np.float32)
+        z0, y0, x0 = sl[0].start, sl[1].start, sl[2].start
+        pz, py, px = z0 % q, y0 % q, x0 % q  # align to the coarse grid
+        m = np.pad(m, ((pz, (-(m.shape[0] + pz)) % q), (py, (-(m.shape[1] + py)) % q), (px, (-(m.shape[2] + px)) % q)))
+        c = m.reshape(m.shape[0] // q, q, m.shape[1] // q, q, m.shape[2] // q, q).mean(axis=(1, 3, 5))
+        out = ((z0 - pz) // q, (y0 - py) // q, (x0 - px) // q), c
+        self._coarse[k] = (key, out)
+        return out
 
     def prepare(self, ds, ks, reach):
-        """Blurred occupancy fields for the structures ks (cached until they or the reach change)."""
+        """Blurred occupancy fields for the structures ks (cached until they or the reach change). The last few sets are
+        kept, so a close-up that hides a structure and shows it again afterwards does not work them out again."""
         key = (tuple(sorted(ks)), reach, id(ds), tuple(id(ds.meshes.get(k)) for k in sorted(ks)))
         if key == self.key:
             return
+        for i, (k0, val) in enumerate(self._sets):
+            if k0 == key:
+                self._sets.append(self._sets.pop(i))
+                self.fields, self.occ, self.reach = val; self.key = key
+                return
         from scipy import ndimage
         nz, ny, nx = ds.shape; q = self.Q
         occ = np.zeros(((nz + q - 1) // q, (ny + q - 1) // q, (nx + q - 1) // q), np.float32)
         for k in ks:
-            sl = ds.bbox.get(k)
-            if sl is None:
+            got = self._coarse_of(ds, k)
+            if got is None:
                 continue
-            m = ds.kept_mask(k, sl).astype(np.float32)
-            z0, y0, x0 = sl[0].start, sl[1].start, sl[2].start
-            pz, py, px = z0 % q, y0 % q, x0 % q  # align to the coarse grid
-            m = np.pad(m, ((pz, (-(m.shape[0] + pz)) % q), (py, (-(m.shape[1] + py)) % q), (px, (-(m.shape[2] + px)) % q)))
-            c = m.reshape(m.shape[0] // q, q, m.shape[1] // q, q, m.shape[2] // q, q).mean(axis=(1, 3, 5))
-            Z, Y, X = (z0 - pz) // q, (y0 - py) // q, (x0 - px) // q
+            (Z, Y, X), c = got
             sub = occ[Z:Z + c.shape[0], Y:Y + c.shape[1], X:X + c.shape[2]]
             np.maximum(sub, c[:sub.shape[0], :sub.shape[1], :sub.shape[2]], out=sub)
         s = REACH_SCALE.get(reach, 1.0)
         self.fields = [ndimage.gaussian_filter(occ, r * s / q) for r in self.RADII]
-        self.occ = occ; self.key = key; self._factor = {}; self.reach = s
+        self.occ = occ; self.key = key; self.reach = s
+        self._sets.append((key, (self.fields, occ, s))); del self._sets[:-self.KEEP_SETS]
+        kept = {k0 for k0, _ in self._sets}  # vertex shadows of sets no longer kept are dropped
+        self._factor = {fk: v for fk, v in self._factor.items() if fk[2] in kept}
 
     def factor(self, mesh, darkest):
         """Brightness 0..1 of each vertex of a mesh (1: open, `darkest`: deep in a crease)."""

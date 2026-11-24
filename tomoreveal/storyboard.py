@@ -314,7 +314,8 @@ def new_part(kind, **fields):
         p = _common(type="hold", seconds=2)
     elif kind == "path":
         p = _common(type="path", seconds=10, source=dict(kind="follow", items=[]), waypoints=[], camera=dict(PATH_CAMERA),
-                    speed="even", ease=True, reverse=False, others=dict(colour="keep", opacity=1.0), show_path_in_preview=True)
+                    speed="even", ease=True, reverse=False, others=dict(colour="keep", opacity=1.0), show_path_in_preview=True,
+                    steadiness=50.0)  # 3.5: a steady rail, gentle at the ends
     elif kind in ("card", "title_card", "end_card"):
         title = fields.pop("title", None)
         if kind == "title_card":
@@ -335,7 +336,8 @@ def new_part(kind, **fields):
 
 
 # Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
-NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle"), "slide": ("ease_end",), "overview": ("ease_end",)}
+NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle"), "slide": ("ease_end",), "overview": ("ease_end",),
+              "path": ("steadiness",)}
 WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
 
@@ -1055,6 +1057,61 @@ def _pose(fr, pos, focal, up):
                 pos=pos, up=np.asarray(up, float))
 
 
+TURN_LIMIT = 20.0      # degrees per second the follow camera's view may turn at most
+TIME_FILTER = 0.4      # seconds: the last smoothing of the follow camera over time
+
+
+def follow_rails(part, line, cam):
+    """(camera rail, look-at rail) of a steady follow path (3.5): the look-at rail is the centre line smoothed by the
+    part's steadiness; the camera rail is a calmer copy (averaged over 15 % of the length), offset by side and height."""
+    from .paths import moving_average, resample, steady_rail
+    look = steady_rail(line, float(part.get("steadiness", 50)))
+    base = moving_average(look, 0.15)
+    L = float(np.linalg.norm(np.diff(look, axis=0), axis=1).sum())
+    D = float(cam.get("distance", 1.0)) * max(30.0, 0.3 * L); h = math.radians(float(cam.get("height", 30)))
+    z = np.array([0.0, 0.0, 1.0]); side = cam.get("side", "above")
+    T = np.gradient(base, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True) + 1e-12
+    zmean = float(base[:, 2].mean())
+    out = []
+    for i, P in enumerate(base):
+        t = T[i]; horiz = t - z * float(t @ z); horiz /= np.linalg.norm(horiz) or 1.0
+        if side == "above":
+            C = np.array([P[0], P[1], zmean + D])
+        elif side == "behind":
+            C = P - horiz * D * math.cos(h); C[2] = zmean + D * math.sin(h)
+        elif side == "free":
+            C = P + D * np.asarray(cam.get("_main_dir"), float)
+        else:
+            sv = np.cross(horiz, z); sv *= (1 if side == "left" else -1)
+            C = P + sv * D * math.cos(h); C[2] = zmean + D * math.sin(h)  # constant height, not up and down with the membrane
+        out.append(C)
+    return resample(np.array(out), len(look)), look
+
+
+def steady_follow_poses(part, fr, line, cam, n, fps, main_dir, main_up):
+    from .paths import gaussian_in_time, turn_limited_times, upright_ups
+    cam = dict(cam, _main_dir=list(main_dir))
+    crail, look = follow_rails(part, line, cam)
+    T = max(1e-6, (n - 1) / fps)
+    if cam.get("look") == "ahead":  # look a little ahead along the path
+        k = max(1, int(round(float(cam.get("lead", 0.05)) * len(look))))
+        look = np.vstack([look[k:], np.repeat(look[-1:], k, axis=0)])
+    end = "very_gentle" if part.get("speed") == "ease" else "gentle"  # even speed, with gentle (or very gentle) ends
+    peak = max((ease_curve((k + 1) / 200, end, end) - ease_curve(k / 200, end, end)) * 200 for k in range(200))
+    times = turn_limited_times(crail, look, T, TURN_LIMIT / peak)  # the eased middle runs up to `peak` times faster
+    pos, foc = [], []
+    for j in range(n):
+        u = ease_curve(j / max(1, n - 1), end, end)
+        t = u * times[-1]
+        x = float(np.interp(t, times, np.arange(len(times))))
+        i0 = int(min(len(times) - 2, max(0, math.floor(x)))); f = x - i0
+        pos.append(crail[i0] * (1 - f) + crail[i0 + 1] * f); foc.append(look[i0] * (1 - f) + look[i0 + 1] * f)
+    sig = TIME_FILTER * fps
+    pos, foc = gaussian_in_time(pos, sig), gaussian_in_time(foc, sig)
+    ups = upright_ups([f - p for p, f in zip(pos, foc)], np.asarray(main_up, float))
+    return [_pose(fr, p, f, u) for p, f, u in zip(pos, foc, ups)]
+
+
 def path_poses(part, ds, fr, spec, n, fps, cb):
     """Camera poses of a path part: along the centre line of a structure ("follow"), or through waypoints ("points")."""
     from .paths import arclength, catmull_rom, sample, stable_up
@@ -1067,6 +1124,8 @@ def path_poses(part, ds, fr, spec, n, fps, cb):
         line = path_line(ds, items, cb)
         if part.get("reverse"):
             line = line[::-1]
+        if part.get("steadiness") is not None:  # 3.5: a calm tracking shot instead of following every bend
+            return steady_follow_poses(part, fr, line, cam, n, fps, main_dir, main_up)
         cum = arclength(line); L = float(cum[-1]); D = float(cam["distance"]) * max(30.0, 0.3 * L)
         z = np.array([0.0, 0.0, 1.0]); h = math.radians(float(cam.get("height", 30)))
         pos, foc, dirs = [], [], []

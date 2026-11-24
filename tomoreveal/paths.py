@@ -193,3 +193,127 @@ def stable_up(dirs, up0):
             u = 0.7 * u + 0.3 * prev; u = u - d * float(np.dot(u, d)); u /= np.linalg.norm(u) or 1.0
         ups.append(u); prev = u
     return ups
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3.5: a steady rail for the "follow" camera (plan 3.5 phase 4)
+# ---------------------------------------------------------------------------------------------------------------
+STEADINESS = (("close (follows bends)", 0), ("steady", 50), ("very steady", 100))
+RAIL_POINTS = 400
+
+
+def resample(line, n=RAIL_POINTS):
+    """n points evenly spaced along a polyline."""
+    line = np.asarray(line, float); cum = arclength(line)
+    if cum[-1] < 1e-9:
+        return np.repeat(line[:1], n, axis=0)
+    t = np.linspace(0, cum[-1], n)
+    return np.array([np.interp(t, cum, line[:, i]) for i in range(3)]).T
+
+
+def _spline_rail(line, factor):
+    """Smoothing spline with s = factor * (number of points), resampled evenly."""
+    from scipy.interpolate import splev, splprep
+    line = np.asarray(line, float)
+    keep = np.r_[True, np.linalg.norm(np.diff(line, axis=0), axis=1) > 1e-6]; line = line[keep]
+    if len(line) < 4:
+        return resample(line)
+    tck, _ = splprep(line.T, s=factor * len(line), k=3)
+    return resample(np.array(splev(np.linspace(0, 1, RAIL_POINTS * 3), tck)).T)
+
+
+def _poly_rail(line, degree=3):
+    """A polynomial of the position along the line's main direction: very steady, follows only the overall bend."""
+    line = np.asarray(line, float); c = line.mean(0)
+    _, v = np.linalg.eigh(np.cov((line - c).T)); a = v[:, -1]
+    t = (line - c) @ a
+    if t[-1] < t[0]:
+        a, t = -a, -t
+    fit = [np.polyfit(t, line[:, i], degree) for i in range(3)]
+    tt = np.linspace(t.min(), t.max(), RAIL_POINTS * 3)
+    return resample(np.array([np.polyval(f, tt) for f in fit]).T)
+
+
+def _smooth_along(rail, sigma_frac):
+    """The rail smoothed by a Gaussian along its length (sigma = sigma_frac of its points); the ends are mirrored
+    through the end points, so the rail keeps its ends and its direction there."""
+    from scipy.ndimage import gaussian_filter1d
+    rail = resample(rail); n = len(rail); sig = max(0.5, sigma_frac * n); pad = min(n - 1, int(3 * sig))
+    ext = np.vstack([2 * rail[0] - rail[pad:0:-1], rail, 2 * rail[-1] - rail[-2:-pad - 2:-1]])
+    out = gaussian_filter1d(ext, sig, axis=0, mode="nearest")[pad:pad + n]
+    return resample(out)
+
+
+def steady_rail(line, steadiness):
+    """The look-at rail for a steadiness 0 (close: smoothed over 1.5 % of its length) .. 50 (steady: 6 %) .. 100
+    (very steady: a degree-3 polynomial along the main direction); values in between blend continuously. (Measured in
+    plan 3.5 on the raw skeleton, a smoothing spline did the same; the centre line here is already smoothed, so the
+    smoothing is set by length instead.)"""
+    v = float(min(100.0, max(0.0, steadiness)))
+    if v <= 50:
+        return _smooth_along(line, 0.015 * (0.06 / 0.015) ** (v / 50.0))
+    w = (v - 50.0) / 50.0
+    a, b = _smooth_along(line, 0.06), _poly_rail(line)
+    return resample(a * (1 - w) + b * w)
+
+
+def moving_average(rail, frac=0.15):
+    """The rail averaged over a window of frac of its length (ends reflected), resampled evenly: a calmer copy."""
+    rail = np.asarray(rail, float); n = len(rail); k = max(1, int(round(frac * n)) | 1)
+    if k < 3:
+        return rail.copy()
+    pad = k // 2
+    ext = np.vstack([2 * rail[0] - rail[pad:0:-1], rail, 2 * rail[-1] - rail[-2:-pad - 2:-1]])
+    ker = np.ones(k) / k
+    out = np.array([np.convolve(ext[:, i], ker, mode="valid") for i in range(3)]).T
+    return resample(out, n)
+
+
+def gaussian_in_time(points, sigma_frames):
+    """Points filtered over time with a Gaussian (ends reflected): a last guard against jitter."""
+    from scipy.ndimage import gaussian_filter1d
+    pts = np.asarray(points, float)
+    if sigma_frames <= 0.3 or len(pts) < 3:
+        return pts
+    return gaussian_filter1d(pts, sigma_frames, axis=0, mode="reflect")
+
+
+def upright_ups(dirs, up0, z=(0.0, 0.0, 1.0), limit_deg=20.0):
+    """Up vectors: the tomogram's z axis whenever the view is more than limit_deg away from it, otherwise carried along
+    from the previous frame with the least turn (parallel transport), so the picture never rolls with the membrane."""
+    z = np.asarray(z, float); ups = []; prev = None; cosl = math.cos(math.radians(limit_deg))
+    for d in dirs:
+        d = np.asarray(d, float); d = d / (np.linalg.norm(d) or 1.0)
+        if abs(float(d @ z)) < cosl:
+            u = z - d * float(z @ d)
+        else:
+            base = prev if prev is not None else np.asarray(up0, float)
+            u = base - d * float(base @ d)
+            if np.linalg.norm(u) < 1e-6:
+                u = np.cross(d, [1.0, 0.0, 0.0])
+        u = u / (np.linalg.norm(u) or 1.0); ups.append(u); prev = u
+    return ups
+
+
+def turn_limited_times(cam, look, total, max_deg_per_s):
+    """Cumulative time 0..total at each rail point: even speed, but slower where the view direction would otherwise
+    turn faster than max_deg_per_s."""
+    cam, look = np.asarray(cam, float), np.asarray(look, float)
+    ds = np.linalg.norm(np.diff(cam, axis=0), axis=1)
+    d = look - cam; d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
+    dth = np.degrees(np.arccos(np.clip(np.sum(d[1:] * d[:-1], axis=1), -1, 1)))
+    if total <= 0 or ds.sum() < 1e-9:
+        return np.linspace(0, total, len(cam))
+    need = dth.sum() / max_deg_per_s
+    if need >= total:  # cannot keep to the limit in this time: turn as evenly as possible
+        c = np.maximum(ds / ds.sum(), dth / max(dth.sum(), 1e-9))
+        return np.r_[0, np.cumsum(c)] / c.sum() * total
+    lo, hi = 1e-9, 1e9  # speed (voxels per second) so the total time fits
+    for _ in range(80):
+        v = math.sqrt(lo * hi)
+        if np.maximum(ds / v, dth / max_deg_per_s).sum() > total:
+            lo = v
+        else:
+            hi = v
+    c = np.maximum(ds / hi, dth / max_deg_per_s)
+    return np.r_[0, np.cumsum(c)] / c.sum() * total

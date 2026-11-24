@@ -1,11 +1,12 @@
 """Settings of a camera path part in the Movie tab: what to follow or which points, and how the camera moves."""
 import numpy as np
-from PySide6 import QtWidgets as QtW
+from PySide6 import QtCore as QtC, QtWidgets as QtW
 
 from . import storyboard as sb
 from .gui_theme import DIM
 
-SIDES = (("above", "above"), ("from the left", "left"), ("from the right", "right"), ("as the main view", "free"))
+SIDES = (("above", "above"), ("from the left", "left"), ("from the right", "right"), ("behind, looking along it", "behind"),
+         ("as the main view", "free"))
 LOOKS = (("at the path", "at_path"), ("a little ahead", "ahead"))
 SPEEDS = (("even", "even"), ("slow at the ends", "ease"))
 
@@ -47,6 +48,32 @@ def current_view(win):
     return np.asarray(p["c"], float) + p["dist"] * np.asarray(d), np.asarray(p["c"], float)
 
 
+def follow_to_points(win, pid):
+    """"Edit as points": a follow path becomes a path through about one point per 15 % of its length (3.5)."""
+    part = win.parts_panel.part(pid); plan = win.timeline.canvas.plan
+    if part is None or plan is None:
+        return
+    poses = [f["pose"] for f in plan.frames if f.get("part") == pid and f["phase"] == "main"]
+    if len(poses) < 2:
+        win.say("The path is not ready yet.", "err"); return
+    part["waypoints"] = points_from_poses(poses)
+    part["source"] = dict(part.get("source") or {}, kind="points")
+    win.editor.commit(select=pid); win.say(f"The path now goes through {len(part['waypoints'])} points you can adjust.", "ok")
+
+
+def points_from_poses(poses, step=0.15):
+    """Waypoints (camera position and look-at point) at about every `step` of the path's length."""
+    pos = np.array([np.asarray(p.get("pos") if p.get("pos") is not None else p["c"], float) for p in poses])
+    cum = np.r_[0, np.cumsum(np.linalg.norm(np.diff(pos, axis=0), axis=1))]
+    k = max(2, int(round(1 / step)) + 1)
+    out = []
+    for d in np.linspace(0, cum[-1], k):
+        i = int(np.argmin(np.abs(cum - d))); p = poses[i]
+        P = np.asarray(p.get("pos") if p.get("pos") is not None else p["c"], float)
+        out.append(dict(pos=[float(x) for x in P], focal=[float(x) for x in p["c"]], pause=0.0))
+    return out
+
+
 def path_rows(panel, pid, p, form):
     win = panel.win
 
@@ -82,6 +109,19 @@ def path_rows(panel, pid, p, form):
         rev = QtW.QPushButton("Reverse direction"); rev.setToolTip("Glide from the other end")
         rev.clicked.connect(lambda: panel.set(pid, "reverse", not part().get("reverse", False)))
         form.addRow("Follow", _row(lab, b, rev))
+        from .paths import STEADINESS
+        sv = p.get("steadiness")
+        items = list(STEADINESS) + ([] if sv is not None else [("follows every bend (as before 3.5)", -1)])
+        near = -1 if sv is None else min(STEADINESS, key=lambda it: abs(it[1] - float(sv)))[1]
+        stc = _combo(items, near, lambda v: (panel.set(pid, "steadiness", None if v < 0 else float(v), rebuild=True)))
+        stc.setToolTip("How calmly the camera moves: close follows the bends of the membrane, very steady glides along its overall line")
+        sl = QtW.QSlider(QtC.Qt.Horizontal); sl.setRange(0, 100); sl.setFixedWidth(110); sl.setValue(int(round(float(sv or 50))))
+        sl.setEnabled(sv is not None); sl.setToolTip("Fine control, from close (left) to very steady (right)")
+        sl.sliderReleased.connect(lambda: panel.set(pid, "steadiness", float(sl.value())))
+        form.addRow("Steadiness", _row(stc, sl))
+        edit = QtW.QPushButton("Edit as points"); edit.setToolTip("Turn this path into a path through points that you can adjust one by one")
+        edit.clicked.connect(lambda: follow_to_points(win, pid))
+        form.addRow("", _row(edit))
         why = (win.timeline.canvas.plan.problems if win.timeline.canvas.plan else {}).get(pid)
         if why:
             n = QtW.QLabel(why); n.setStyleSheet(DIM); n.setWordWrap(True); form.addRow("", n)

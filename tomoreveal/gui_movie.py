@@ -88,7 +88,7 @@ class MovieEditor(QtC.QObject):
         """After an edit: one undo step, rebuild the Movie tab, redraw; optionally select a part and show its start."""
         self.hist_timer.stop(); self.history.push(self.spec)
         if select is not None:
-            self.win.selected_part = select
+            self.win.end_picks(keep=select); self.win.selected_part = select
         if show is not None:
             self.win.req = {"at": {"part": show, "u": 0}}
         self.win.build_controls(); self.win.schedule(0); self.refresh_buttons()
@@ -347,7 +347,7 @@ EFFECTS = (("none", "none"), ("cross-section sweep", "section"), ("grow in", "gr
 SECTION_DIRS = (("through the slices, top to bottom", "slices"), ("from the viewer's side", "viewer"), ("along the object's longest axis", "axis"))
 GROW_HOW = (("build up from the bottom", "bottom"), ("build up from the slice", "slice"), ("fade in", "fade"))
 OTHERS = (("grey", "grey"), ("hidden", "hide"), ("unchanged", "keep"))
-OTHER_COLOURS = (("grey", "grey"), ("darker", "darken"), ("unchanged colour", "keep"))
+OTHER_COLOURS = (("grey", "grey"), ("darker", "darken"), ("unchanged colour", "keep"), ("hidden", "hide"))
 
 
 class PartsPanel(QtW.QWidget):
@@ -457,7 +457,7 @@ class PartsPanel(QtW.QWidget):
     # ---- opening and closing ----
     def toggle(self, pid):
         if self.open_id == pid:
-            self.close_open(); self.win.selected_part = None; self.win.timeline.set_selected(None)
+            self.win.end_picks(); self.close_open(); self.win.selected_part = None; self.win.timeline.set_selected(None)
         else:
             self.open(pid)
 
@@ -472,6 +472,7 @@ class PartsPanel(QtW.QWidget):
         """Open one line (closing the others); select=True also selects the part on the timeline and shows it."""
         if pid not in self.rows:
             return
+        self.win.end_picks(keep=pid)
         self.close_open(); self.open_id = pid; r = self.rows[pid]
         self.fill_details(pid); r["details"].setVisible(True); r["arrow"].setArrowType(QtC.Qt.DownArrow)
         r["box"].setStyleSheet("QFrame#part { border: 1px solid palette(highlight); border-radius: 3px }")  # not its labels
@@ -646,13 +647,16 @@ class PartsPanel(QtW.QWidget):
         else:
             form.addRow("Objects in focus", self._items_list(pid, p))
         form.addRow("", self._focus_buttons(pid, p))
-        oc, oo = sb.others_of(p.get("others", "grey"))
+        oc, oo = sb.others_choice(p.get("others", "grey"))
         orow = QtW.QWidget(); h = QtW.QHBoxLayout(orow); h.setContentsMargins(0, 0, 0, 0)
-        col = _combo(OTHER_COLOURS, oc, lambda v: self.set(pid, "others", dict(colour=v, opacity=sb.others_of(self.part(pid).get("others"))[1])))
-        col.setToolTip("Colour of the structures that are not in focus")
         op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo))
-        op.setToolTip("How visible the other structures stay; 0 % hides them")
-        op.valueChanged.connect(lambda v: self.set(pid, "others", dict(colour=sb.others_of(self.part(pid).get("others"))[0], opacity=v / 100)))
+        op.setToolTip("How visible the other structures stay; 0 % hides them"); op.setEnabled(oc != "hide")
+
+        def colour(v):
+            op.setEnabled(v != "hide"); self.set(pid, "others", sb.set_others_choice(self.part(pid).get("others"), colour=v))
+        col = _combo(OTHER_COLOURS, oc, colour)
+        col.setToolTip("The structures that are not in focus: grey, darker, in their own colour, or hidden")
+        op.valueChanged.connect(lambda v: self.set(pid, "others", sb.set_others_choice(self.part(pid).get("others"), opacity=v / 100)))
         h.addWidget(col); h.addWidget(op); h.addStretch(1)
         form.addRow("Other structures", orow)
         form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v, rebuild=True)))

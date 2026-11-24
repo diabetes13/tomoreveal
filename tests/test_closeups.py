@@ -121,3 +121,57 @@ def test_pick_several_objects_then_one_close_up_each(window):
     win.editor.undo()
     assert len(win.spec["shots"]) == n and len(sb.target_items(win.spec["shots"][-1]["target"])) == 3
     assert not errs, errs
+
+
+def _objects(win, n):
+    spec = win.spec_for(); seen = {}
+    for fx in np.linspace(0.2, 0.8, 13):
+        for fy in np.linspace(0.25, 0.8, 8):
+            p = win.st.pick(spec, {"frame": win.frame, "x": fx, "y": fy})
+            if p.get("found") and p.get("component") is not None:
+                seen.setdefault((p["class"], p["component"]), (fx, fy))
+    return list(seen.items())[:n]
+
+
+def test_a_later_close_up_does_not_add_to_the_first(window):
+    """3.5 bug fix: with "+ Click objects" still on for close-up A, clicks for a new close-up went into A."""
+    app, win, errs = window
+    a = sb.new_part("focus", target=sb.make_target([]), caption=""); win.editor.insert(a)
+    win.parts_panel.open(a["id"]); win.start_multi_pick(a["id"]); win.prev_timer.stop(); win.do_preview()
+    picks = _objects(win, 3); assert len(picks) == 3
+    win.on_click(*picks[0][1])
+    assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0]]
+    # without pressing Esc: add a new close-up by clicking an object
+    n = len(win.spec["shots"])
+    win.editor.pick_closeup(); win.prev_timer.stop(); win.do_preview()
+    assert win.multi_pick is None
+    win.on_click(*picks[1][1])
+    assert len(win.spec["shots"]) == n + 1
+    assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0]]  # A unchanged
+    b = win.spec["shots"][-1] if win.spec["shots"][-1]["id"] != a["id"] else win.spec["shots"][-2]
+    assert sb.target_items(b["target"])[0][0] == picks[1][0][0]
+    # selecting another part also ends the clicking for A
+    win.parts_panel.open(a["id"]); win.start_multi_pick(a["id"])
+    win.select_part(b["id"]); assert win.multi_pick is None
+    # later, objects can still be added to A
+    win.select_part(a["id"]); win.start_multi_pick(a["id"]); win.prev_timer.stop(); win.do_preview()
+    win.on_click(*picks[2][1]); win.end_multi_pick()
+    assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0], picks[2][0]]
+    assert not errs, errs
+
+
+def test_hide_the_others_and_start_from_the_top(studio):
+    ds = studio.ds; spec = tr.default_spec(ds)
+    part = sb.new_part("focus", target=sb.make_target([(ds.key_of(2), None)]), motion="none")
+    assert part["tilt"] == 0.0 and "tilt" not in sb.as_legacy(part)
+    part["others"] = sb.set_others_choice(part["others"], colour="hide")
+    assert sb.others_choice(part["others"]) == ("hide", 1.0) and sb.others_of(part["others"]) == ("keep", 0.0)
+    sb.insert_part(spec, part)
+    f = main_frame(studio, spec, part["id"])
+    assert f["pose"]["tilt"] == pytest.approx(0.0)  # looking straight down
+    studio.ren.draw(f, spec, (320, 180))
+    a = studio.ren.actors
+    assert a[2].GetVisibility() and not a[1].GetVisibility() and not a[3].GetVisibility()
+    back = sb.set_others_choice(part["others"], colour="grey")
+    assert back == dict(colour="grey", opacity=1.0)  # the opacity comes back when another colour is chosen
+    assert sb.others_choice("hide") == ("hide", 1.0)

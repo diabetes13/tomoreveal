@@ -133,11 +133,13 @@ def path_rows(panel, pid, p, form):
     look = _combo(LOOKS, cam.get("look", "at_path"), lambda v: setcam(look=v))
     speed = _combo(SPEEDS, p.get("speed", "even"), lambda v: panel.set(pid, "speed", v))
     form.addRow("Looks", _row(look, QtW.QLabel("speed"), speed))
-    oc, oo = sb.others_of(p.get("others"))
-    col = _combo((("unchanged", "keep"), ("grey", "grey"), ("darker", "darken")), oc,
-                 lambda v: panel.set(pid, "others", dict(colour=v, opacity=sb.others_of(part().get("others"))[1])))
-    op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo))
-    op.valueChanged.connect(lambda v: panel.set(pid, "others", dict(colour=sb.others_of(part().get("others"))[0], opacity=v / 100)))
+    oc, oo = sb.others_choice(p.get("others"))
+    op = QtW.QSpinBox(); op.setRange(0, 100); op.setSuffix(" %"); op.setPrefix("opacity "); op.setValue(round(100 * oo)); op.setEnabled(oc != "hide")
+
+    def colour(v):
+        op.setEnabled(v != "hide"); panel.set(pid, "others", sb.set_others_choice(part().get("others"), colour=v))
+    col = _combo((("unchanged", "keep"), ("grey", "grey"), ("darker", "darken"), ("hidden", "hide")), oc, colour)
+    op.valueChanged.connect(lambda v: panel.set(pid, "others", sb.set_others_choice(part().get("others"), opacity=v / 100)))
     form.addRow("Other structures", _row(col, op))
     show = QtW.QCheckBox("show the path in the preview"); show.setChecked(bool(p.get("show_path_in_preview", True)))
     show.toggled.connect(lambda v: panel.set(pid, "show_path_in_preview", bool(v))); form.addRow("", show)

@@ -1,5 +1,13 @@
 # Change log
 
+## 3.5.0 (in progress)
+
+- **Fixed: a new close-up could add its object to an earlier close-up.** If "+ Click objects in the preview" was still on for one close-up, later clicks (also those meant for a new close-up) went into that first close-up. Only one way of clicking in the preview is now active at a time, and selecting another part ends it. You can still add objects to a close-up later.
+- **Close-ups can hide the other structures:** "Other structures" now offers grey, darker, unchanged colour and **hidden**.
+- **New close-ups look from the top** (tilt 0°). Close-ups in older projects keep their automatic tilt.
+- **Timeline zoom is easy to find:** a zoom bar (−, slider, +, Fit all, Zoom to part, Compact), an overview strip of the whole movie, Ctrl + mouse wheel or touchpad pinch to zoom, the wheel or a two-finger swipe to scroll, Ctrl + minus / plus / 0. The zoom is saved with the project.
+- **Opacity makes a structure see-through.** Lowering a structure's opacity used to make it vanish or only lighten its outline; now it becomes see-through, its outline fades with it, and 0 % hides it completely.
+
 ## 3.4.1
 
 - **Fixed a crash with "Shadows between structures"** on NVIDIA graphics cards. VTK's shadow shader failed for everything drawn without lighting (the tomogram slice, outlines, the scale bar, the Flat preset), which filled the terminal with shader errors and could end in a segmentation fault while turning the view. Those items are now drawn in the same colours in a way the shadow shader accepts, and the graphics card self-test checks this too.

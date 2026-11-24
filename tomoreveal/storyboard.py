@@ -97,11 +97,28 @@ OTHER_COLOURS = ("keep", "grey", "darken")
 
 def others_of(v):
     """(colour, opacity) of the other structures during a close-up. Older settings: grey = (grey, 1), hide = (keep, 0),
-    keep = (keep, 1)."""
+    keep = (keep, 1). {"colour": "hide"} (3.5) hides them; its opacity is kept for when another colour is chosen."""
     if isinstance(v, dict):
         c = v.get("colour", "grey")
+        if c == "hide":
+            return "keep", 0.0
         return (c if c in OTHER_COLOURS else "grey"), float(min(1.0, max(0.0, v.get("opacity", 1.0))))
     return {"grey": ("grey", 1.0), "hide": ("keep", 0.0), "keep": ("keep", 1.0)}.get(v, ("grey", 1.0))
+
+
+def others_choice(v):
+    """(choice shown in the window: keep / grey / darken / hide, opacity shown) of the other structures."""
+    if isinstance(v, dict):
+        c = v.get("colour", "grey")
+        return (c if c in OTHER_COLOURS + ("hide",) else "grey"), float(min(1.0, max(0.0, v.get("opacity", 1.0))))
+    c, o = others_of(v)
+    return ("hide", 1.0) if o <= 0 else (c, o)
+
+
+def set_others_choice(v, colour=None, opacity=None):
+    """New others setting from the window's colour choice and/or opacity."""
+    c, o = others_choice(v)
+    return dict(colour=c if colour is None else colour, opacity=o if opacity is None else float(opacity))
 
 
 def closeup_caption(items, name_of):
@@ -191,7 +208,7 @@ def new_part(kind, **fields):
         p = _common(type="overview", seconds=3, motion="none", angle=25, view=dict(tilt=42.0, az=0.0, zoom=1.0),
                     transition=VIEW_TRANSITION)
     elif kind == "focus":
-        p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30)
+        p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30, tilt=0.0)  # from the top (3.5)
     elif kind == "hold":
         p = _common(type="hold", seconds=2)
     elif kind == "path":
@@ -211,6 +228,18 @@ def new_part(kind, **fields):
     else:
         raise ValueError(f"unknown kind of part: {kind}")
     p.update(fields)
+    return p
+
+
+# Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
+NEW_IN_3_5 = {"focus": ("tilt",)}
+
+
+def as_legacy(part):
+    """A part as a project saved before 3.5 would have it: the 3.5 settings of new parts removed (tests, golden data)."""
+    p = copy.deepcopy(part)
+    for k in NEW_IN_3_5.get(p.get("type"), ()):
+        p.pop(k, None)
     return p
 
 

@@ -1081,7 +1081,19 @@ def build_gui(args):
 
         def select_part(self, pid):
             """A block clicked on the timeline: its line opens in the Movie tab."""
+            self.end_picks(keep=pid)  # clicks in the preview must never go on adding to a part that is not selected
             self.selected_part = pid; self.parts_panel.open(pid, select=False); self.editor.refresh_buttons()
+
+        def end_picks(self, keep=None):
+            """End every way of clicking in the preview for a part (objects of a close-up, points of a path, the object a
+            path follows), except for the part `keep`. Only one of them is ever active (3.5 fix: clicks for a new
+            close-up were added to an earlier close-up whose object picking was still on)."""
+            if self.multi_pick is not None and self.multi_pick != keep:
+                self.end_multi_pick()
+            if self.waypoint_pick is not None and self.waypoint_pick != keep:
+                self.end_waypoint_pick()
+            if self.path_pick is not None and self.path_pick != keep:
+                self.path_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
 
         def open_part(self, pid):
             """Double-click on a block: show the part's settings in the Movie tab."""
@@ -1098,6 +1110,8 @@ def build_gui(args):
             self.req = {"frame": int(v)}; self.schedule(40)
 
         def set_pick(self, on):
+            if on:
+                self.end_picks()
             self.pick_mode = bool(on); self.prev.setCursor(QtC.Qt.CrossCursor if on else QtC.Qt.ArrowCursor)
             if not on:
                 self.pick_for = None
@@ -1111,6 +1125,7 @@ def build_gui(args):
             """'+ Click objects in the preview' of a close-up: each click adds or removes one object."""
             if self.pick_mode:
                 self.pick_btn.setChecked(False)
+            self.end_picks(keep=pid)
             self.multi_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
             self.req = self._main_req(); self.schedule(0)
             self.say("Click objects to add them to the close-up; click one again to take it out; Shift-click adds the whole "
@@ -1125,7 +1140,7 @@ def build_gui(args):
             self.req = {"at": {"part": pid, "u": 0.5}}; self.schedule(0); self.say("")
 
         def start_waypoint_pick(self, pid):
-            self.end_multi_pick(); self.waypoint_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.pick_btn.setChecked(False); self.end_picks(keep=pid); self.waypoint_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
             self.say("Click a structure or the slice to add a point. Press Esc when done.")
 
         def end_waypoint_pick(self):
@@ -1134,7 +1149,7 @@ def build_gui(args):
                 self.parts_panel.fill_details(pid)
 
         def start_path_pick(self, pid):
-            self.end_multi_pick(); self.path_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
+            self.pick_btn.setChecked(False); self.end_picks(keep=pid); self.path_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
             self.req = self._main_req(); self.schedule(0)
             self.say("Click the object the camera should follow.")
 

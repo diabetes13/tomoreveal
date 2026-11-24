@@ -19,8 +19,9 @@ def plans(ds):
     a = tr.default_spec(ds)
     b = tr.default_spec(ds)
     vesicles = ds.key_of(2)
-    b["shots"].append(tr.focus_shot({"class": ds.key_of(1)}, "membrane"))
-    b["shots"].append(tr.focus_shot({"class": vesicles, "component": 1}, "one vesicle", seconds=3, others="hide"))
+    from tomoreveal.storyboard import as_legacy  # parts as saved before 3.5: they must keep moving exactly as pinned
+    b["shots"].append(as_legacy(tr.focus_shot({"class": ds.key_of(1)}, "membrane")))
+    b["shots"].append(as_legacy(tr.focus_shot({"class": vesicles, "component": 1}, "one vesicle", seconds=3, others="hide")))
     return {"default": a, "closeups": b}
 
 

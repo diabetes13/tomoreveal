@@ -54,6 +54,35 @@ class Framer:
         return dict(c=c, tilt=float(tilt), az=float(az), dist=dist, scale=scale)
 
 
+def view_pan(view):
+    """Offset (x, y, z voxels) of the rotation centre of a view from the middle of what it frames, or None."""
+    pan = (view or {}).get("pan")
+    if pan is None:
+        return None
+    pan = np.asarray(pan, float)
+    return None if pan.shape != (3,) or not np.any(pan) else pan
+
+
+def main_box(spec, shape):
+    """(lo, hi) in voxels (x, y, z) of what the main view frames: the whole volume, or the clip box (unless not fitted)."""
+    nz, ny, nx = shape
+    lo, hi = np.zeros(3), np.array([nx - 1, ny - 1, nz - 1], float)
+    cb = clip_box(spec, shape)
+    if cb and (spec.get("clip") or {}).get("fit", True):
+        lo, hi = np.array(cb[0], float), np.array(cb[1], float)
+    return lo, hi
+
+
+def view_framing(spec, shape, lo, hi, tilt, az):
+    """(zoom, pan) of a view at (tilt, az) that frames the box lo..hi, as the main view frames its box at zoom 1."""
+    out = spec.get("output", {}); w, h = out.get("size", [1920, 1080]); style = spec.get("style", {})
+    fr = Framer(shape, w / h, float(style.get("fov", 30)), bool(style.get("ortho", False)))
+    mlo, mhi = main_box(spec, shape)
+    base, want = fr.fit(mlo, mhi, tilt, az, 1.07), fr.fit(lo, hi, tilt, az, 1.07)
+    z = base["scale"] / want["scale"] if fr.ortho else base["dist"] / want["dist"]
+    return float(z), [float(v) for v in want["c"] - base["c"]]
+
+
 def lerp_pose(a, b, u):
     d = ((b["az"] - a["az"] + 180.0) % 360.0) - 180.0
     return dict(c=a["c"] + (b["c"] - a["c"]) * u, tilt=a["tilt"] + (b["tilt"] - a["tilt"]) * u, az=a["az"] + d * u,
@@ -451,7 +480,11 @@ def build_plan(spec, ds):
     def ov(d=0.0, view=None):
         t, a, zm = (tilt, az, zoom) if not view else (float(view.get("tilt", tilt)), float(view.get("az", az)),
                                                        max(0.05, float(view.get("zoom", zoom))))
-        return zoomed(fr.fit(lo, hi, t, a + d, 1.07), zm)
+        p = zoomed(fr.fit(lo, hi, t, a + d, 1.07), zm)
+        pan = view_pan(view if view else v)  # the rotation centre moved in the preview (3.5)
+        if pan is not None:
+            p["c"] = p["c"] + pan
+        return p
 
     def target_of(part):
         if not has_tomo:

@@ -94,7 +94,13 @@ def build_gui(args):
             self.setStyleSheet("background: palette(base); color: palette(placeholder-text); border-radius:8px; padding:6px")
             self._img = None; self._press = None; self._moved = False; self.overlay = None; self._ov = False
             self.box_mode = False; self._box = None  # drawing a frame for a close-up of a region
-            self.setMouseTracking(True)
+            self.nav = None; self._nav = False  # gui_navigate.Navigator: rotate, move, zoom, menu (3.5)
+            self.setMouseTracking(True); self.setFocusPolicy(QtC.Qt.ClickFocus)
+            self.help_btn = QtW.QToolButton(self); self.help_btn.setText("?"); self.help_btn.setAutoRaise(True)
+            self.help_btn.setToolTip("How to move around in the preview")
+            self.help_btn.setStyleSheet("QToolButton { background: rgba(0, 0, 0, 140); color: #ffffff; border-radius: 9px; "
+                                        "min-width: 18px; min-height: 18px; font-weight: bold }")
+            self.help_btn.clicked.connect(self.show_help)
             self.note = QtW.QLabel(self); self.note.setStyleSheet(
                 "background: rgba(0, 0, 0, 160); color: #ffffff; border-radius: 4px; padding: 3px 8px")
             self.note.move(10, 10); self.note.setVisible(False)
@@ -105,6 +111,12 @@ def build_gui(args):
 
         def set_image(self, qimg):
             self._img = qimg; self._rescale()
+            if self.nav is not None and not getattr(self, "_hinted", False):  # once: how to move around (3.5)
+                self._hinted = True; st = self.nav.win.settings
+                if not st.value("nav/hint_shown", False, type=bool):
+                    from .gui_navigate import HINT
+                    st.setValue("nav/hint_shown", True); self.set_note(HINT)
+                    QtC.QTimer.singleShot(10000, lambda: self.set_note("") if self.note.text() == HINT else None)
 
         def clear_image(self, text):
             self._img = None; self.clear(); self.setText(text)
@@ -114,7 +126,11 @@ def build_gui(args):
                 self.setPixmap(QtG.QPixmap.fromImage(self._img).scaled(self.size(), QtC.Qt.KeepAspectRatio, QtC.Qt.SmoothTransformation))
 
         def resizeEvent(self, e):
-            super().resizeEvent(e); self._rescale()
+            super().resizeEvent(e); self._rescale(); self.help_btn.move(self.width() - 30, 8)
+
+        def show_help(self):
+            from .gui_navigate import HELP
+            QtW.QToolTip.showText(self.help_btn.mapToGlobal(QtC.QPoint(-380, 24)), HELP, self.help_btn)
 
         def frac(self, pos, free=False):
             """Position as fractions of the shown image (None outside it unless free)."""
@@ -144,6 +160,9 @@ def build_gui(args):
                 for col, dash in ((QtG.QColor(0, 0, 0), QtC.Qt.SolidLine), (QtG.QColor(255, 210, 63), QtC.Qt.DashLine)):
                     pen = QtG.QPen(col, 2 if dash == QtC.Qt.SolidLine else 1.5, dash); p.setPen(pen); p.drawRect(r)
                 p.end()
+            if self.nav is not None and self.image_px():
+                from .gui_navigate import paint_marker
+                p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_marker(p, self, self.nav); p.end()
 
         def mousePressEvent(self, e):
             if self.box_mode and e.button() == QtC.Qt.LeftButton:
@@ -151,16 +170,24 @@ def build_gui(args):
                 if f:
                     self._box = [f, f]; self.update()
                 return
+            pos = e.position().toPoint()
             if e.button() == QtC.Qt.LeftButton:
-                pos = e.position().toPoint()
                 self._ov = bool(self.overlay and self.overlay.press(self.frac(pos), e.modifiers()))
                 self._press = pos; self._moved = False
+                if self._ov:
+                    return
+            if self.nav is not None and e.button() in (QtC.Qt.LeftButton, QtC.Qt.RightButton, QtC.Qt.MiddleButton):
+                self._nav = self.nav.press(self.frac(pos), e.button(), e.modifiers(), pos)
+                if self._nav:
+                    self._press = None
 
         def mouseMoveEvent(self, e):
             pos = e.position().toPoint()
             if self._box is not None:
                 f = self.frac(pos, free=True); self._box[1] = (min(max(f[0], 0.0), 1.0), min(max(f[1], 0.0), 1.0)); self.update()
                 return
+            if self._nav:
+                self.nav.move(self.frac(pos, free=True), pos); self.update(); return
             if self._press is None:
                 if self.overlay is not None:
                     self.overlay.hover(self.frac(pos))
@@ -174,14 +201,35 @@ def build_gui(args):
                     self.dragged.emit(d.x(), d.y())
 
         def contextMenuEvent(self, e):
-            if self.overlay is not None:
-                self.overlay.context(self.frac(e.pos()), e.globalPos())
+            """Mouse: the menu opens on release of a right click that did not move (a right drag moves the view)."""
+            if e.reason() == QtG.QContextMenuEvent.Keyboard and self.nav is not None:
+                self.nav.menu((0.5, 0.5), e.globalPos())
+
+        def open_menu(self, f, gpos):
+            if self.overlay is not None and f is not None and self.overlay.context(f, gpos):
+                return  # a legend, caption, path point ...: its own menu
+            if self.nav is not None:
+                self.nav.menu(f, gpos)
 
         def mouseDoubleClickEvent(self, e):
-            if self.overlay is not None:
-                self.overlay.double(self.frac(e.position().toPoint()))
+            f = self.frac(e.position().toPoint())
+            if self.overlay is not None and f is not None and self.overlay.double(f):
+                return
+            if self.nav is not None and e.button() == QtC.Qt.LeftButton:
+                self.nav.double(f)
+
+        def keyPressEvent(self, e):
+            if self.nav is not None and self.nav.key(e):
+                return
+            super().keyPressEvent(e)
 
         def mouseReleaseEvent(self, e):
+            if self._nav:
+                self._nav = False; pos = e.position().toPoint()
+                d = self.nav.drag
+                if d is not None and not d["moved"] and d["button"] == QtC.Qt.RightButton:
+                    self.nav.drag = None; self.open_menu(self.frac(pos), e.globalPosition().toPoint()); return
+                self.nav.release(self.frac(pos), e.globalPosition().toPoint()); self.update(); return
             if self._box is not None:
                 (a, b), (c, d) = self._box; self._box = None; self.update()
                 if abs(c - a) > 0.01 and abs(d - b) > 0.01:
@@ -202,7 +250,10 @@ def build_gui(args):
             self._press = None
 
         def wheelEvent(self, e):
-            self.wheel.emit(e.angleDelta().y())
+            if self.nav is not None:
+                self.nav.wheel(e.angleDelta().y(), self.frac(e.position().toPoint()))
+            else:
+                self.wheel.emit(e.angleDelta().y())
 
     class RangeSlider(QtW.QWidget):
         """A bar with two handles: the kept range along one axis."""
@@ -323,6 +374,12 @@ def build_gui(args):
             for t, d in THEMES:
                 a = QtG.QAction(t, self, checkable=True); a.triggered.connect(lambda _=False, d=d: self.set_theme(d))
                 self.theme_group.addAction(a); tm.addAction(a); self.theme_acts[d] = a
+            nm = view.addMenu("Moving around in the preview")
+            for key, text in (("nav/swap_buttons", "Swap left and right drag (rotate with the right button)"),
+                              ("nav/invert_wheel", "Turn the mouse wheel the other way to zoom in")):
+                a = QtG.QAction(text, self, checkable=True); a.setChecked(self.settings.value(key, False, type=bool))
+                a.toggled.connect(lambda on, key=key: self.settings.setValue(key, bool(on))); nm.addAction(a)
+            nm.addSeparator(); nm.addAction("Undo view change", lambda: self.nav.undo()); nm.addAction("Redo view change", lambda: self.nav.redo())
 
         @property
         def theme(self):
@@ -481,6 +538,8 @@ def build_gui(args):
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
             self.prev.boxed.connect(self.on_boxed)
+            from .gui_navigate import Navigator
+            self.nav = Navigator(self); self.prev.nav = self.nav
             rl.addWidget(self.prev, 1)
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))

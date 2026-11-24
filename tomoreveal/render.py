@@ -1,5 +1,6 @@
 """Off-screen 3D drawing of one frame, and writing movies."""
 import glob
+import math
 import os
 import re
 import sys
@@ -406,6 +407,48 @@ class Renderer:
         finally:
             self.slice_actor.SetPickable(False)
         return np.array(pk.GetPickPosition()) if ok and pk.GetActor() is not None else None
+
+    # ---------- moving around in the preview (3.5 phase 1B) ----------
+    def camera_frame(self):
+        """(position, focal point, unit right, unit up, unit direction camera -> focal) of the last frame drawn."""
+        cam = self.pl.renderer.GetActiveCamera()
+        pos, foc = np.array(cam.GetPosition()), np.array(cam.GetFocalPoint())
+        d = foc - pos; d /= np.linalg.norm(d) or 1.0
+        up = np.array(cam.GetViewUp()); up = up - d * float(up @ d); up /= np.linalg.norm(up) or 1.0
+        return pos, foc, np.cross(d, up), up, d
+
+    def world_per_height(self, depth):
+        """World units spanned by the full frame height at a distance `depth` in front of the camera."""
+        cam = self.pl.renderer.GetActiveCamera()
+        if cam.GetParallelProjection():
+            return 2.0 * cam.GetParallelScale()
+        return 2.0 * max(1e-6, depth) * math.tan(math.radians(cam.GetViewAngle()) / 2)
+
+    def ray(self, fx, fy):
+        """(origin, unit direction) of the line of sight through a position (fractions of the last frame)."""
+        ren = self.pl.renderer; W, H = self.size; pts = []
+        for depth in (0.0, 1.0):
+            ren.SetDisplayPoint(fx * W, (1 - fy) * H, depth); ren.DisplayToWorld(); w = ren.GetWorldPoint()
+            pts.append(np.array(w[:3]) / (w[3] or 1.0))
+        d = pts[1] - pts[0]
+        return pts[0], d / (np.linalg.norm(d) or 1.0)
+
+    def point_under(self, fx, fy):
+        """The 3D point under a position: on a structure or the slice, else on the plane through the focal point
+        facing the camera. Returns (point, hit something)."""
+        p = self.pick_point(fx, fy)
+        if p is not None:
+            return np.asarray(p, float), True
+        o, r = self.ray(fx, fy); _, foc, _, _, d = self.camera_frame()
+        den = float(r @ d)
+        t = float((foc - o) @ d) / den if abs(den) > 1e-9 else float(np.linalg.norm(foc - o))
+        return o + r * t, False
+
+    def project(self, p):
+        """Position (fractions of the last frame) of a 3D point, and whether it is in front of the camera."""
+        ren = self.pl.renderer; W, H = self.size
+        ren.SetWorldPoint(*[float(v) for v in p], 1.0); ren.WorldToDisplay(); x, y, z = ren.GetDisplayPoint()
+        return (x / W, 1 - y / H), 0.0 <= z <= 1.0
 
     def region_box(self, fx0, fy0, fx1, fy1, max_points=40000):
         """The 3D box (lo, hi) in voxels (x, y, z) around what is visible inside a rectangle of the last frame (fractions

@@ -136,7 +136,8 @@ class ProjectManager(QtC.QObject):
     def ui_state(self):
         w = self.win
         return dict(tab=w.tabs.tabText(w.tabs.currentIndex()), playhead_frame=int(w.timeline.frame), selected_part=w.selected_part,
-                    quality=w.quality_cb.currentIndex(), movie_name=w.name_le.text(), movie_folder=w.folder_le.text())
+                    quality=w.quality_cb.currentIndex(), movie_name=w.name_le.text(), movie_folder=w.folder_le.text(),
+                    timeline=w.timeline.canvas.view_state())
 
     def current_core(self):
         return pj.core(self.data()) if self.loaded else None
@@ -353,6 +354,7 @@ class ProjectManager(QtC.QObject):
                 w.tabs.setCurrentIndex(i)
         if ui.get("playhead_frame") is not None:
             w.req = {"frame": int(ui["playhead_frame"])}
+        w.timeline.canvas.pending_view = ui.get("timeline") if isinstance(ui.get("timeline"), dict) else None
         w.schedule(0)
         self.saved_core = None if dirty else self.current_core()
         self.refresh()

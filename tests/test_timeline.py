@@ -34,9 +34,9 @@ def test_one_block_per_part_without_gaps(window):
     assert list(c.parts) == on
     rects = c.segment_rects()
     for (sg, r), (sg2, r2) in zip(rects, rects[1:]):
-        assert abs(r.right() - r2.left()) < 0.01 or r.width() == 3.0  # no gaps, no overlaps
-    for sg, r in rects:
-        assert abs(r.width() - max(3.0, sg["count"] * c.ppf)) < 1
+        assert abs(r.right() - r2.left()) < 0.01 or r.width() in (1.0, 3.0)  # no gaps, no overlaps
+    for sg, r in rects:  # main blocks at least 3 px; transitions and pauses become thin lines when narrow
+        assert abs(r.width() - max(3.0 if sg["phase"] == "main" else 1.0, sg["count"] * c.ppf)) < 1
     assert abs(rects[0][1].left() - 8) < 0.01 and rects[-1][1].right() <= c.width() - 7
     win.spec["shots"][0]["on"] = False; win.do_preview(); pump(app)
     assert list(c.parts) == on[1:]

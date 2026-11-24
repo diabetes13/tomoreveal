@@ -7,6 +7,8 @@ spec["annotations"] is a list; each item:
             "label": {"text", "size", "side": "auto"}, "keep_outside": bool,
    text:    "text", "pos": {"x", "y", "anchor"} (fractions of the frame, as overlay items), "pin": anchor or None,
    both:    "style": {"shape", "color", "outline", "width", "head", "size", "box", "align", "bold", "opacity"},
+            "more": [anchor, ...] (3.5): more things it points at; an arrow draws a line from its label to each, a text
+                    box a thin leader line from the box to each (as in figure callouts),
             "show": {"parts": "all" | [part ids], "start": s or None, "end": s or None (seconds from the start of the
                      part), "fade": s, "appear": "fade" | "grow" | "pop"},
             "behind": "normal" | "faint" | "hide", "hide_when_hidden": bool, "visible": bool}
@@ -43,6 +45,17 @@ def new_text(text, x=0.72, y=0.18, parts="all", pin=None):
     return dict(id=new_id(), kind="text", visible=True, text=text, pos=dict(x=float(x), y=float(y), anchor="top-left"), pin=pin,
                 style=dict(size=1.0, color="auto", box="dark", align="left", bold=False, opacity=1.0),
                 show=dict(parts=parts, start=None, end=None, fade=0.4, appear="fade"), behind="normal", hide_when_hidden=True)
+
+
+def pointers(a):
+    """The extra anchors an item points at (3.5): [{"xyz", "structure", "component"}]."""
+    return [m for m in (a.get("more") or []) if isinstance(m, dict) and m.get("xyz") is not None]
+
+
+def add_pointer(a, xyz, structure=None, component=None):
+    a.setdefault("more", []).append(dict(xyz=[float(v) for v in xyz], structure=structure,
+                                         component=None if component is None else int(component)))
+    return a
 
 
 def items(spec):
@@ -185,12 +198,13 @@ def _colour(c, dark):
     return tuple(int(round(255 * v)) for v in hex2rgb(c))
 
 
-def _visible_here(a, s, spec, ds, xyz):
+def _visible_here(a, s, spec, ds, xyz, anc=None):
     """0..1: hidden while its structure is switched off, cut away by the reveal or the clip box, or faded in a close-up."""
     if not a.get("hide_when_hidden", True) or xyz is None:
         return 1.0
     from .storyboard import class_spec, clip_box, others_of, target_items
-    anc = a.get("anchor") if a["kind"] == "arrow" else (a.get("pin") or {})
+    if anc is None:
+        anc = a.get("anchor") if a["kind"] == "arrow" else (a.get("pin") or {})
     key = (anc or {}).get("structure")
     x, y, z = xyz
     cb = clip_box(spec, ds.shape)
@@ -246,10 +260,16 @@ def draw(layer, P, ren, s, spec, size, zbuf=None):
             continue
         col = _colour(st.get("color"), dark); A = int(round(255 * min(1.0, alpha)))
         outline = (0, 0, 0, int(A * 0.7)) if sum(col) > 380 else (255, 255, 255, int(A * 0.7))
+        extra = []  # more things it points at: (index, screen point, opacity)
+        for j, m in enumerate(pointers(a)):
+            (mx, my), front = ren.project(m["xyz"])
+            aj = _visible_here(a, s, spec, ds, m["xyz"], m) if front else 0.0
+            if front and -0.02 <= mx <= 1.02 and -0.02 <= my <= 1.02 and aj > 0.002:
+                extra.append((j, (mx * W, my * H), aj))
         if a["kind"] == "arrow" and tip is not None:
-            box = _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed)
+            box = _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extra)
         else:
-            box = _text(d, a, tip, W, H, px, col, A, st, P, placed, dark)
+            box = _text(d, a, tip, W, H, px, col, A, st, P, placed, dark, extra, outline)
         if box is not None:
             P.rects[f"ann:{a['id']}"] = dict(box=box, shown=True)
 
@@ -260,7 +280,30 @@ def _line(d, a, b, width, fill, outline, ow):
     d.line([a, b], fill=fill, width=int(round(width)))
 
 
-def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed):
+def _head(d, shape, tail, tip, grown, w, hl, hw, fill, oc, ow):
+    """A shaft from tail to tip (drawn to `grown` of its length) and its head."""
+    L = max(1e-6, math.hypot(tip[0] - tail[0], tip[1] - tail[1])); ux, uy = (tip[0] - tail[0]) / L, (tip[1] - tail[1]) / L
+    end = (tail[0] + (tip[0] - tail[0]) * grown, tail[1] + (tip[1] - tail[1]) * grown)
+    stop = (end[0] - ux * hl * 0.8, end[1] - uy * hl * 0.8) if shape in ("arrow", "thin") and grown >= 0.999 else end
+    lw = max(1.0, w * (0.45 if shape == "thin" else 1.0))
+    _line(d, tail, stop, lw, fill, oc, ow)
+    if grown < 0.999:
+        return
+    if shape == "arrow":
+        headp = [tip, (tip[0] - ux * hl - uy * hw, tip[1] - uy * hl + ux * hw), (tip[0] - ux * hl + uy * hw, tip[1] - uy * hl - ux * hw)]
+        if oc:
+            d.polygon(headp, fill=fill, outline=oc, width=int(round(ow)))
+        else:
+            d.polygon(headp, fill=fill)
+    elif shape == "thin":
+        for sgn in (1, -1):
+            _line(d, tip, (tip[0] - ux * hl + sgn * uy * hw, tip[1] - uy * hl - sgn * ux * hw), lw, fill, oc, ow * 0.6)
+    else:  # pointer (and the extra lines of rings and brackets): a dot at the tip
+        r = max(2.5, w * 1.6)
+        d.ellipse([tip[0] - r, tip[1] - r, tip[0] + r, tip[1] + r], fill=fill, outline=oc, width=int(round(ow)) if oc else 0)
+
+
+def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extra=()):
     t = a.get("tail") or {}; shape = st.get("shape", "arrow")
     angle = math.radians(float(ang if ang is not None else t.get("angle", 135)))
     L = float(t.get("length", 0.12)) * H
@@ -303,6 +346,11 @@ def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed):
                 d.ellipse([tip[0] - r, tip[1] - r, tip[0] + r, tip[1] + r], fill=fill, outline=oc, width=int(round(ow)) if oc else 0)
     box = [min(tip[0], tail[0]) - 8, min(tip[1], tail[1]) - 8, max(tip[0], tail[0]) + 8, max(tip[1], tail[1]) + 8]
     P.rects[f"anntip:{a['id']}"] = dict(box=(tip[0] - 9, tip[1] - 9, tip[0] + 9, tip[1] + 9), shown=True)
+    for j, q, aj in extra:  # more things it points at: from the same tail (the label), with the same head
+        Aj = int(round(A * aj)); fj = col + (Aj,); oj = (oc[:3] + (int(oc[3] * aj),)) if oc else None
+        _head(d, shape if shape in ("arrow", "thin", "pointer") else "pointer", tail, q, grown, w, hl, hw, fj, oj, ow)
+        P.rects[f"anntip:{a['id']}:{j}"] = dict(box=(q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9), shown=True)
+        box = [min(box[0], q[0] - 8), min(box[1], q[1] - 8), max(box[2], q[0] + 8), max(box[3], q[1] + 8)]
     lab = a.get("label") or {}
     if lab.get("text"):
         f = P.font(max(9, round(px * float(lab.get("size", 1.0))))); l, tp, r, b = d.textbbox((0, 0), lab["text"], font=f)
@@ -331,7 +379,7 @@ def _apart(x, y, tw, th, placed, H, gap=4):
     return x, min(y, H - th - 2)
 
 
-def _text(d, a, tip, W, H, px, col, A, st, P, placed, dark):
+def _text(d, a, tip, W, H, px, col, A, st, P, placed, dark, extra=(), outline=None):
     from .overlays import place
     text = str(a.get("text") or "")
     if not text:
@@ -362,5 +410,24 @@ def _text(d, a, tip, W, H, px, col, A, st, P, placed, dark):
         x = x0 + pad + ((bw - 2 * pad - w) / 2 if al == "center" else (bw - 2 * pad - w) if al == "right" else 0)
         d.text((x, y0 + pad * 0.8 + i * lh), ln, font=f, fill=col + (A,))
     placed.append((x0, y0, x0 + bw, y0 + bh))
-    del dark
-    return (x0, y0, x0 + bw, y0 + bh)
+    lc = _colour(st.get("color"), dark)  # the leaders run over the picture: white on dark, black on light backgrounds
+    lw = max(1.0, H * 0.0022 * float(st.get("width", 1.0)))
+    if extra:  # leader lines all start at the middle of the side of the box that faces the things they point at
+        mx = sum(q[0] for _, q, _ in extra) / len(extra); my = sum(q[1] for _, q, _ in extra) / len(extra)
+        gap = px * 0.3
+        if mx > x0 + bw:
+            sx, sy = x0 + bw + gap, y0 + bh / 2
+        elif mx < x0:
+            sx, sy = x0 - gap, y0 + bh / 2
+        else:
+            sx, sy = x0 + bw / 2, (y0 + bh + gap if my > y0 + bh / 2 else y0 - gap)
+    for j, q, aj in extra:  # leader lines from the box to more things it points at, with a small dot at each
+        Aj = int(round(A * aj))
+        if x0 < q[0] < x0 + bw and y0 < q[1] < y0 + bh:
+            continue
+        if outline is not None:
+            d.line([(sx, sy), q], fill=outline[:3] + (int(outline[3] * aj),), width=int(round(lw + 2)))
+        d.line([(sx, sy), q], fill=lc + (Aj,), width=int(round(lw)))
+        r = max(2.0, lw * 1.6); d.ellipse([q[0] - r, q[1] - r, q[0] + r, q[1] + r], fill=lc + (Aj,))
+        P.rects[f"anntip:{a['id']}:{j}"] = dict(box=(q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9), shown=True)
+    return (x0, y0, x0 + bw, y0 + bh)  # the box only (moving and aligning use it)

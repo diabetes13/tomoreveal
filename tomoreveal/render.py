@@ -158,6 +158,11 @@ class Renderer(PreviewPicking):
             else:
                 out = a_img * (1 - q) + b_img * q
             return np.clip(np.round(out), 0, 255).astype(np.uint8)
+        if s.get("lkfrom") is not None and float(s.get("lkq", 1.0)) < 1.0:  # a part with other effects begins (3.5)
+            q = float(s["lkq"])
+            a_img = self.draw(dict(s, lk=s["lkfrom"], lkfrom=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
+            b_img = self.draw(dict(s, lkfrom=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
+            return np.clip(np.round(a_img * (1 - q) + b_img * q), 0, 255).astype(np.uint8)
         if s.get("card"):
             return self.draw_card(s, spec, size, aa, transparent, annotate)
         if size != self.size:
@@ -175,7 +180,16 @@ class Renderer(PreviewPicking):
                     self.pl.enable_anti_aliasing(mode)
             self.aa = mode; self._ms_aa = self.pl.ren_win.GetMultiSamples()
         from .look import GRADIENT_TOP, LOOK_PRESETS, style35
-        L35 = style35(spec); self._l35 = L35
+        L35 = style35(spec)
+        own = s.get("lk") or {}
+        if own:  # this part's own effects (3.5)
+            L35 = dict(L35, **{k: v for k, v in own.items() if k in ("shadow", "outline", "depth_fade")})
+            if "membranes" in own:
+                from .look import CREAM
+                L35.update(glass=own["membranes"] == "glass", membrane_colour=CREAM if own["membranes"] == "cream" else None)
+            if "tomo_shadow" in own:
+                lk["shadows"]["slice"]["on"] = bool(own["tomo_shadow"])
+        self._l35 = L35
         bg = style.get("bg", "#000000"); bgkey = (bg, L35["background"] == "gradient")
         if bgkey != self.bg:
             if bgkey[1]:  # light grey at the top to white at the bottom
@@ -213,18 +227,25 @@ class Renderer(PreviewPicking):
         keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
         each = (mode.get("each") or {}) if not legacy else {}  # per structure in this close-up (3.5): glass / hide
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
-        translucent = False
+        translucent = False; self._legend_col = {}
         for kk, act in self.actors.items():
             c = class_spec(spec, ds, kk)
             if not c.get("show", True):
                 act.SetVisibility(False); continue
             op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * all_op
             col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
-            if L35["glass"] and self._membrane(spec, kk):  # glass membranes (3.5): pale and see-through
+            mem = (L35["glass"] or L35["membrane_colour"]) and self._membrane(spec, kk)
+            if L35["glass"] and mem:  # glass membranes (3.5): pale and see-through
                 col = hex2rgb(L35["glass_colour"]); op *= float(L35["glass_opacity"])
+            elif L35["membrane_colour"] and mem:  # solid membranes in one colour (Ceramic: cream)
+                col = hex2rgb(L35["membrane_colour"])
             elif L35["richer"] and light_bg:
                 from .look import richer
                 col = richer(col)
+            if L35["pastel"] and not mem:
+                from .look import pastel
+                col = pastel(col)
+            self._legend_col[kk] = col  # the colour the legend shows: as drawn by the look
             if e <= 0 or not items or keep or kk in whole:
                 act.SetVisibility(True)
             elif legacy:
@@ -329,7 +350,8 @@ class Renderer(PreviewPicking):
         self._ao.prepare(self.ds, shown, L35["reach"])  # hidden structures cast no shadows
         dark = SHADOW_DARKEST[L35["shadow"]]
         for kk, act, mesh in acts:
-            if not act.GetVisibility() or mesh is None or getattr(act, "_shown_mesh", mesh) is not mesh:
+            if not act.GetVisibility() or mesh is None or getattr(act, "_shown_mesh", mesh) is not mesh or \
+                    class_spec(spec, self.ds, kk).get("no_shadow"):  # this structure without soft shadows (Structures tab)
                 act.mapper.ScalarVisibilityOff(); continue
             f = self._ao.factor(mesh, dark)
             col = np.array(act.GetProperty().GetColor(), np.float32)
@@ -449,10 +471,23 @@ class Renderer(PreviewPicking):
             thr = 0.012 if float(s.get("e", 0)) > 0.5 else 0.02
             from .look import outline_edges
             edge = outline_edges(lin, bg, idimg if L35["between"] else None, thr)
+            plain = [c[0] * 65536 + c[1] * 256 + c[2] for c, kk in ids.items() if class_spec(spec, self.ds, kk).get("no_outline")]
+            if plain:  # structures drawn without an outline (Structures tab): no edge on them
+                code = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
+                edge &= ~np.isin(code, plain)
             w = OUTLINE_PX[L35["outline"]] * H / 1080.0
             it = int(max(0, round((w - 1.0) / 2)))
             if it:
                 edge = ndimage.binary_dilation(edge, iterations=it)
+            if L35["glass"] and L35["glass_outline"] != "all":  # see-through membranes: only their outer edge, or none
+                key0 = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
+                glass_ids = [c[0] * 65536 + c[1] * 256 + c[2] for c, kk in ids.items() if self._membrane(spec, kk)]
+                if glass_ids:
+                    gm = np.isin(key0, glass_ids) & ~bg
+                    if L35["glass_outline"] == "none":
+                        edge &= ~ndimage.binary_dilation(gm, iterations=2)
+                    else:  # keep the edge where a membrane meets something else; drop its folds and inner walls
+                        edge &= ~ndimage.binary_erosion(gm, iterations=2)
             alpha = np.clip(ndimage.gaussian_filter(edge.astype(np.float32), 0.5) * 1.6, 0, 1) * 0.9
             col = np.zeros((H, W, 3), np.float32) + (np.array([0, 0, 0]) if L35["outline_colour"] == "black" else np.array([40, 40, 40]))
             if L35["outline_colour"] == "shade" or L35["glass"]:
@@ -831,12 +866,15 @@ class Renderer(PreviewPicking):
         matte = pre == "default" and bool(getattr(self, "_l35", {}).get("lighting"))  # 3.5 looks: a matte surface
         if matte:
             amb, spec_amt = 0.45, 0.04
+        ceramic = pre == "default" and getattr(self, "_l35", {}).get("material") == "ceramic"
         glass = False
         for kk, act in self.actors.items():
             st = style_of(spec, ds.classes[kk]["key"]); pr = act.GetProperty(); kind = st["kind"]
             pr.SetRepresentationToSurface(); pr.SetInterpolationToPhong(); pr.SetMetallic(0.0); pr.SetRoughness(0.5)
             pr.RenderPointsAsSpheresOff(); pr.SetLighting(pre != "flat")
             pr.SetAmbient(amb); pr.SetDiffuse(0.6 if matte else 0.8); pr.SetSpecular(spec_amt); pr.SetSpecularPower(15)
+            if ceramic:  # a porcelain model: bright, matte, with a broad soft sheen
+                pr.SetAmbient(0.5); pr.SetDiffuse(0.62); pr.SetSpecular(0.12); pr.SetSpecularPower(6)
             mesh = ds.meshes.get(kk)
             if kind == "dots" and mesh is not None:
                 pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))
@@ -959,13 +997,17 @@ class Renderer(PreviewPicking):
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
         focused = {k for k, _ in self._focus_items(tgt)}
         keep = mode == "keep" if not isinstance(mode, dict) else others_of(mode) == ("keep", 1.0)
-        rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
+        def legend_colour(kk):
+            c = getattr(self, "_legend_col", {}).get(kk)
+            return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c) if c is not None else \
+                class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"])
+        rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk))
                 for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
                 and not (focused and e > 0.5 and not keep and kk not in focused)
                 and not (e > 0.5 and isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide")]
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
-        P.caption(items["caption"], s["caption"] or "", shown("caption", True))
+        P.caption(items["caption"], s["caption"] or "", shown("caption", True), float(s.get("cap_a", 1.0)))
         if s.get("ann"):  # arrows and text boxes (3.5), on top of everything
             from vtkmodules.util.numpy_support import vtk_to_numpy
             from .annotations import draw as draw_annotations

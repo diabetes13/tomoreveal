@@ -128,8 +128,23 @@ def vignette_weight(W, H, cx, cy, size, softness, shape="round"):
 # ---------------------------------------------------------------------------------------------------------------
 # 3.5 phase 7: segmentation looks like ChimeraX and Amira (spec["look"]["style35"])
 # ---------------------------------------------------------------------------------------------------------------
-LOOKS = (("Classic", "classic"), ("Soft", "soft"), ("Glass membranes", "glass"), ("Illustration", "illustration"),
+LOOKS = (("Classic", "classic"), ("Soft", "soft"), ("Soft on black", "dark"), ("Ceramic", "ceramic"),
+         ("Ceramic with see-through membranes", "ceramic_glass"), ("Glass membranes", "glass"), ("Illustration", "illustration"),
          ("On the tomogram", "tomogram"))
+LOOK_NOTES = {
+    "classic": "As in earlier versions: lit colours on black.",
+    "soft": "White background, soft shadows in creases, thin outlines.",
+    "dark": "Soft shadows and gentle lighting on a black background, no outlines.",
+    "ceramic": "Solid, matte and pale like a porcelain model: deep soft shadows, cream membranes, no outlines.",
+    "ceramic_glass": "Ceramic, with see-through membranes so what is inside them shows.",
+    "glass": "Soft, with pale see-through membranes outlined at their outer edge.",
+    "illustration": "Thick black outlines and flat light, like a textbook drawing.",
+    "tomogram": "The structures over the grey tomogram slice.",
+}
+GLASS_OUTLINES = (("all edges", "all"), ("outer edge only", "outer"), ("none", "none"))
+MATERIALS = (("normal", "normal"), ("ceramic (matte, soft sheen)", "ceramic"))
+MEMBRANE_LOOKS = (("their own colour", "own"), ("see-through (glass)", "glass"), ("solid cream (ceramic)", "cream"))
+CREAM = "#efe7d4"
 BACKGROUNDS = (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("gradient (light grey to white)", "gradient"),
                ("the tomogram slice", "tomogram"))
 BG_COLOURS = {"black": "#000000", "white": "#ffffff", "lightgrey": "#e6e7ea", "darkgrey": "#1c1f26", "gradient": "#ffffff", "tomogram": "#ffffff"}
@@ -145,15 +160,22 @@ FADES = (("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "s
 FADE_AMOUNT = {"off": 0.0, "light": 0.25, "medium": 0.5, "strong": 0.7}
 STYLE35_DEFAULTS = dict(preset="classic", background=None, shadow="none", reach="normal", outline="off", outline_colour="dark",
                         between=False, glass=False, glass_opacity=0.3, glass_colour="#e6dcc4", depth_fade="off", lighting=False,
-                        richer=False)
+                        richer=False, glass_outline="all", material="normal", pastel=False, membrane_colour=None)
 LOOK_PRESETS = {
     "classic": dict(background="black", shadow="none", outline="off", between=False, glass=False, depth_fade="off", lighting=False, richer=False),
     "soft": dict(background="white", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=False, depth_fade="medium",
                  lighting=True, richer=True),
+    "dark": dict(background="black", shadow="medium", outline="off", between=False, glass=False, depth_fade="medium", lighting=True,
+                 richer=False),
+    "ceramic": dict(background="white", shadow="strong", reach="long", outline="off", between=False, glass=False, depth_fade="light",
+                    lighting=True, richer=False, material="ceramic", pastel=True, membrane_colour=CREAM),
+    "ceramic_glass": dict(background="white", shadow="strong", reach="long", outline="off", between=False, glass=True, glass_opacity=0.3,
+                          glass_colour=CREAM, glass_outline="outer", depth_fade="light", lighting=True, richer=False, material="ceramic",
+                          pastel=True),
     "glass": dict(background="white", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=True, depth_fade="medium",
-                  lighting=True, richer=True),
+                  lighting=True, richer=True, glass_outline="outer"),
     "illustration": dict(background="white", shadow="light", outline="thick", outline_colour="black", between=True, glass=True,
-                         depth_fade="light", lighting=True, richer=True),
+                         depth_fade="light", lighting=True, richer=True, glass_outline="outer"),
     "tomogram": dict(background="tomogram", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=False,
                      depth_fade="off", lighting=True, richer=False),
 }
@@ -205,6 +227,16 @@ def is_membrane(spec, key, name):
     import re
     words = re.findall(r"[a-z]+", (name or "").lower())
     return any(w in MEMBRANE_WORDS or w.startswith("membran") or w.startswith("vesic") for w in words)
+
+
+def pastel(rgb, amount=0.3):
+    """A paler colour, as on a ceramic model: mixed a little towards white."""
+    return tuple(c + (1.0 - c) * amount for c in rgb)
+
+
+def membrane_look(L35):
+    """'own' / 'glass' / 'cream' for the Membranes choice of the Look group."""
+    return "glass" if L35.get("glass") else "cream" if L35.get("membrane_colour") else "own"
 
 
 def richer(rgb):

@@ -581,7 +581,42 @@ class PartsPanel(QtW.QWidget):
         if t in ("slide", "overview", "focus"):
             add("Slow down at the end", _combo(ENDS, p.get("ease_end", "sudden"), lambda v: self.set(pid, "ease_end", v)))
         self._fold_more(t, form)
+        self._effects_rows(pid, p, form)
         self._transition_rows(pid, p, form)
+
+    EFFECT_ROWS = (("Soft shadows", "shadow"), ("Outlines", "outline"), ("Depth fade", "depth_fade"), ("Membranes", "membranes"),
+                   ("Shadows on the slice", "tomo_shadow"))
+
+    def _effects_rows(self, pid, p, form):
+        """Effects in this part only (3.5): shadows, outlines, depth fade, membranes. "As in the Look tab" = the whole movie."""
+        own = sb.part_look(p); n = len(own)
+        fd = Fold(f"Effects in this part ({n} changed)" if n else "Effects in this part", key="part_effects",
+                  tip="Turn effects on or off in this part only, for example no shadows while the segmentation is revealed. "
+                      "'As in the Look tab' follows the Look tab, which sets them for the whole movie. Changes blend in "
+                      "smoothly at the start of the part.")
+
+        def choose(name, v):
+            q = self.part(pid)
+            if q is None:
+                return
+            cur = sb.part_look(q)
+            if v is None:
+                cur.pop(name, None)
+            else:
+                cur[name] = v
+            self.set(pid, "look", cur or None)
+            m = len(cur); fd._text = f"Effects in this part ({m} changed)" if m else "Effects in this part"; fd.button.setText(fd._text)
+        for label, name in self.EFFECT_ROWS:
+            cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
+            choices = sb.PART_LOOK[name]
+            for t, d in choices:
+                cb.addItem(t)
+            cur = own.get(name)
+            cb.setCurrentIndex(next((i for i, (_, d) in enumerate(choices) if d == cur and (cur is not None or i == 0)), 0))
+            cb.activated.connect(lambda j, name=name, choices=choices: choose(name, choices[j][1]))
+            cb.setToolTip(f"{label} in this part: as in the Look tab (the whole movie), or its own choice")
+            fd.form.addRow(label, cb)
+        form.addRow(fd)
 
     def _fold_more(self, t, form):
         """Put the less used rows of a part under "More settings" (closed unless the user opened it before)."""

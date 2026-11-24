@@ -859,6 +859,11 @@ def build_plan(spec, ds):
         for f in frames:
             if f.get("part") in ranges:
                 f["dr"] = ranges[f["part"]]
+    cap_fade = float(((spec.get("overlays") or {}).get("caption") or {}).get("fade") or 0.0)
+    if cap_fade > 0:  # captions fade in and out (3.5)
+        caption_fades(frames, max(1, int(round(cap_fade * fps))))
+    if any(isinstance(p.get("look"), dict) and p["look"] for p in spec.get("shots", [])):
+        part_looks(spec, frames, fps)  # effects only in some parts (3.5)
     if spec.get("annotations"):  # arrows and text boxes (3.5): opacity, growth and tail angle per frame
         from .annotations import plan_annotations
         plan_annotations(spec, ds, frames, segments, fr, fps, w / h)
@@ -888,6 +893,62 @@ def main_range(plan, part_id):
 
 
 # ---- editing (each returns the changed spec) ----
+# ---------------------------------------------------------------------------------------------------------------
+# Effects in some parts only (3.5): part["look"] = {setting: value} overrides the Look tab in that part. Missing (or
+# no part with one) = the Look tab everywhere, as before. A change between parts is blended over LOOK_BLEND seconds.
+# ---------------------------------------------------------------------------------------------------------------
+PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored by leaving the setting out)
+    "shadow": (("as in the Look tab", None), ("none", "none"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
+    "outline": (("as in the Look tab", None), ("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick")),
+    "depth_fade": (("as in the Look tab", None), ("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
+    "membranes": (("as in the Look tab", None), ("their own colour", "own"), ("see-through (glass)", "glass"), ("solid cream", "cream")),
+    "tomo_shadow": (("as in the Look tab", None), ("on", True), ("off", False)),
+}
+LOOK_BLEND = 0.6
+
+
+def part_look(part):
+    """The Look settings this part changes: {setting: value} (only known settings with a real choice)."""
+    own = (part or {}).get("look") if isinstance((part or {}).get("look"), dict) else {}
+    return {k: v for k, v in own.items() if k in PART_LOOK and v is not None and any(v == d for _, d in PART_LOOK[k][1:])}
+
+
+def part_looks(spec, frames, fps):
+    """Each frame gets "lk" (its part's own look settings); the first frames after a change also get "lkfrom" (the
+    settings before) and "lkq" (0..1), so the picture blends smoothly from one look into the next."""
+    own = {p.get("id"): part_look(p) for p in spec.get("shots", [])}
+    n = max(1, int(round(LOOK_BLEND * fps))); prev, since, start = None, None, 0
+    for i, f in enumerate(frames):
+        cur = own.get(f.get("part"), {}) if not f.get("card") else (prev or {})
+        f["lk"] = cur
+        if prev is not None and cur != prev:
+            since, start = prev, i
+        if since is not None:
+            q = (i - start + 1) / (n + 1)
+            if q < 1.0:
+                f["lkfrom"] = since; f["lkq"] = round(q * q * (3 - 2 * q), 4)
+            else:
+                since = None
+        prev = cur
+
+
+def caption_fades(frames, n):
+    """Each run of frames with the same caption fades it in over its first n frames and out over its last n (never
+    more than a third of the run); frames get "cap_a" (0..1)."""
+    i = 0
+    while i < len(frames):
+        j = i
+        while j + 1 < len(frames) and frames[j + 1].get("caption", "") == frames[i].get("caption", ""):
+            j += 1
+        L = j - i + 1; m = max(1, min(n, L // 3))
+        if frames[i].get("caption"):
+            for k in range(i, j + 1):
+                u = min((k - i + 1) / m, (j - k + 1) / m, 1.0)
+                if u < 1.0:
+                    frames[k]["cap_a"] = round(u * u * (3 - 2 * u), 4)
+        i = j + 1
+
+
 def state_key(s):
     p = s["pose"]
     oth = s["others"] if not isinstance(s["others"], dict) else json.dumps(s["others"], sort_keys=True)
@@ -896,6 +957,10 @@ def state_key(s):
         extra += (json.dumps(s["ann"], sort_keys=True),)
     if s.get("blend"):  # dissolves and fades between parts (3.5)
         extra += (s["blend"]["via"], s["blend"]["q"], state_key(s["blend"]["src"]))
+    if s.get("cap_a") is not None:  # a caption fading in or out (3.5)
+        extra += (s["cap_a"],)
+    if s.get("lk") or s.get("lkfrom"):  # effects in some parts only (3.5)
+        extra += (json.dumps(s.get("lk"), sort_keys=True), json.dumps(s.get("lkfrom"), sort_keys=True), s.get("lkq"))
     if p.get("fov") is not None:  # field of view per point of a camera path (3.5)
         extra += (round(float(p["fov"]), 3),)
     if p.get("pos") is not None:  # camera paths and the 3.5 wiggle give the camera position and up direction themselves

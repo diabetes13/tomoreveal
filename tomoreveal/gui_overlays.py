@@ -79,6 +79,23 @@ class OverlayControls(QtC.QObject):
         sb.addWidget(QtW.QLabel("Scale bar:")); sb.addWidget(self.bar_auto); sb.addWidget(self.bar_len); sb.addWidget(self.bar_mode)
         sb.addWidget(self.bar_label); sb.addStretch(1)
         self.bar_note = QtW.QLabel(""); self.bar_note.setStyleSheet(DIM); self.bar_note.setWordWrap(True); grid.addWidget(self.bar_note, r, 0, 1, 3); r += 1
+        # captions (3.5): box, colour, bold, fade
+        cr = QtW.QHBoxLayout(); grid.addLayout(cr, r, 0, 1, 3); r += 1
+
+        def cap_combo(items, key, tip):
+            cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(6)
+            for t, d in items:
+                cb.addItem(t, d)
+            cb.setToolTip(tip); cb.activated.connect(lambda j: self.set("caption", **{key: cb.itemData(j)}))
+            return cb
+        self.cap_box = cap_combo(ov.CAPTION_BOXES, "box", "Behind the caption: a see-through box, a light box, an outline, or no box")
+        self.cap_col = cap_combo(ov.CAPTION_COLOURS, "color", "Colour of the caption text (automatic: white or black, whichever reads best)")
+        self.cap_bold = QtW.QCheckBox("bold"); self.cap_bold.setToolTip("Bold caption text")
+        self.cap_bold.toggled.connect(lambda v: self.set("caption", bold=bool(v)))
+        self.cap_fade = QtW.QCheckBox("fade in and out"); self.cap_fade.setToolTip("Each caption fades in at the start of its part and out at its end")
+        self.cap_fade.toggled.connect(lambda v: self.set("caption", fade=0.4 if v else 0.0))
+        cr.addWidget(QtW.QLabel("Captions:")); cr.addWidget(self.cap_box); cr.addWidget(self.cap_col); cr.addWidget(self.cap_bold)
+        cr.addWidget(self.cap_fade); cr.addStretch(1)
         g.setToolTip("Drag an item in the preview to move it; drag its corner handle to change its size (hold Shift for steps "
                      "of 0.1). Right-click an item for more.")
 
@@ -121,6 +138,11 @@ class OverlayControls(QtC.QObject):
         _quiet(self.bar_len, lambda: self.bar_len.setValue(100.0 if auto else float(b["length_nm"]))); self.bar_len.setEnabled(not auto)
         self.bar_mode.setCurrentIndex(1 if b.get("mode") == "slice" else 0)
         _quiet(self.bar_label, lambda: self.bar_label.setChecked(bool(b.get("label", True))))
+        c = items["caption"]
+        self.cap_box.setCurrentIndex(max(0, self.cap_box.findData(c.get("box", "dark"))))
+        self.cap_col.setCurrentIndex(max(0, self.cap_col.findData(c.get("color", "auto"))))
+        _quiet(self.cap_bold, lambda: self.cap_bold.setChecked(bool(c.get("bold"))))
+        _quiet(self.cap_fade, lambda: self.cap_fade.setChecked(float(c.get("fade") or 0) > 0))
         vox = ov.voxel_size(self.win.spec, self.win.st.ds)
         ortho = bool(self.win.spec.get("style", {}).get("ortho"))
         self.bar_note.setText("" if vox else "The scale bar needs the voxel size (Data tab).")

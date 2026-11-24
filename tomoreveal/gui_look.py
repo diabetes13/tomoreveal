@@ -4,7 +4,7 @@ import math
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import look as lk
-from .gui_fold import Section
+from .gui_fold import Fold, Section
 from .gui_theme import DIM
 
 
@@ -291,14 +291,34 @@ class Look35Controls(QtC.QObject):
                 cb.addItem(t, d)
             cb.setToolTip(tip); cb.activated.connect(lambda j: self.set(**{key: cb.itemData(j)}))
             return cb
-        self.preset = QtW.QComboBox()
+        self.preset = QtW.QComboBox(); self.preset.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset.setMinimumContentsLength(14)
         for t, d in lk.LOOKS + (("Custom", "custom"),):
             self.preset.addItem(t, d)
-        self.preset.setToolTip("Classic: as in earlier versions. Soft: white background, soft shadows in creases, thin outlines. "
-                               "Glass membranes: Soft with see-through membranes. Illustration: thick black outlines. "
-                               "On the tomogram: the structures over the grey slice.")
+        self.preset_tip = "Sets background, shadows, outlines, membranes and depth fade at once; each can then be changed. " + \
+            " ".join(f"{t}: {lk.LOOK_NOTES[d]}" for t, d in lk.LOOKS) + " The Presets tab shows them as pictures."
+        self.preset.setToolTip(self.preset_tip)
         self.preset.activated.connect(lambda j: self.choose(self.preset.itemData(j)))
         f.addRow("Look", self.preset)
+        self.bg = combo(tuple((t, d) for t, d in (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("dark grey", "darkgrey"),
+                                                   ("gradient (light grey to white)", "gradient"), ("the tomogram slice", "tomogram"))),
+                        "background", "Behind the structures, with any look (for example Soft on black)")
+        f.addRow("Background", self.bg)
+        self.membranes = QtW.QComboBox(); self.membranes.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.membranes.setMinimumContentsLength(8)
+        for t, d in lk.MEMBRANE_LOOKS:
+            self.membranes.addItem(t, d)
+        self.membranes.setToolTip("Structures ticked 'Treat as membrane' (Structures tab): in their own colour, pale and see-through "
+                                  "so what is behind or inside them shows, or solid cream like a ceramic model")
+        self.membranes.activated.connect(lambda j: self.set_membranes(self.membranes.itemData(j)))
+        self.glass_op = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set(glass_opacity=v / 100))
+        self.glass_op.s.setToolTip("How solid the see-through membranes look")
+        f.addRow("Membranes", _row(self.membranes, self.glass_op))
+        self.glass_line = combo(lk.GLASS_OUTLINES, "glass_outline", "Outlines of see-through membranes: every edge, only their outer "
+                                "edge (no lines across them where they fold or where something lies behind), or none")
+        f.addRow("See-through edges", self.glass_line)
+        more = Fold("More settings", "look_more", False, "Shadows, outlines, depth fade, surface and colours")
+        f.addRow(more); f = more.form
         self.shadow = combo(lk.SHADOW_LEVELS, "shadow", "Soft shadows in creases and between neighbours. They do not change with "
                             "the camera, so they never flicker. Clip boxes and cuts do not change them.")
         self.reach = combo(lk.REACHES, "reach", "How far the soft shadows reach")
@@ -309,15 +329,13 @@ class Look35Controls(QtC.QObject):
         self.between = QtW.QCheckBox("also between touching structures")
         self.between.setToolTip("Outlines where two structures touch at the same depth (draws each frame twice)")
         self.between.toggled.connect(lambda v: self.set(between=bool(v))); f.addRow("", self.between)
-        self.glass = QtW.QCheckBox("See-through membranes")
-        self.glass.setToolTip("Structures ticked 'Treat as membrane' (Structures tab) are pale and see-through, so what is behind "
-                              "or inside them shows")
-        self.glass.toggled.connect(lambda v: self.set(glass=bool(v)))
-        self.glass_op = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set(glass_opacity=v / 100))
-        self.glass_op.s.setToolTip("How solid the see-through membranes look")
-        f.addRow(self.glass, self.glass_op)
         self.fade = combo(lk.FADES, "depth_fade", "Far things fade towards the background: gives depth")
         f.addRow("Depth fade", self.fade)
+        self.material = combo(lk.MATERIALS, "material", "Ceramic: bright and matte with a broad soft sheen, like a porcelain model")
+        self.pastel = QtW.QCheckBox("paler colours")
+        self.pastel.setToolTip("Colours mixed a little towards white, as on a ceramic model")
+        self.pastel.toggled.connect(lambda v: self.set(pastel=bool(v)))
+        f.addRow("Surface", _row(self.material, self.pastel))
         self.richer = QtW.QCheckBox("Richer colours on white backgrounds")
         self.richer.setToolTip("Colours from Dragonfly can look washed out on white: a little more saturated and darker")
         self.richer.toggled.connect(lambda v: self.set(richer=bool(v)))
@@ -326,6 +344,9 @@ class Look35Controls(QtC.QObject):
                               "(with the Default lighting preset)")
         self.matte.toggled.connect(lambda v: self.set(lighting=bool(v)))
         f.addRow(_row(self.richer, self.matte))
+
+    def set_membranes(self, how):
+        self.set(glass=how == "glass", membrane_colour=lk.CREAM if how == "cream" else None)
 
     def choose(self, name):
         w = self.win
@@ -338,6 +359,8 @@ class Look35Controls(QtC.QObject):
         if w.spec is None:
             return
         lk.set_look(w.spec, **kw); self.sync(); w.schedule()
+        if "background" in kw and hasattr(w, "bg_cb"):  # the same choice in "Background and contrast"
+            _quiet(w.bg_cb, lambda: w.bg_cb.setCurrentIndex(max(0, w.bg_cb.findData(kw["background"]))))
 
     def sync(self):
         w = self.win
@@ -345,11 +368,13 @@ class Look35Controls(QtC.QObject):
             return
         L = lk.style35(w.spec)
         for cb, v in ((self.preset, L["preset"]), (self.shadow, L["shadow"]), (self.reach, L["reach"]), (self.outline, L["outline"]),
-                      (self.ocol, L["outline_colour"]), (self.fade, L["depth_fade"])):
+                      (self.ocol, L["outline_colour"]), (self.fade, L["depth_fade"]), (self.bg, L["background"]),
+                      (self.membranes, lk.membrane_look(L)), (self.glass_line, L["glass_outline"]), (self.material, L["material"])):
             _quiet(cb, lambda cb=cb, v=v: cb.setCurrentIndex(max(0, cb.findData(v))))
-        for cb, v in ((self.between, L["between"]), (self.glass, L["glass"]), (self.richer, L["richer"]), (self.matte, L["lighting"])):
+        for cb, v in ((self.between, L["between"]), (self.pastel, L["pastel"]), (self.richer, L["richer"]), (self.matte, L["lighting"])):
             _quiet(cb, lambda cb=cb, v=v: cb.setChecked(bool(v)))
-        _setv(self.glass_op, 100 * float(L["glass_opacity"])); self.glass_op.setEnabled(bool(L["glass"]))
+        _setv(self.glass_op, 100 * float(L["glass_opacity"])); self.glass_op.setVisible(bool(L["glass"]))
+        self.glass_line.setEnabled(bool(L["glass"]))
         self.reach.setEnabled(L["shadow"] != "none"); self.ocol.setEnabled(L["outline"] != "off"); self.between.setEnabled(L["outline"] != "off")
 
 
@@ -368,4 +393,19 @@ def membrane_row(win, form, key, name):
 
     def put(on):
         win.spec["classes"].setdefault(key, {})["membrane"] = bool(on); win.schedule()
-    cb.toggled.connect(put); form.addRow("", cb)
+    cb.toggled.connect(put)
+    c = win.spec["classes"].get(key, {})
+    sh = QtW.QCheckBox("soft shadows"); sh.setChecked(not c.get("no_shadow"))
+    sh.setToolTip("Soft shadows of the Look on this structure (untick to draw it without them, in the whole movie)")
+    ol = QtW.QCheckBox("outline"); ol.setChecked(not c.get("no_outline"))
+    ol.setToolTip("Outlines of the Look around this structure (untick to draw it without one, in the whole movie)")
+
+    def flag(name, on):
+        sc = win.spec["classes"].setdefault(key, {})
+        if on:
+            sc.pop(name, None)
+        else:
+            sc[name] = True
+        win.schedule()
+    sh.toggled.connect(lambda on: flag("no_shadow", on)); ol.toggled.connect(lambda on: flag("no_outline", on))
+    form.addRow("", _row(cb, sh, ol))

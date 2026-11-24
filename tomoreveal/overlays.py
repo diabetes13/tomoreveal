@@ -17,8 +17,10 @@ DEFAULTS = {
     "scale_bar": dict(show=False, x=0.97, y=0.95, anchor="bottom-right", size=1.0, length_nm="auto", thickness=1.0, color="auto",
                       label=True, mode="screen"),
     "title": dict(show=True, x=None, y=None, anchor="bottom-left", size=1.0),
-    "caption": dict(show=True, x=None, y=None, anchor="bottom-center", size=1.4),
+    "caption": dict(show=True, x=None, y=None, anchor="bottom-center", size=1.4, box="dark", color="auto", bold=False, fade=0.0),
 }
+CAPTION_BOXES = (("see-through box", "dark"), ("light box", "light"), ("outline", "outline"), ("no box (text with a shadow)", "none"))
+CAPTION_COLOURS = (("automatic", "auto"), ("white", "#ffffff"), ("black", "#000000"), ("yellow", "#ffd23f"), ("cyan", "#45b9e8"))
 SIZE_RANGE = (0.5, 3.0)
 NICE = (1, 2, 5)
 
@@ -205,15 +207,37 @@ class Painter:
             self.d.text((x0, y0), text, fill=self.fg, font=f)
         self._record(name, x0, y0, r, b, shown and bool(text))
 
-    def caption(self, item, text, shown):
-        s = _size(item); px = self.px * s / 1.4; big = self.font(round(self.px * s))
+    def caption(self, item, text, shown, alpha=1.0):
+        """The part's caption. Options (3.5): box dark (see-through, as before) / light / outline / none, colour, bold;
+        alpha < 1 while it fades in or out."""
+        s = _size(item); px = self.px * s / 1.4
+        try:
+            big = self.font(round(self.px * s), bool(item.get("bold")))
+        except TypeError:
+            big = self.font(round(self.px * s))
         wt = self.d.textlength(text or " ", font=big)
         bw, bh = wt + 2 * px, 2.4 * px
         default = ((self.W - wt) / 2 - px, self.H - round(self.px * 3.4) - px * 0.4)
         x0, y0 = place(item, bw, bh, self.W, self.H, default)
-        if shown and text:
-            self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=self._back(0.47))
-            self.d.text((x0 + px, y0 + px * 0.4), text, fill=self.fg, font=big)
+        if shown and text and alpha > 0.002:
+            box = item.get("box", "dark"); A = max(0.0, min(1.0, float(alpha)))
+            light = box == "light" or (box == "dark" and not self.dark)  # the box is light: dark text
+            if item.get("color", "auto") in (None, "auto"):
+                fg = (0, 0, 0) if (light if box in ("dark", "light") else not self.dark) else (255, 255, 255)
+            else:
+                from .common import hex2rgb
+                fg = tuple(int(round(255 * v)) for v in hex2rgb(item["color"]))
+            if box == "dark":
+                b = self._back(0.47); self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=b[:3] + (round(b[3] * A),))
+            elif box == "light":
+                self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=(255, 255, 255, round(220 * A)))
+            elif box == "outline":
+                self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, outline=fg + (round(255 * A),),
+                                         width=max(1, round(px * 0.12)))
+            kw = {}
+            if box == "none":  # a soft shadow keeps the text readable over anything
+                kw = dict(stroke_width=max(1, round(px * 0.1)), stroke_fill=((0, 0, 0) if sum(fg) > 380 else (255, 255, 255)) + (round(160 * A),))
+            self.d.text((x0 + px, y0 + px * 0.4), text, fill=fg + (round(255 * A),), font=big, **kw)
         self._record("caption", x0, y0, bw, bh, shown and bool(text))
 
     def legend(self, item, rows, shown):

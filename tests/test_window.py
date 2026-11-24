@@ -52,7 +52,7 @@ def tabs_shown(win):
 
 
 def is_empty(win):
-    return tabs_shown(win) == [True, False, False, False, False] and not win.data.empty_lbl.isHidden() and win.spec is None
+    return tabs_shown(win) == [True, False, False, False, False, False] and not win.data.empty_lbl.isHidden() and win.spec is None
 
 
 def test_tomogram_first_then_segmentation(window, demo):
@@ -61,7 +61,7 @@ def test_tomogram_first_then_segmentation(window, demo):
     for _ in range(2):  # every rebuild of the lists, twice
         wait(app, win, lambda: win.data.add_tomogram([demo["tomogram"]]))
         assert win.st.ren is not None, "the 3D renderer did not start after loading"
-        assert tabs_shown(win) == [True, True, True, True, True]
+        assert tabs_shown(win) == [True, True, True, True, True, True]
         assert structure_names(win) == [] and not win.struct_note.isHidden()
         assert "No segmentation loaded" in win.struct_note.text()
         assert row(win, 0)["note"].isHidden() and row(win, 1)["note"].text().startswith("needs a segmentation")  # slide up yes, reveal no

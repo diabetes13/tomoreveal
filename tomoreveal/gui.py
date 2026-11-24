@@ -562,6 +562,8 @@ def build_gui(args):
             self.arrow_pick = False; self.label_editor = None; self.preview_menu_extras = [preview_menu(self)]
             self.look_controls = LookControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
+            from .gui_presets import PresetsPanel
+            self.presets = PresetsPanel(self, self._tab("Presets")); self.pages[-1].layout().addStretch(1)
             wg, wl = self._group("Window", lay, "window", False, "Light or dark window. This does not change the movie: its "
                                  "background is set in the Look.")
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
@@ -642,7 +644,7 @@ def build_gui(args):
             if text:
                 self.statusBar().showMessage(text, 10000)
 
-        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4
+        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_MOVIE, TAB_LOOK, TAB_PRESETS = 0, 1, 2, 3, 4, 5
 
         # ---------- playback ----------
         def toggle_play(self):
@@ -754,13 +756,15 @@ def build_gui(args):
             if i == self.TAB_EXPLORE:
                 self.explore.view.setFocus()
             self.schedule(0)
+            if i == self.TAB_PRESETS:
+                QtC.QTimer.singleShot(300, self.presets.refresh)  # after the preview
 
         def _set_z_range(self, zr):
             if self.spec:
                 self.spec["z_range"] = zr; self.schedule()
 
         def show_empty(self):
-            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
+            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
                 self.tabs.setTabVisible(i, False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
             self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.voxel_row.setVisible(False)
@@ -860,7 +864,7 @@ def build_gui(args):
             self.editor.reset_history()  # loading other data starts a new history
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
-            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK):
+            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
                 self.tabs.setTabVisible(i, True)
             self.explore.set_data(info)
             self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
@@ -1490,6 +1494,11 @@ def build_gui(args):
                 self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
             if self.multi_pick and self.st.has_segmentation and self.gen is None:
                 return self._multi_click(fx, fy)
+            if isinstance(self.arrow_pick, str) and self.gen is None:  # "Point at more things": until a click on empty space
+                from .gui_annotations import add_pointer_at
+                if not add_pointer_at(self, self.arrow_pick, (fx, fy)):
+                    self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); self.say("Done.", "ok")
+                return
             if self.arrow_pick and self.gen is None:  # "+ Add arrow": this click is where it points
                 from .gui_annotations import add_arrow_at
                 self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); add_arrow_at(self, (fx, fy)); return

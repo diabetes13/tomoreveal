@@ -20,6 +20,12 @@ def exec_menu(menu, pos):
 # ---------------------------------------------------------------------------------------------------------------
 # preview: hit names "ann:<id>" (the whole item), "anntip:<id>" (an arrow's tip), "anntail:<id>" (tail or label)
 # ---------------------------------------------------------------------------------------------------------------
+def _split(name):
+    """"anntip:<id>:<j>" -> (id, j); "ann:<id>" -> (id, None)."""
+    parts = name.split(":")
+    return parts[1], (int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None)
+
+
 class AnnotationMouse:
     def __init__(self, win):
         self.win = win; self.drag = None; self.selected = []  # ids selected in the preview (Ctrl + click adds)
@@ -40,7 +46,7 @@ class AnnotationMouse:
         name = self.hit(od, f)
         if name is None:
             return False
-        aid = name.split(":", 1)[1]; a = an.find(w.spec, aid)
+        aid, j = _split(name); a = an.find(w.spec, aid)
         if a is None:
             return False
         if mods & QtC.Qt.ControlModifier:  # several at once
@@ -49,7 +55,7 @@ class AnnotationMouse:
         if aid not in self.selected:
             self.selected = [aid]
         kind = "tip" if name.startswith("anntip:") else "tail" if name.startswith("anntail:") and a["kind"] == "arrow" else "move"
-        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False,
+        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False, more=j,
                          start={x: (dict(an.find(w.spec, x).get("pos") or {}) if an.find(w.spec, x) else {}) for x in self.selected})
         return True
 
@@ -74,8 +80,12 @@ class AnnotationMouse:
                     hit = w.st.pick(w.spec_for(), {"frame": w.frame, "x": f[0], "y": f[1]})
                 except Exception:
                     pass
-                a["anchor"] = dict(xyz=[float(v) for v in p], structure=hit.get("class") if hit and hit.get("found") else None,
-                                   component=hit.get("component") if hit and hit.get("found") else None)
+                anc = dict(xyz=[float(v) for v in p], structure=hit.get("class") if hit and hit.get("found") else None,
+                           component=hit.get("component") if hit and hit.get("found") else None)
+                if d.get("more") is not None and d["more"] < len(a.get("more") or []):  # one of its extra pointers
+                    a["more"][d["more"]] = anc
+                else:
+                    a["anchor" if a["kind"] == "arrow" else "pin"] = anc
         else:  # move text boxes (all selected ones together); a pinned box comes loose
             for aid in self.selected:
                 b = an.find(w.spec, aid)
@@ -103,25 +113,30 @@ class AnnotationMouse:
         name = self.hit(od, f)
         if name is None:
             return False
-        aid = name.split(":", 1)[1]
+        aid, j = _split(name)
         if aid not in self.selected:
             self.selected = [aid]
-        item_menu(self.win, aid, gpos)
+        item_menu(self.win, aid, gpos, j)
         return True
 
     def double(self, od, f):
         name = self.hit(od, f)
         if name is None:
             return False
-        edit_label(self.win, name.split(":", 1)[1]); return True
+        edit_label(self.win, _split(name)[0]); return True
 
 
-def item_menu(win, aid, gpos):
+def item_menu(win, aid, gpos, pointer=None):
     a = an.find(win.spec, aid)
     if a is None:
         return
     m = QtW.QMenu(win); arrow = a["kind"] == "arrow"
     m.addAction("Edit label..." if arrow else "Edit text...", lambda: edit_label(win, aid))
+    m.addAction("Point at more things...", lambda: start_add_pointer(win, aid))
+    if pointer is not None:
+        m.addAction("Remove this pointer", lambda: change(win, aid, lambda b: b["more"].pop(pointer) if pointer < len(b.get("more") or []) else None))
+    if an.pointers(a):
+        m.addAction("Remove the extra pointers", lambda: change(win, aid, lambda b: b.pop("more", None)))
     st = a.setdefault("style", {})
     if arrow:
         sh = m.addMenu("Shape")
@@ -276,6 +291,30 @@ def add_text_at(win, f):
     return a
 
 
+def start_add_pointer(win, aid):
+    """Click things in the preview: the arrow or text box points at each of them too; a click on empty space ends."""
+    win.pick_btn.setChecked(False); win.end_picks(); win.arrow_pick = aid; win.prev.setCursor(QtC.Qt.CrossCursor)
+    win.say("Click each thing it should also point at. Click on empty space when done.")
+
+
+def add_pointer_at(win, aid, f):
+    """One more thing for an arrow or text box to point at (the 3D point under f). Returns False when nothing is there."""
+    ren = win.st.ren; a = an.find(win.spec, aid)
+    p = ren.pick_point(*f) if ren is not None and a is not None else None
+    if p is None:
+        return False
+    hit = None
+    try:
+        hit = win.st.pick(win.spec_for(), {"frame": win.frame, "x": f[0], "y": f[1]})
+    except Exception:
+        pass
+    found = bool(hit and hit.get("found"))
+    an.add_pointer(a, p, hit["class"] if found else None, hit.get("component") if found else None); commit(win)
+    n = len(an.pointers(a)) + (1 if a["kind"] == "arrow" else 0)
+    win.say(f"It now points at {n} things. Click another, or on empty space when done.", "ok")
+    return True
+
+
 def start_add_arrow(win):
     win.pick_btn.setChecked(False); win.end_picks(); win.arrow_pick = True; win.prev.setCursor(QtC.Qt.CrossCursor)
     win.say("Click the spot the arrow should point to.")
@@ -325,12 +364,18 @@ class AnnotationPanel(QtC.QObject):
             self.rows.addWidget(self._row(a))
 
     def _row(self, a):
-        w = self.win; aid = a["id"]; row = QtW.QWidget(); h = QtW.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+        """One item: [shown] [arrow / text] [label] [shape or box] [colour] [x], and under it when it shows and what it
+        points at (3.5: the common choices are in the row; the rest stays in the ⋯ menu)."""
+        w = self.win; aid = a["id"]; arrow = a["kind"] == "arrow"
+        row = QtW.QFrame(); row.setFrameShape(QtW.QFrame.StyledPanel)
+        v = QtW.QVBoxLayout(row); v.setContentsMargins(4, 3, 4, 3); v.setSpacing(2)
+        h = QtW.QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); v.addLayout(h)
         vis = QtW.QCheckBox(); vis.setChecked(a.get("visible", True)); vis.setToolTip("Show or hide this item")
         vis.toggled.connect(lambda on: change(w, aid, lambda b: b.__setitem__("visible", bool(on))))
-        kind = QtW.QLabel("→" if a["kind"] == "arrow" else "T"); kind.setToolTip("An arrow" if a["kind"] == "arrow" else "A text box")
-        txt = QtW.QLineEdit((a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", ""))
+        kind = QtW.QLabel("→" if arrow else "T"); kind.setToolTip("An arrow" if arrow else "A text box")
+        txt = QtW.QLineEdit((a.get("label") or {}).get("text", "") if arrow else a.get("text", ""))
         txt.setToolTip("The label of the arrow, or the text"); txt.setMinimumWidth(80)
+        txt.setPlaceholderText("label" if arrow else "text")
 
         def set_text():
             def fn(b, t=txt.text()):
@@ -340,24 +385,46 @@ class AnnotationPanel(QtC.QObject):
                     b["text"] = t
             change(w, aid, fn)
         txt.editingFinished.connect(set_text)
+        st = a.get("style") or {}
+
+        def combo(items, cur, key, tip):
+            cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(5)
+            for t, d in items:
+                cb.addItem(t, d)
+            cb.setCurrentIndex(max(0, cb.findData(cur))); cb.setToolTip(tip)
+            cb.activated.connect(lambda j: change(w, aid, lambda b: b.setdefault("style", {}).__setitem__(key, cb.itemData(j))))
+            return cb
+        look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
+            combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
+        col = combo(COLOURS, st.get("color", "auto"), "color", "Colour")
+        dele = QtW.QToolButton(); dele.setText("✕"); dele.setToolTip("Delete this item"); dele.clicked.connect(lambda: delete(w, aid))
+        for x in (vis, kind, txt, look, col, dele):
+            h.addWidget(x)
+        h.setStretch(2, 1)
+        h2 = QtW.QHBoxLayout(); h2.setContentsMargins(22, 0, 0, 0); v.addLayout(h2)
         sh = a.get("show") or {}
-        st = QtW.QDoubleSpinBox(); st.setRange(-0.1, 600); st.setDecimals(1); st.setSingleStep(0.5); st.setSpecialValueText("start")
-        st.setPrefix("from "); st.setSuffix(" s"); st.setValue(-0.1 if sh.get("start") is None else float(sh["start"]))
-        st.setToolTip("When it appears, in seconds from the start of the part ('start': from the beginning)")
+        stt = QtW.QDoubleSpinBox(); stt.setRange(-0.1, 600); stt.setDecimals(1); stt.setSingleStep(0.5); stt.setSpecialValueText("start")
+        stt.setPrefix("from "); stt.setSuffix(" s"); stt.setValue(-0.1 if sh.get("start") is None else float(sh["start"]))
+        stt.setToolTip("When it appears, in seconds from the start of the part ('start': from the beginning)")
         en = QtW.QDoubleSpinBox(); en.setRange(-0.1, 600); en.setDecimals(1); en.setSingleStep(0.5); en.setSpecialValueText("end")
         en.setPrefix("to "); en.setSuffix(" s"); en.setValue(-0.1 if sh.get("end") is None else float(sh["end"]))
         en.setToolTip("When it disappears ('end': at the end of the part)")
-        st.valueChanged.connect(lambda v: change(w, aid, lambda b: b["show"].__setitem__("start", None if v < 0 else float(v))))
-        en.valueChanged.connect(lambda v: change(w, aid, lambda b: b["show"].__setitem__("end", None if v < 0 else float(v))))
+        stt.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("start", None if x < 0 else float(x))))
+        en.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("end", None if x < 0 else float(x))))
         here = QtW.QToolButton(); here.setText("⏵"); here.setToolTip("Start here: it appears at the playhead")
         here.clicked.connect(lambda: self.at_playhead(aid, "start"))
         there = QtW.QToolButton(); there.setText("⏹"); there.setToolTip("End here: it disappears at the playhead")
         there.clicked.connect(lambda: self.at_playhead(aid, "end"))
-        menu = QtW.QToolButton(); menu.setText("⋯"); menu.setToolTip("Shape, colour, copy, delete ...")
+        n = len(an.pointers(a))
+        more = QtW.QToolButton(); more.setText(f"+ point ({n + (1 if arrow else 0)})" if n else "+ point")
+        more.setToolTip("Point at more things with this one label: click each of them in the preview (one line to each, as in "
+                        "figure callouts). Right-click a pointer's end to remove it.")
+        more.clicked.connect(lambda: start_add_pointer(w, aid))
+        menu = QtW.QToolButton(); menu.setText("⋯"); menu.setToolTip("Edit, duplicate, copy to another part, align, same look for all ...")
         menu.clicked.connect(lambda: item_menu(w, aid, menu.mapToGlobal(QtC.QPoint(0, menu.height()))))
-        for x in (vis, kind, txt, st, en, here, there, menu):
-            h.addWidget(x)
-        h.setStretch(2, 1)
+        for x in (stt, en, here, there, more, menu):
+            h2.addWidget(x)
+        h2.addStretch(1)
         return row
 
     def at_playhead(self, aid, which):

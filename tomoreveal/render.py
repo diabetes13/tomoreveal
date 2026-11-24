@@ -211,6 +211,7 @@ class Renderer:
         legacy = not isinstance(mode, dict)  # older settings (grey / hide / keep) are drawn exactly as before
         ocol, oop = others_of(mode)
         keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
+        each = (mode.get("each") or {}) if not legacy else {}  # per structure in this close-up (3.5): glass / hide
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
         translucent = False
         for kk, act in self.actors.items():
@@ -234,6 +235,12 @@ class Renderer:
                 to = (0.27, 0.27, 0.27) if ocol == "grey" else tuple(v * 0.3 for v in col) if ocol == "darken" else col
                 col = tuple(a + (b - a) * e for a, b in zip(col, to))
                 op *= 1.0 - e * (1.0 - oop); act.SetVisibility(op > 0.002)
+            ch = each.get(ds.classes[kk]["key"]) if e > 0 and each else None
+            if ch == "hide":  # hidden in this close-up, faded out with e
+                op *= 1.0 - e; act.SetVisibility(op > 0.002)
+            elif ch == "glass":  # see-through in this close-up, like the glass membranes
+                to = hex2rgb(L35["glass_colour"]); col = tuple(a + (b - a) * e for a, b in zip(col, to))
+                op *= 1.0 - e * (1.0 - float(L35["glass_opacity"]))
             set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
         translucent |= self._apply_styles(spec, lk, all_op)
@@ -949,7 +956,8 @@ class Renderer:
         keep = mode == "keep" if not isinstance(mode, dict) else others_of(mode) == ("keep", 1.0)
         rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"]))
                 for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
-                and not (focused and e > 0.5 and not keep and kk not in focused)]
+                and not (focused and e > 0.5 and not keep and kk not in focused)
+                and not (e > 0.5 and isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide")]
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True))

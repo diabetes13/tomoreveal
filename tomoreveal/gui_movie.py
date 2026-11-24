@@ -380,6 +380,7 @@ MORE_ROWS = {
     "hold": ("Caption", "On the picture"),
     "card": ("Caption", "On the picture"),
 }
+EACH_CHOICES = (("as above", ""), ("see-through", "glass"), ("hidden", "hide"))
 FOCUS_MOTIONS = (("orbit around it", "orbit"), ("rock", "rock"), ("wiggle", "wiggle"), ("hold still", "none"))
 HIGHLIGHTS = (("none", "none"), ("pulse (brighter and back)", "pulse"), ("glowing outline", "glow"))
 EFFECTS = (("none", "none"), ("cross-section sweep", "section"), ("grow in", "grow"))
@@ -747,6 +748,9 @@ class PartsPanel(QtW.QWidget):
         op.valueChanged.connect(lambda v: self.set(pid, "others", sb.set_others_choice(self.part(pid).get("others"), opacity=v / 100)))
         h.addWidget(col); h.addWidget(op); h.addStretch(1)
         form.addRow("Other structures", orow)
+        each = self._each_rows(pid, p)
+        if each is not None:
+            form.addRow(each)
         form.addRow("Camera movement", _combo(FOCUS_MOTIONS, p.get("motion", "orbit"), lambda v: self.set(pid, "motion", v, rebuild=True)))
         self._animation_rows(pid, p, form)
         form.addRow("Zoom", _spin(0.3, 4, float(p.get("zoom", 1)), lambda v: self.set(pid, "zoom", v), step=0.1, suffix=" x"))
@@ -840,6 +844,38 @@ class PartsPanel(QtW.QWidget):
             h.addWidget(st); h.addWidget(bl)
         h.addStretch(1)
         return w
+
+    def _each_rows(self, pid, p):
+        """Each structure in this close-up (3.5): as set above, see-through or hidden, for this part only."""
+        structs = [c for c in (self.win.info or {}).get("structures", []) if c.get("mesh")]
+        if not structs:
+            return None
+        each = sb.each_of(p); n = len(each)
+        fd = Fold(f"Each structure ({n} changed)" if n else "Each structure", key="part_each",
+                  tip="Make single structures see-through or hide them in this close-up only, for example to see inside a "
+                      "membrane or to clear what is in the way. The rest follow 'Other structures'.")
+        spec = self.win.spec
+
+        def choose(key, v):
+            q = self.part(pid)
+            if q is None:
+                return
+            cur = sb.each_of(q)
+            if v:
+                cur[key] = v
+            else:
+                cur.pop(key, None)
+            self.set(pid, "each", cur or None)
+            m = len(cur); fd._text = f"Each structure ({m} changed)" if m else "Each structure"; fd.button.setText(fd._text)
+        for c in structs:
+            cs = spec["classes"].get(c["key"], {})
+            pm = QtG.QPixmap(12, 12); pm.fill(QtG.QColor(cs.get("color", c["color"])))
+            lab = QtW.QLabel(); lab.setPixmap(pm)
+            name = QtW.QLabel(cs.get("name", c["name"])); name.setToolTip(c.get("source_title", "") or name.text())
+            cb = _combo(EACH_CHOICES, each.get(c["key"], ""), lambda v, key=c["key"]: choose(key, v))
+            cb.setToolTip("As set above, see-through, or hidden, in this close-up only")
+            fd.form.addRow(_hrow(lab, name), cb)
+        return fd
 
     def _name(self, key):
         ds, spec = self.win.st.ds, self.win.spec; k = ds.id_of(key)

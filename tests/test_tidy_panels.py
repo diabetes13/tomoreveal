@@ -59,8 +59,8 @@ def test_new_overview_in_the_window_is_still_and_parts_fold(window):
     panel = win.parts_panel; panel.open(part["id"]); pump(app)
     form = panel.rows[part["id"]]["form"]
     folds = [w for w in form.parentWidget().findChildren(Fold)]
-    assert len(folds) >= 2  # More settings, and the transition
-    more = folds[0]
+    assert len(folds) >= 3  # Each structure, More settings, and the transition
+    more = next(f for f in folds if f._text == "More settings")
     labels = [more.form.itemAt(i, QFormLayout.LabelRole).widget().text() for i in range(more.form.rowCount())
               if more.form.itemAt(i, QFormLayout.LabelRole) is not None]
     assert "Caption" in labels and "Highlight" in labels
@@ -71,4 +71,27 @@ def test_new_overview_in_the_window_is_still_and_parts_fold(window):
     assert any(f.is_open() for f in folds)
     # a Look-tab section folds and stays folded
     g = win.look_controls.light_group; was = g.is_open(); g.set_open(not was); assert g.is_open() != was; g.set_open(was)
+    assert not errs, errs
+
+
+def test_each_structure_list_in_a_closeup(window):
+    from PySide6.QtWidgets import QComboBox
+    from tomoreveal.gui_fold import Fold
+    app, win, errs = window
+    part = sb.new_part("focus", target={"class": win.st.ds.key_of(2), "component": 1})
+    win.editor.insert(part); pump(app)
+    panel = win.parts_panel; panel.open(part["id"]); pump(app)
+    fd = next(f for f in panel.rows[part["id"]]["form"].parentWidget().findChildren(Fold) if f._text.startswith("Each structure"))
+    combos = fd.body.findChildren(QComboBox)
+    assert len(combos) >= 2
+    for _ in range(2):  # twice: the list is rebuilt in between
+        cb = combos[0]; cb.setCurrentIndex(cb.findData("hide")); cb.activated.emit(cb.currentIndex()); pump(app)
+        key = next(iter(sb.each_of(win.parts_panel.part(part["id"]))))
+        assert win.parts_panel.part(part["id"])["each"] == {key: "hide"} and "1 changed" in fd.button.text()
+        cb.setCurrentIndex(cb.findData("")); cb.activated.emit(cb.currentIndex()); pump(app)
+        assert "each" not in win.parts_panel.part(part["id"])
+        panel.fill_details(part["id"]); pump(app)
+        fd = next(f for f in panel.rows[part["id"]]["form"].parentWidget().findChildren(Fold)
+                  if f._text.startswith("Each structure") and not f.isHidden() and f.parentWidget() is not None)
+        combos = fd.body.findChildren(QComboBox)
     assert not errs, errs

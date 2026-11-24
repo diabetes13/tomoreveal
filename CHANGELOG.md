@@ -2,6 +2,7 @@
 
 ## 3.5.0
 
+- **See-through or hidden, structure by structure, in one close-up.** Under "Other structures", a close-up now has **Each structure**: set any structure to see-through (pale, like the glass membranes) or hidden for that close-up only, for example to look inside a membrane or clear what is in the way. It fades in with the close-up, works with a frame you drew, and hidden structures leave the legend. Other parts and older projects are unchanged.
 - **Fewer settings on screen at once.** Each group in the Look and Movie tabs folds: click its title. The Look tab opens with the Look, the tomogram slice and Arrows and text; the rest are folded. A part's less used settings (caption, what is on the picture, zoom, tilt, highlight, effects, vignette, pauses, slowing down at the end) are under **More settings**, and its transition is folded under its heading. The program remembers what you open. Long explanations are now tooltips.
 - **The mouse wheel no longer changes settings.** Turning the wheel over a drop-down list, number box or slider scrolls the panel instead.
 - **Arrows and text boxes are easy to see on the timeline:** each has its own full-height bar under the parts, labelled with its words and with grips at both ends. A tooltip shows when it is shown.

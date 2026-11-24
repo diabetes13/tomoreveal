@@ -221,6 +221,24 @@ def set_others_choice(v, colour=None, opacity=None):
     return dict(colour=c if colour is None else colour, opacity=o if opacity is None else float(opacity))
 
 
+EACH_CHOICES = ("glass", "hide")  # per structure in one close-up (3.5): see-through, hidden
+
+
+def each_of(part):
+    """{structure key: "glass" | "hide"} of a close-up: structures drawn see-through or hidden in this part only."""
+    return {k: v for k, v in (part.get("each") or {}).items() if v in EACH_CHOICES}
+
+
+def closeup_others(part):
+    """The others setting a close-up's frames carry. Without per-structure choices it is the part's own setting
+    (old projects draw exactly as before); with them, a dict that also holds "each"."""
+    m = part.get("others", "grey"); each = each_of(part)
+    if not each:
+        return m
+    c, o = others_choice(m)
+    return dict(colour=c, opacity=o, each=each)
+
+
 def closeup_caption(items, name_of):
     """Default caption: the structure's name for one item; "A and B" for two structures; "N objects" otherwise."""
     if not items:
@@ -336,7 +354,7 @@ def new_part(kind, **fields):
 
 
 # Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
-NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle"), "slide": ("ease_end",), "overview": ("ease_end",),
+NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle", "each"), "slide": ("ease_end",), "overview": ("ease_end",),
               "path": ("steadiness", "interp")}
 WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
@@ -782,7 +800,7 @@ def build_plan(spec, ds):
                 st.update({k: A[0][k] for k in st}); pose[0] = A[0]["pose"]
             p0, p1, e0, old, oldmode, s0 = pose[0], fp(), st["e"], st["target"], st["others"], st["slice"]
             s1 = ramp["s1"]  # the fly-in is this part's tomogram fade
-            mode, cap = part.get("others", "grey"), part.get("caption", "")
+            mode, cap = closeup_others(part), part.get("caption", "")
 
             def fly(u, p0=p0, p1=p1, e0=e0, old=old, oldmode=oldmode, s0=s0, s1=s1, tgt=tgt, mode=mode, cap=cap, A=A, m2=m2, nt=nt, nxt=nxt, tr=tr):
                 q = ease_curve(u, tr["ease_out_prev"], tr["ease_in_next"]); i = int(round(u * (nt - 1))) if nt > 1 else 0

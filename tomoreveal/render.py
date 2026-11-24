@@ -174,10 +174,18 @@ class Renderer:
                     warnings.simplefilter("ignore")
                     self.pl.enable_anti_aliasing(mode)
             self.aa = mode; self._ms_aa = self.pl.ren_win.GetMultiSamples()
-        bg = style.get("bg", "#000000")
-        if bg != self.bg:
-            self.pl.set_background(hex2rgb(bg)); self.bg = bg
+        from .look import GRADIENT_TOP, LOOK_PRESETS, style35
+        L35 = style35(spec); self._l35 = L35
+        bg = style.get("bg", "#000000"); bgkey = (bg, L35["background"] == "gradient")
+        if bgkey != self.bg:
+            if bgkey[1]:  # light grey at the top to white at the bottom
+                self.pl.set_background(hex2rgb(bg), top=hex2rgb(GRADIENT_TOP))
+            else:
+                self.pl.set_background(hex2rgb(bg))
+            self.bg = bgkey
         bgc = hex2rgb(bg)
+        light_bg = sum(bgc) > 1.5
+        del LOOK_PRESETS
         # tomogram slice
         con = style.get("contrast", [1, 99]); inv = bool(style.get("invert", False)); k = int(s["k"])
         key = (k, tuple(con), inv, id(ds.tomo))
@@ -211,6 +219,11 @@ class Renderer:
                 act.SetVisibility(False); continue
             op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * all_op
             col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
+            if L35["glass"] and self._membrane(spec, kk):  # glass membranes (3.5): pale and see-through
+                col = hex2rgb(L35["glass_colour"]); op *= float(L35["glass_opacity"])
+            elif L35["richer"] and light_bg:
+                from .look import richer
+                col = richer(col)
             if e <= 0 or not items or keep or kk in whole:
                 act.SetVisibility(True)
             elif legacy:
@@ -224,6 +237,7 @@ class Renderer:
             set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
         translucent |= self._apply_styles(spec, lk, all_op)
+        self._apply_baked_shadows(spec, L35)
         for act in self.comp_actors.values():
             if act is not None:
                 act.SetVisibility(False)
@@ -267,6 +281,8 @@ class Renderer:
             fr_img = self.pl.screenshot(None, transparent_background=bool(transparent))
         finally:
             restore_unlit(lit)
+        if L35["outline"] != "off" or L35["depth_fade"] != "off":  # 3.5 looks: outlines and depth fade, from the depth buffer
+            fr_img = self._outlines_and_fade(fr_img, s, spec, size, L35, transparent)
         if self._vig is not None and self._vig["a"] > 0.001:
             fr_img = self._apply_vignette(fr_img, self._vig, transparent)
         if not annotate:
@@ -275,6 +291,129 @@ class Renderer:
         if self._path3d:
             self._project_path(size)
         return img
+
+    # ---------- 3.5 looks: baked soft shadows, see-through membranes, outlines, depth fade ----------
+    def _membrane(self, spec, kk):
+        from .look import is_membrane
+        c = self.ds.classes[kk]
+        return is_membrane(spec, c["key"], class_spec(spec, self.ds, kk).get("name", c["name"]))
+
+    def _apply_baked_shadows(self, spec, L35):
+        """Soft shadows baked into the vertex colours (the colour each actor has now, times the shadow factor)."""
+        from .look import SHADOW_DARKEST, BakedShadows
+        on = L35["shadow"] != "none"
+        acts = [(kk, act, self.ds.meshes.get(kk)) for kk, act in self.actors.items()]
+        if not on:
+            for _, act, _ in acts:
+                if act.mapper.GetScalarVisibility():
+                    act.mapper.ScalarVisibilityOff()
+            return
+        if not hasattr(self, "_ao"):
+            self._ao = BakedShadows()
+        shown = [kk for kk, act, _ in acts if act.GetVisibility()]
+        self._ao.prepare(self.ds, shown, L35["reach"])  # hidden structures cast no shadows
+        dark = SHADOW_DARKEST[L35["shadow"]]
+        for kk, act, mesh in acts:
+            if not act.GetVisibility() or mesh is None or getattr(act, "_shown_mesh", mesh) is not mesh:
+                act.mapper.ScalarVisibilityOff(); continue
+            f = self._ao.factor(mesh, dark)
+            col = np.array(act.GetProperty().GetColor(), np.float32)
+            key = (id(mesh), tuple(np.round(col, 4)), id(f))
+            if getattr(act, "_ao_key", None) != key:
+                rgb = np.clip(f[:, None] * col[None, :] * 255.0, 0, 255).astype(np.uint8)
+                mesh.point_data["ao_rgb"] = rgb; act._ao_key = key
+                m = act.mapper; m.SetInputData(mesh); m.SetScalarModeToUsePointFieldData(); m.SelectColorArray("ao_rgb")
+                m.SetColorModeToDirectScalars()
+            act.mapper.ScalarVisibilityOn()
+
+    def _id_pass(self, size):
+        """Draw every shown structure in a flat colour of its own, opaque, without the slice: (RGB image, depth buffer
+        (rows from the top), {id colour: structure id}). For outlines between touching structures and of see-through ones."""
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+        saved = []; W, H = size; ids = {}
+        objs = [(kk, a) for kk, a in self.actors.items() if a.GetVisibility()] + \
+               [(k[0], a) for k, a in self.comp_actors.items() if a is not None and a.GetVisibility()]
+        others = [self.slice_actor, self.bar_actor, *self.sil_actors.values(), *self.glow_actors.values(), *self.cut_actors.values()]
+        for a in others:
+            if a is not None:
+                saved.append(("vis", a, a.GetVisibility())); a.SetVisibility(False)
+        for i, (kk, a) in enumerate(objs, start=1):
+            pr = a.GetProperty()
+            saved.append(("prop", a, (pr.GetColor(), pr.GetLighting(), pr.GetOpacity(), a.mapper.GetScalarVisibility(), pr.GetAmbient(),
+                                      pr.GetDiffuse(), pr.GetSpecular(), pr.GetFrontfaceCulling(), pr.GetRepresentation())))
+            c = (40 * (i % 6) + 30, 40 * ((i // 6) % 6) + 30, 40 * ((i // 36) % 6) + 30)  # well apart, so edges are clear
+            ids[c] = kk
+            pr.SetColor(c[0] / 255, c[1] / 255, c[2] / 255); pr.SetLighting(False); pr.SetOpacity(1.0); a.mapper.ScalarVisibilityOff()
+            pr.SetAmbient(1.0); pr.SetDiffuse(0.0); pr.SetSpecular(0.0); pr.SetFrontfaceCulling(False)
+        peel = self.peeling; self._set_peeling(False)
+        self.pl.set_background((0, 0, 0)); self.bg = None  # set again by the next frame
+        try:
+            self.pl.render(); img = self.pl.screenshot(None)
+            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+            zb = vtk_to_numpy(arr).reshape(H, W)[::-1].copy()
+        finally:
+            for kind, a, v in saved:
+                if kind == "vis":
+                    a.SetVisibility(v)
+                else:
+                    pr = a.GetProperty(); col, lit, op, sv, amb, dif, spc, cull, rep = v
+                    pr.SetColor(*col); pr.SetLighting(lit); pr.SetOpacity(op); a.mapper.SetScalarVisibility(sv)
+                    pr.SetAmbient(amb); pr.SetDiffuse(dif); pr.SetSpecular(spc); pr.SetFrontfaceCulling(cull); pr.SetRepresentation(rep)
+            self._set_peeling(peel)
+        return img[..., :3], zb, ids
+
+    def _outlines_and_fade(self, img, s, spec, size, L35, transparent):
+        from scipy import ndimage
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+        from .look import FADE_AMOUNT, OUTLINE_PX
+        W, H = size; out = img.astype(np.float32)
+        cam = self.pl.renderer.GetActiveCamera(); n, f = cam.GetClippingRange(); ortho = cam.GetParallelProjection()
+
+        def linear(zb):
+            if ortho:
+                return n + zb * (f - n)
+            zn = 2.0 * zb - 1.0
+            return 2.0 * n * f / np.maximum(1e-9, f + n - zn * (f - n))
+        bgc = np.array(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) * 255
+        if L35["depth_fade"] != "off":  # far things fade towards the background (towards white over the slice)
+            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+            zb = vtk_to_numpy(arr).reshape(H, W)[::-1]; fg = zb < 0.99999
+            near, far = s.get("dr") or (float(np.min(linear(zb[fg]))) if fg.any() else n, float(np.max(linear(zb[fg]))) if fg.any() else f)
+            t = np.clip((linear(zb) - (near + 0.4 * (far - near))) / max(1e-6, 0.6 * (far - near)), 0, 1) * FADE_AMOUNT[L35["depth_fade"]]
+            t[~fg] = 0; m = t > 0.002
+            to = np.array([255.0, 255.0, 255.0]) if L35["background"] == "tomogram" else bgc
+            out[..., :3][m] = out[..., :3][m] * (1 - t[m][:, None]) + to * t[m][:, None]
+        if L35["outline"] != "off":
+            idimg, zb, ids = self._id_pass(size)
+            bg = zb >= 0.99999; lin = np.where(bg, f * 4.0, linear(zb))
+            thr = 0.012 if float(s.get("e", 0)) > 0.5 else 0.02
+            from .look import outline_edges
+            edge = outline_edges(lin, bg, idimg if L35["between"] else None, thr)
+            w = OUTLINE_PX[L35["outline"]] * H / 1080.0
+            it = int(max(0, round((w - 1.0) / 2)))
+            if it:
+                edge = ndimage.binary_dilation(edge, iterations=it)
+            alpha = np.clip(ndimage.gaussian_filter(edge.astype(np.float32), 0.5) * 1.6, 0, 1) * 0.9
+            col = np.zeros((H, W, 3), np.float32) + (np.array([0, 0, 0]) if L35["outline_colour"] == "black" else np.array([40, 40, 40]))
+            if L35["outline_colour"] == "shade" or L35["glass"]:
+                key = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
+                lut = {c[0] * 65536 + c[1] * 256 + c[2]: kk for c, kk in ids.items()}
+                near_id = ndimage.grey_dilation(np.where(bg, 0, key), size=3)  # the structure next to each outline pixel
+                for code, kk in lut.items():
+                    m = near_id == code
+                    if not m.any():
+                        continue
+                    if L35["glass"] and self._membrane(spec, kk):  # see-through membranes: a lighter, warm outline
+                        alpha[m] *= 0.55; col[m] = (110, 100, 85)
+                    elif L35["outline_colour"] == "shade":
+                        c = class_spec(spec, self.ds, kk).get("color", self.ds.classes[kk]["color"])
+                        col[m] = np.array(hex2rgb(c)) * 255 * 0.45
+            m = alpha > 0.004  # only where there is an outline
+            a3 = alpha[m][:, None]
+            out[..., :3][m] = out[..., :3][m] * (1 - a3) + col[m] * a3
+            if transparent and out.shape[2] == 4:
+                out[..., 3][m] = np.maximum(out[..., 3][m], alpha[m] * 255 / 0.9)
+        return np.clip(np.round(out), 0, 255).astype(np.uint8)
 
     def _set_peeling(self, on):
         """Depth peeling for see-through structures, set up by hand (3.5 phase 1A). PyVista's enable_depth_peeling()
@@ -629,13 +768,18 @@ class Renderer:
         L = lk["lighting"]; pre = L.get("preset", "default")
         key = (pre, round(float(L["azimuth"]), 2), round(float(L["elevation"]), 2), bool(L["follow_camera"]), round(float(L["intensity"]), 3),
                round(float(L["fill"]), 3), round(float(L["ssao_radius"]), 4), round(float(L["ssao_strength"]), 3),
-               bool(lk["shadows"]["real"]["on"] and self.real_shadows_ok), round(float(lk["shadows"]["real"]["strength"]), 3))
+               bool(lk["shadows"]["real"]["on"] and self.real_shadows_ok), round(float(lk["shadows"]["real"]["strength"]), 3),
+               bool(getattr(self, "_l35", {}).get("lighting")))
         if key == self._light_key:
             return
         pv = self.pv; pl = self.pl
         pl.remove_all_lights()
         want_ssao = pre in ("soft", "full")
-        if pre == "default":
+        if pre == "default" and key[-1]:  # 3.5 looks: a head light (70 %) and a fill light from the upper left (30 %)
+            for pos, amount in (((0.0, 0.0, 1.0), 0.7), ((-1.0, 1.0, 1.0), 0.3)):
+                lt = pv.Light(position=pos, focal_point=(0, 0, 0), light_type="camera light", intensity=amount); lt.positional = False
+                pl.add_light(lt)
+        elif pre == "default":
             pl.enable_lightkit()
         elif pre != "flat":
             from .look import camera_direction, direction
@@ -651,19 +795,20 @@ class Renderer:
                     v = direction(float(L["azimuth"]) + (180 if sign < 0 else 0), float(L["elevation"]) if sign > 0 else 30.0)
                     lt = pv.Light(position=tuple(c + v * 1e4), focal_point=tuple(c), light_type="scene light", intensity=amount)
                 lt.positional = False
-                if sign > 0 and key[-2]:
+                if sign > 0 and key[8]:
                     lt.shadow_attenuation = float(lk["shadows"]["real"]["strength"])
                 pl.add_light(lt)
         ssao = key[6:8] if want_ssao else False
+        real = key[8]
         if ssao != self._ssao:
             if self._ssao:
                 pl.disable_ssao()
             if want_ssao:
                 pl.enable_ssao(radius=float(L["ssao_radius"]) * max(self.shape), bias=0.01, kernel_size=64, blur=True)
             self._ssao = ssao
-        if key[-2] != self._real_shadows:
-            pl.enable_shadows() if key[-2] else pl.disable_shadows()
-            self._real_shadows = key[-2]
+        if real != self._real_shadows:
+            pl.enable_shadows() if real else pl.disable_shadows()
+            self._real_shadows = real
         self._light_key = key
 
     def _apply_styles(self, spec, lk, all_op):
@@ -671,12 +816,15 @@ class Renderer:
         from .look import GLOSS, style_of
         L = lk["lighting"]; pre = L.get("preset", "default"); ds = self.ds
         amb, spec_amt = (0.25, 0.2) if pre == "default" else (float(L["ambient"]), float(L["specular"]))
+        matte = pre == "default" and bool(getattr(self, "_l35", {}).get("lighting"))  # 3.5 looks: a matte surface
+        if matte:
+            amb, spec_amt = 0.45, 0.04
         glass = False
         for kk, act in self.actors.items():
             st = style_of(spec, ds.classes[kk]["key"]); pr = act.GetProperty(); kind = st["kind"]
             pr.SetRepresentationToSurface(); pr.SetInterpolationToPhong(); pr.SetMetallic(0.0); pr.SetRoughness(0.5)
             pr.RenderPointsAsSpheresOff(); pr.SetLighting(pre != "flat")
-            pr.SetAmbient(amb); pr.SetDiffuse(0.8); pr.SetSpecular(spec_amt); pr.SetSpecularPower(15)
+            pr.SetAmbient(amb); pr.SetDiffuse(0.6 if matte else 0.8); pr.SetSpecular(spec_amt); pr.SetSpecularPower(15)
             mesh = ds.meshes.get(kk)
             if kind == "dots" and mesh is not None:
                 pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))

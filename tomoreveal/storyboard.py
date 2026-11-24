@@ -879,6 +879,28 @@ def build_plan(spec, ds):
             f["dissolve_to"] = frames[j] if j < len(frames) else None
     from .overlays import add_bar_lengths
     add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
+    from .look import style35
+    if style35(spec)["depth_fade"] != "off":  # the depth range of each part, from its first frame, so the fade never pumps
+        mlo, mhi = main_box(spec, shape); first = {}
+        for sg in segments:
+            if sg["phase"] == "main" and sg["part"] is not None and sg["part"] not in first:
+                first[sg["part"]] = sg["start"]
+        ranges = {}
+        for pid, j in first.items():
+            part = next((q for q in spec.get("shots", []) if q.get("id") == pid), {})
+            try:
+                lo_, hi_ = focus_box(part, ds) if part.get("type") == "focus" else (mlo, mhi)
+            except (KeyError, IndexError, TypeError, ValueError):
+                lo_, hi_ = mlo, mhi
+            p = frames[j]["pose"]
+            cpos = np.asarray(p["pos"], float) if p.get("pos") is not None else np.asarray(p["c"]) + p["dist"] * np.asarray(fr.axes(p["tilt"], p["az"])[0])
+            dvec = np.asarray(p["c"], float) - cpos; dvec /= np.linalg.norm(dvec) or 1.0
+            corners = np.array([[x, y, z] for x in (lo_[0], hi_[0]) for y in (lo_[1], hi_[1]) for z in (lo_[2], hi_[2])])
+            dd = (corners - cpos) @ dvec
+            ranges[pid] = (float(max(1e-3, dd.min())), float(max(dd.max(), dd.min() + 1)))
+        for f in frames:
+            if f.get("part") in ranges:
+                f["dr"] = ranges[f["part"]]
     if spec.get("annotations"):  # arrows and text boxes (3.5): opacity, growth and tail angle per frame
         from .annotations import plan_annotations
         plan_annotations(spec, ds, frames, segments, fr, fps, w / h)

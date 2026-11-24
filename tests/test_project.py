@@ -40,7 +40,8 @@ def test_schema_0_is_migrated_and_newer_schemas_are_refused(demo, tmp_path):
     old = tr.default_spec(st.ds)  # settings as 3.3 kept them
     p = tmp_path / "old.json"; p.write_text(json.dumps(old))
     data = pj.read_project(str(p))
-    assert data["schema"] == pj.SCHEMA and data["spec"] == old and data["sources"] == []
+    expect = json.loads(json.dumps(old)); expect.setdefault("look", {})["style35"] = {"preset": "classic"}  # 3.5: old = Classic
+    assert data["schema"] == pj.SCHEMA and data["spec"] == expect and data["sources"] == []
     p.write_text(json.dumps(dict(format=pj.FORMAT, schema=99, spec=old)))
     with pytest.raises(UserError, match=r"newer TomoReveal \(schema 99\)\. Please update TomoReveal"):
         pj.read_project(str(p))

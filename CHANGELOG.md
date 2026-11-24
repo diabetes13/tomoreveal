@@ -26,6 +26,20 @@
   - **Visibility:** arrows hide while their structure is switched off, not yet revealed, outside the clip box, or out of the picture.
   - **Several at once:** Ctrl + click selects several, to align them or give them the same look. Labels never overlap.
   - **Movies:** they are part of every movie format, including the transparent MOV.
+- **Looks like ChimeraX and Amira.** A **Look** choice at the top of the Look tab sets several things at once:
+  - **Classic:** as before.
+  - **Soft:** white background, soft shadows in creases, thin outlines, far things paler. New projects start with Soft.
+  - **Glass membranes:** like Soft, with pale see-through membranes.
+  - **Illustration:** thick black outlines.
+  - **On the tomogram:** the structures over the grey slice.
+
+  Each setting can then be changed on its own (the look then shows "Custom"):
+  - **Soft shadows:** strength and reach. They are baked into the surfaces, so they never flicker.
+  - **Outlines:** thin, medium or thick, in dark, black or a darker shade, also between touching structures.
+  - **See-through membranes** and their opacity. "Treat as membrane" is ticked per structure in the Structures tab, guessed from names such as membrane, ER or vesicle.
+  - **Depth fade**, richer colours on white, and matte lighting.
+
+  **Background** now also offers light grey, a gradient and the tomogram slice. Older projects keep the Classic look.
 - **Opacity makes a structure see-through.** Lowering a structure's opacity used to make it vanish or only lighten its outline; now it becomes see-through, its outline fades with it, and 0 % hides it completely.
 
 ## 3.4.1

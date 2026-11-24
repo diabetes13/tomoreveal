@@ -516,9 +516,12 @@ def build_gui(args):
             self.invert_cb.toggled.connect(lambda v: self._style_set("invert", v)); row.addWidget(self.invert_cb); row.addStretch(1)
             ll.addLayout(row)
             form = QtW.QFormLayout(); self.bg_cb = QtW.QComboBox()
-            for t, c in (("black", "#000000"), ("white", "#ffffff"), ("dark grey", "#1c1f26")):
+            for t, c in (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("dark grey", "darkgrey"),
+                         ("gradient (light grey to white)", "gradient"), ("the tomogram slice", "tomogram")):
                 self.bg_cb.addItem(t, c)
-            self.bg_cb.activated.connect(lambda j: self._style_set("bg", self.bg_cb.itemData(j)))
+            self.bg_cb.setToolTip("Behind the structures. White suits figures; 'the tomogram slice' shows the slice behind them.")
+            self.bg_cb.activated.connect(lambda j: self.spec is not None and (__import__("tomoreveal.look", fromlist=["set_look"]).set_look(
+                self.spec, background=self.bg_cb.itemData(j)), self.look35.sync(), self.schedule()))
             self.contrast_s = QtW.QSlider(QtC.Qt.Horizontal); self.contrast_s.setRange(0, 20)
             self.contrast_s.valueChanged.connect(lambda v: self._style_set("contrast", [v / 2, 100 - v / 2]))
             self.title_le = QtW.QLineEdit(); self.title_le.setPlaceholderText("optional text, bottom left")
@@ -528,6 +531,8 @@ def build_gui(args):
             self.allop_s.valueChanged.connect(lambda v: self._style_set("structures_opacity", v / 100))
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("All structures", self.allop_s)
             form.addRow("Title", self.title_le); ll.addLayout(form)
+            from .gui_look import Look35Controls
+            self.look35 = Look35Controls(self, lay)
             self.overlay_controls = OverlayControls(self, lay)
             from .gui_annotations import AnnotationMouse, AnnotationPanel, preview_menu
             self.ann_panel = AnnotationPanel(self, lay); self.ann_mouse = AnnotationMouse(self)
@@ -821,6 +826,9 @@ def build_gui(args):
                 self.spec = None; self.show_empty(); self.project.load_failed(); return
             if not same:
                 self.spec = info["spec"]; self.req = self._main_req()
+                if self.project.pending is None:  # a new project (not one being opened): the Soft look (3.5, the user's choice)
+                    from .look import apply_look
+                    apply_look(self.spec, "soft")
             else:  # keep the user's settings of every structure that is still there
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
             self.editor.reset_history()  # loading other data starts a new history
@@ -862,6 +870,8 @@ def build_gui(args):
             sm.valueChanged.connect(lambda v, k=k: self._param_changed(k, "smoothing", int(v)))
             f.addRow("Smoothing", sm)
             style_rows(self, f, k)
+            from .gui_look import membrane_row
+            membrane_row(self, f, k, self.spec["classes"].get(k, {}).get("name", c.get("name", "")))
             return w
 
         def _param_changed(self, key, name, v):
@@ -962,7 +972,11 @@ def build_gui(args):
             self.fps_cb.setCurrentIndex(max(0, self.fps_cb.findData(int(sp.get("output", {}).get("fps", 30)))))
             self.blur_cb.blockSignals(True); self.blur_cb.setChecked(bool(sp.get("output", {}).get("motion_blur", False))); self.blur_cb.blockSignals(False)
             self.apply_help()
-            self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
+            from .look import BG_COLOURS, style35
+            kind = style35(self.spec)["background"]
+            if kind not in BG_COLOURS:
+                kind = next((k for k, c in BG_COLOURS.items() if c == st.get("bg", "#000000").lower() and k not in ("gradient", "tomogram")), "black")
+            self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(kind))); self.look35.sync()
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)
             self.title_le.blockSignals(True); self.title_le.setText(st.get("title", "")); self.title_le.blockSignals(False)
 

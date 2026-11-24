@@ -267,3 +267,97 @@ def style_rows(win, form, key):
     fill()
     row = QtW.QWidget(); v = QtW.QHBoxLayout(row); v.setContentsMargins(0, 0, 0, 0); v.addWidget(kind); v.addWidget(opts, 1)
     form.addRow("Style", row)
+
+
+class Look35Controls(QtC.QObject):
+    """The Look group (3.5): one choice sets background, soft shadows, outlines, see-through membranes and depth fade;
+    each can then be changed (the choice then shows Custom)."""
+
+    def __init__(self, win, layout):
+        super().__init__(win); self.win = win
+        g = QtW.QGroupBox("Look"); self.group = g; layout.addWidget(g); f = QtW.QFormLayout(g)
+
+        def combo(items, key, tip):
+            cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(8)
+            for t, d in items:
+                cb.addItem(t, d)
+            cb.setToolTip(tip); cb.activated.connect(lambda j: self.set(**{key: cb.itemData(j)}))
+            return cb
+        self.preset = QtW.QComboBox()
+        for t, d in lk.LOOKS + (("Custom", "custom"),):
+            self.preset.addItem(t, d)
+        self.preset.setToolTip("Classic: as in earlier versions. Soft: white background, soft shadows in creases, thin outlines. "
+                               "Glass membranes: Soft with see-through membranes. Illustration: thick black outlines. "
+                               "On the tomogram: the structures over the grey slice.")
+        self.preset.activated.connect(lambda j: self.choose(self.preset.itemData(j)))
+        f.addRow("Look", self.preset)
+        self.shadow = combo(lk.SHADOW_LEVELS, "shadow", "Soft shadows in creases and between neighbours. They do not change with "
+                            "the camera, so they never flicker. Clip boxes and cuts do not change them.")
+        self.reach = combo(lk.REACHES, "reach", "How far the soft shadows reach")
+        f.addRow("Soft shadows", _row(self.shadow, QtW.QLabel("reach"), self.reach))
+        self.outline = combo(lk.OUTLINES, "outline", "Dark outlines around every structure (the same width in the preview and the movie)")
+        self.ocol = combo(lk.OUTLINE_COLOURS, "outline_colour", "Colour of the outlines")
+        f.addRow("Outlines", _row(self.outline, self.ocol))
+        self.between = QtW.QCheckBox("also between touching structures")
+        self.between.setToolTip("Outlines where two structures touch at the same depth (draws each frame twice)")
+        self.between.toggled.connect(lambda v: self.set(between=bool(v))); f.addRow("", self.between)
+        self.glass = QtW.QCheckBox("See-through membranes")
+        self.glass.setToolTip("Structures ticked 'Treat as membrane' (Structures tab) are pale and see-through, so what is behind "
+                              "or inside them shows")
+        self.glass.toggled.connect(lambda v: self.set(glass=bool(v)))
+        self.glass_op = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set(glass_opacity=v / 100))
+        self.glass_op.s.setToolTip("How solid the see-through membranes look")
+        f.addRow(self.glass, self.glass_op)
+        self.fade = combo(lk.FADES, "depth_fade", "Far things fade towards the background: gives depth")
+        f.addRow("Depth fade", self.fade)
+        self.richer = QtW.QCheckBox("Richer colours on white backgrounds")
+        self.richer.setToolTip("Colours from Dragonfly can look washed out on white: a little more saturated and darker")
+        self.richer.toggled.connect(lambda v: self.set(richer=bool(v)))
+        self.matte = QtW.QCheckBox("Matte lighting")
+        self.matte.setToolTip("A light from the viewer and a soft fill light from the upper left, with little shine "
+                              "(with the Default lighting preset)")
+        self.matte.toggled.connect(lambda v: self.set(lighting=bool(v)))
+        f.addRow(_row(self.richer, self.matte))
+
+    def choose(self, name):
+        w = self.win
+        if w.spec is None or name not in lk.LOOK_PRESETS:
+            self.sync(); return
+        lk.apply_look(w.spec, name); w.build_controls(); w.schedule()
+
+    def set(self, **kw):
+        w = self.win
+        if w.spec is None:
+            return
+        lk.set_look(w.spec, **kw); self.sync(); w.schedule()
+
+    def sync(self):
+        w = self.win
+        if w.spec is None:
+            return
+        L = lk.style35(w.spec)
+        for cb, v in ((self.preset, L["preset"]), (self.shadow, L["shadow"]), (self.reach, L["reach"]), (self.outline, L["outline"]),
+                      (self.ocol, L["outline_colour"]), (self.fade, L["depth_fade"])):
+            _quiet(cb, lambda cb=cb, v=v: cb.setCurrentIndex(max(0, cb.findData(v))))
+        for cb, v in ((self.between, L["between"]), (self.glass, L["glass"]), (self.richer, L["richer"]), (self.matte, L["lighting"])):
+            _quiet(cb, lambda cb=cb, v=v: cb.setChecked(bool(v)))
+        _setv(self.glass_op, 100 * float(L["glass_opacity"])); self.glass_op.setEnabled(bool(L["glass"]))
+        self.reach.setEnabled(L["shadow"] != "none"); self.ocol.setEnabled(L["outline"] != "off"); self.between.setEnabled(L["outline"] != "off")
+
+
+def _row(*ws):
+    w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+    for x in ws:
+        h.addWidget(x)
+    h.addStretch(1)
+    return w
+
+
+def membrane_row(win, form, key, name):
+    """'Treat as membrane' of one structure (Structures tab): see-through with the Glass looks."""
+    cb = QtW.QCheckBox("Treat as membrane"); cb.setChecked(lk.is_membrane(win.spec, key, name))
+    cb.setToolTip("With 'See-through membranes' (Look tab), this structure is drawn pale and see-through")
+
+    def put(on):
+        win.spec["classes"].setdefault(key, {})["membrane"] = bool(on); win.schedule()
+    cb.toggled.connect(put); form.addRow("", cb)

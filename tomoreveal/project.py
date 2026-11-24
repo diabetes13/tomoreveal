@@ -12,7 +12,7 @@ import os
 from .common import UserError, __version__
 
 FORMAT = "tomoreveal-project"
-SCHEMA = 1
+SCHEMA = 2
 EXT = ".tomoreveal"
 KEY_PREFIXES = ("file:", "session:", "dragonfly:", "labels:", "scores:")
 
@@ -85,7 +85,12 @@ def migrate_project(data):
         raise UserError("This project file is damaged (no schema number).")
     if s > SCHEMA:
         raise UserError(f"This project was saved by a newer TomoReveal (schema {s}). Please update TomoReveal.")
-    # future: `if s == 1: ...; s = 2` steps go here
+    if s == 1:  # 3.5: say so explicitly: projects saved before 3.5 keep the Classic look (new projects start Soft)
+        sp = data.get("spec")
+        if isinstance(sp, dict):
+            sp.setdefault("look", {}).setdefault("style35", {"preset": "classic"})
+        data["schema"] = s = 2
+    # future: `if s == 2: ...; s = 3` steps go here
     data.setdefault("format", FORMAT); data.setdefault("sources", []); data.setdefault("segmentation_enabled", {})
     data.setdefault("tomogram_source", None); data.setdefault("spec", None); data.setdefault("ui", {})
     return data

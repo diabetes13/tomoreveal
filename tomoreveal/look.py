@@ -123,3 +123,165 @@ def vignette_weight(W, H, cx, cy, size, softness, shape="round"):
         r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / (math.hypot(W, H) / 2)
     u = np.clip((r - float(size)) / max(1e-3, float(softness)), 0, 1)
     return u * u * (3 - 2 * u)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3.5 phase 7: segmentation looks like ChimeraX and Amira (spec["look"]["style35"])
+# ---------------------------------------------------------------------------------------------------------------
+LOOKS = (("Classic", "classic"), ("Soft", "soft"), ("Glass membranes", "glass"), ("Illustration", "illustration"),
+         ("On the tomogram", "tomogram"))
+BACKGROUNDS = (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("gradient (light grey to white)", "gradient"),
+               ("the tomogram slice", "tomogram"))
+BG_COLOURS = {"black": "#000000", "white": "#ffffff", "lightgrey": "#e6e7ea", "darkgrey": "#1c1f26", "gradient": "#ffffff", "tomogram": "#ffffff"}
+GRADIENT_TOP = "#d4d7dc"
+SHADOW_LEVELS = (("none", "none"), ("light", "light"), ("medium", "medium"), ("strong", "strong"))
+SHADOW_DARKEST = {"none": 1.0, "light": 0.6, "medium": 0.3, "strong": 0.15}  # brightness in the deepest creases
+REACHES = (("short", "short"), ("normal", "normal"), ("long", "long"))
+REACH_SCALE = {"short": 0.6, "normal": 1.0, "long": 1.8}
+OUTLINES = (("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick"))
+OUTLINE_PX = {"off": 0.0, "thin": 1.5, "medium": 2.5, "thick": 3.5}  # at 1080 lines, scaled with the frame height
+OUTLINE_COLOURS = (("dark", "dark"), ("black", "black"), ("darker shade of each colour", "shade"))
+FADES = (("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong"))
+FADE_AMOUNT = {"off": 0.0, "light": 0.25, "medium": 0.5, "strong": 0.7}
+STYLE35_DEFAULTS = dict(preset="classic", background=None, shadow="none", reach="normal", outline="off", outline_colour="dark",
+                        between=False, glass=False, glass_opacity=0.3, glass_colour="#e6dcc4", depth_fade="off", lighting=False,
+                        richer=False)
+LOOK_PRESETS = {
+    "classic": dict(background="black", shadow="none", outline="off", between=False, glass=False, depth_fade="off", lighting=False, richer=False),
+    "soft": dict(background="white", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=False, depth_fade="medium",
+                 lighting=True, richer=True),
+    "glass": dict(background="white", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=True, depth_fade="medium",
+                  lighting=True, richer=True),
+    "illustration": dict(background="white", shadow="light", outline="thick", outline_colour="black", between=True, glass=True,
+                         depth_fade="light", lighting=True, richer=True),
+    "tomogram": dict(background="tomogram", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=False,
+                     depth_fade="off", lighting=True, richer=False),
+}
+MEMBRANE_WORDS = ("membrane", "er", "envelope", "vesicle")
+
+
+def style35(spec):
+    """The look settings of 3.5. Missing (projects and settings from before 3.5): Classic, which looks as before."""
+    out = dict(STYLE35_DEFAULTS); out.update(((spec.get("look") or {}).get("style35")) or {})
+    if out.get("background") is None:  # older settings: the background colour of the Look tab
+        bg = spec.get("style", {}).get("bg", "#000000").lower()
+        out["background"] = next((k for k, c in BG_COLOURS.items() if c == bg and k not in ("gradient", "tomogram")), "custom")
+    return out
+
+
+def apply_look(spec, name):
+    """Choose a look preset: it sets several settings at once (each can still be changed; the look then shows Custom)."""
+    st = spec.setdefault("look", {}).setdefault("style35", {})
+    st.clear(); st.update(STYLE35_DEFAULTS); st.update(LOOK_PRESETS[name]); st["preset"] = name
+    set_background(spec, st["background"])
+    return spec
+
+
+def set_look(spec, **kw):
+    """Change one look setting; the preset becomes "custom" unless the values still match it."""
+    st = spec.setdefault("look", {}).setdefault("style35", dict(style35(spec)))
+    st.update(kw)
+    if "background" in kw:
+        set_background(spec, kw["background"])
+    p = st.get("preset", "classic")
+    if p in LOOK_PRESETS and any(st.get(k) != v for k, v in LOOK_PRESETS[p].items()):
+        st["preset"] = "custom"
+    return spec
+
+
+def set_background(spec, kind):
+    style = spec.setdefault("style", {})
+    if kind in BG_COLOURS:
+        style["bg"] = BG_COLOURS[kind]
+    if kind == "tomogram":
+        style.setdefault("tomogram", {})["show"] = True
+
+
+def is_membrane(spec, key, name):
+    """Structures drawn see-through with "Glass membranes": ticked per structure, else guessed from the name."""
+    c = (spec.get("classes") or {}).get(key) or {}
+    if c.get("membrane") is not None:
+        return bool(c["membrane"])
+    import re
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    return any(w in MEMBRANE_WORDS or w.startswith("membran") or w.startswith("vesic") for w in words)
+
+
+def richer(rgb):
+    """Colours that do not wash out on a white background: 15 % more saturation, 10 % darker."""
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+    return colorsys.hsv_to_rgb(h, min(1.0, s * 1.15), v * 0.9)
+
+
+class BakedShadows:
+    """Soft shadows (ambient occlusion) baked into the surface colours (plan 3.5 phase 7.2): the occupancy of the shown
+    structures, blurred at three distances, sampled a little outside each vertex. Does not depend on the camera, so it
+    never flickers in movies, and it works with software rendering."""
+    RADII = (2.0, 5.0, 10.0); WEIGHTS = (0.5, 0.3, 0.2); Q = 2  # fields at half resolution
+
+    def __init__(self):
+        self.key = None; self.fields = None; self.occ = None; self._factor = {}
+
+    def prepare(self, ds, ks, reach):
+        """Blurred occupancy fields for the structures ks (cached until they or the reach change)."""
+        key = (tuple(sorted(ks)), reach, id(ds), tuple(id(ds.meshes.get(k)) for k in sorted(ks)))
+        if key == self.key:
+            return
+        from scipy import ndimage
+        nz, ny, nx = ds.shape; q = self.Q
+        occ = np.zeros(((nz + q - 1) // q, (ny + q - 1) // q, (nx + q - 1) // q), np.float32)
+        for k in ks:
+            sl = ds.bbox.get(k)
+            if sl is None:
+                continue
+            m = ds.kept_mask(k, sl).astype(np.float32)
+            z0, y0, x0 = sl[0].start, sl[1].start, sl[2].start
+            pz, py, px = z0 % q, y0 % q, x0 % q  # align to the coarse grid
+            m = np.pad(m, ((pz, (-(m.shape[0] + pz)) % q), (py, (-(m.shape[1] + py)) % q), (px, (-(m.shape[2] + px)) % q)))
+            c = m.reshape(m.shape[0] // q, q, m.shape[1] // q, q, m.shape[2] // q, q).mean(axis=(1, 3, 5))
+            Z, Y, X = (z0 - pz) // q, (y0 - py) // q, (x0 - px) // q
+            sub = occ[Z:Z + c.shape[0], Y:Y + c.shape[1], X:X + c.shape[2]]
+            np.maximum(sub, c[:sub.shape[0], :sub.shape[1], :sub.shape[2]], out=sub)
+        s = REACH_SCALE.get(reach, 1.0)
+        self.fields = [ndimage.gaussian_filter(occ, r * s / q) for r in self.RADII]
+        self.occ = occ; self.key = key; self._factor = {}; self.reach = s
+
+    def factor(self, mesh, darkest):
+        """Brightness 0..1 of each vertex of a mesh (1: open, `darkest`: deep in a crease)."""
+        key = (id(mesh), round(darkest, 3), self.key)
+        if key in self._factor:
+            return self._factor[key]
+        from scipy import ndimage
+        p = np.asarray(mesh.points, np.float32); q = self.Q
+        n = mesh.point_data.get("Normals")
+        if n is None:
+            n = mesh.compute_normals(cell_normals=False, auto_orient_normals=False).point_data["Normals"]
+        n = np.asarray(n, np.float32)
+
+        def sample(f, pts):
+            return ndimage.map_coordinates(f, [pts[:, 2] / q, pts[:, 1] / q, pts[:, 0] / q], order=1, mode="nearest")
+        step = max(1, len(p) // 4000)  # which way is outside: where there is less of the structures
+        a = sample(self.occ, p[::step] + 1.5 * n[::step]).mean(); b = sample(self.occ, p[::step] - 1.5 * n[::step]).mean()
+        if a > b:
+            n = -n
+        occ = sum(w * sample(f, p + n * r * self.reach) for f, w, r in zip(self.fields, self.WEIGHTS, self.RADII))
+        f = 1.0 - (1.0 - darkest) * np.clip((occ - 0.16) / 0.34, 0.0, 1.0)
+        self._factor[key] = f.astype(np.float32)
+        return self._factor[key]
+
+
+def outline_edges(lin, bg, ids=None, thr=0.02):
+    """Outline pixels (H, W bool): where the log of the depth jumps by more than thr to a neighbour (the nearer pixel
+    gets the outline), and, with an object-id picture, wherever the object changes (touching structures)."""
+    lg = np.log(np.maximum(lin, 1e-6)); H, W = lin.shape; edge = np.zeros((H, W), bool)
+    idf = ids.astype(np.int32) if ids is not None else None
+    for ax in (0, 1):
+        a = [slice(None)] * 2; b = [slice(None)] * 2; a[ax] = slice(0, -1); b[ax] = slice(1, None); a, b = tuple(a), tuple(b)
+        jump = np.abs(lg[a] - lg[b]) > thr
+        if idf is not None:
+            jump |= np.abs(idf[a] - idf[b]).sum(-1) > 30
+        jump &= ~(bg[a] & bg[b])
+        nearer_a = lin[a] <= lin[b]
+        edge[a] |= jump & nearer_a; edge[b] |= jump & ~nearer_a
+    return edge

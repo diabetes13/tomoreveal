@@ -194,7 +194,7 @@ class OverlayDrag(QtC.QObject):
         return p if p and p.get("type") == "path" and (p.get("source") or {}).get("kind") == "points" else None
 
     def item(self, name):
-        if name.startswith("marker:"):
+        if name.startswith(("marker:", "look:")):
             return None
         if name.startswith("block:"):
             c = self.card(); i = int(name[6:])
@@ -232,7 +232,7 @@ class OverlayDrag(QtC.QObject):
             return None
         show_all = self.win.toolbar.boxes.isChecked(); rects = self.rects()
         blocks = sorted((n for n in rects if n.startswith("block:")), key=lambda n: -int(n[6:])) if self.card() else []
-        markers = [n for n in rects if n.startswith("marker:")] if self.path_part() else []
+        markers = [n for n in rects if n.startswith(("marker:", "look:"))] if self.path_part() else []
         for n in markers + blocks + ["caption", "scale_bar", "title", "slice_label", "legend"]:
             r = rects.get(n)
             if r and (r[1] or show_all):
@@ -266,9 +266,9 @@ class OverlayDrag(QtC.QObject):
         if w.spec is None or w.pick_mode or w.gen is not None or w.busy or f is None:
             return False
         name = self.hit(f)
-        if name and name.startswith("marker:"):  # a waypoint of a camera path: moved on the slice plane
-            self.drag = dict(name=name, mode="marker", f0=f); return True
-        hs = [n for n in self.rects() if (not n.startswith(("block:", "marker:")) or self.card()) and self.on_handle(n, f)
+        if name and name.startswith(("marker:", "look:")):  # a point of a camera path, or where it looks
+            self.drag = dict(name=name, mode="marker", f0=f, moved=False, y0=f[1]); return True
+        hs = [n for n in self.rects() if (not n.startswith(("block:", "marker:", "look:")) or self.card()) and self.on_handle(n, f)
               and (self.rects()[n][1] or w.toolbar.boxes.isChecked())]
         if hs:
             name = hs[0]; mode = "resize"
@@ -296,19 +296,31 @@ class OverlayDrag(QtC.QObject):
         if d is None or f is None:
             return
         if d["mode"] == "marker":
-            p = self.path_part(); i = int(d["name"][7:])
+            p = self.path_part(); look = d["name"].startswith("look:"); i = int(d["name"].split(":")[1])
             if p is None or i >= len(p.get("waypoints") or []):
                 return
-            wp = p["waypoints"][i]; old = np.asarray(wp.get("focal") or wp.get("point"), float)
-            plan = w.timeline.canvas.plan; k = float(plan.frames[w.frame]["k"]) if plan else old[2]
-            new = w.st.ren.to_plane(f[0], f[1], k)
-            if new is None:
-                return
-            new[2] = old[2] if wp.get("pos") is not None else k
-            if wp.get("pos") is not None:  # a stored view: camera and point move together
-                wp["pos"] = [float(v) for v in np.asarray(wp["pos"], float) + (new - old)]; wp["focal"] = [float(v) for v in new]
-            else:
-                wp["point"] = [float(v) for v in new]
+            d["moved"] = True
+            wp = p["waypoints"][i]; ren = w.st.ren; info = ren._path3d or {}
+            F = np.asarray(wp.get("focal") or wp.get("point") or wp.get("pos"), float)
+            raw = info.get("raw") or []
+            P = np.asarray(wp["pos"], float) if wp.get("pos") is not None else (np.asarray(raw[i], float) if i < len(raw) else F)
+            marks = info.get("marks") or []
+            shown = np.asarray(marks[i][2] if look else marks[i][1], float) if i < len(marks) else (F if look else P)
+            if mods & QtC.Qt.AltModifier and not look:  # up and down
+                cpos, _, _, _, dd = ren.camera_frame(); wph = ren.world_per_height(float((shown - cpos) @ dd))
+                new = shown + np.array([0.0, 0.0, (d["y0"] - f[1]) * wph]); d["y0"] = f[1]
+            else:  # on the plane parallel to the slice, at the point's own height
+                new = ren.to_plane(f[0], f[1], float(shown[2]))
+                if new is None:
+                    return
+            delta = np.asarray(new, float) - shown
+            if look:
+                if wp.get("pos") is None:
+                    wp["point"] = [float(v) for v in F + delta]
+                else:
+                    wp["focal"] = [float(v) for v in F + delta]
+            else:  # the camera moves; a clicked point becomes a stored view
+                wp["pos"] = [float(v) for v in P + delta]; wp["focal"] = [float(v) for v in F]; wp.pop("point", None)
             w.req = {"frame": w.frame}; w.do_preview(quick=True); w.prev.update()
             return
         if d["mode"] == "move":
@@ -349,11 +361,14 @@ class OverlayDrag(QtC.QObject):
     def release(self):
         if self.drag is None:
             return
-        name = self.drag["name"]; self.drag = None; self.guides = []
-        if name.startswith("marker:"):
+        d = self.drag; name = d["name"]; self.drag = None; self.guides = []
+        if name.startswith(("marker:", "look:")):
             p = self.path_part()
             if p is not None:
-                self.win.editor.commit(select=p["id"])
+                i = int(name.split(":")[1])
+                if d.get("moved"):
+                    self.win.editor.commit(select=p["id"])
+                self.win.select_path_point(p["id"], i)  # a click (or a drag) selects the point
             return
         w = self.win; w.overlay_controls.sync(); w.editor.record(); w.schedule(0); w.prev.update()
         c = self.card() if name.startswith("block:") else None
@@ -373,8 +388,8 @@ class OverlayDrag(QtC.QObject):
         name = self.hit(f); w = self.win
         if name is None or w.spec is None:
             return False
-        if name.startswith("marker:"):
-            p = self.path_part(); i = int(name[7:]); m = QtW.QMenu(w)
+        if name.startswith(("marker:", "look:")):
+            p = self.path_part(); i = int(name.split(":")[1]); m = QtW.QMenu(w)
 
             def delete():
                 del p["waypoints"][i]; w.editor.commit(select=p["id"])
@@ -412,6 +427,11 @@ class OverlayDrag(QtC.QObject):
         if name is None:
             return False
         w = self.win
+        if name.startswith(("marker:", "look:")):  # look from this point
+            p = self.path_part()
+            if p is not None:
+                i = int(name.split(":")[1]); w.select_path_point(p["id"], i); w.look_from_point(p["id"], i)
+            return True
         if name.startswith("block:"):
             w.open_part(self.card()["id"]); return True
         w.tabs.setCurrentIndex(w.TAB_LOOK)
@@ -424,6 +444,8 @@ class OverlayDrag(QtC.QObject):
         rects = self.rects(); show_all = self.win.toolbar.boxes.isChecked()
         pal = self.win.prev.palette()
         for n, (box, shown) in rects.items():
+            if n.startswith(("marker:", "look:")):
+                continue  # path points draw their own hover ring
             if not (show_all or n == self.hover_name or (self.drag and self.drag["name"] == n)):
                 continue
             if not shown and not show_all:

@@ -164,6 +164,13 @@ def build_gui(args):
                     pen = QtG.QPen(col, 2 if dash == QtC.Qt.SolidLine else 1.5, dash); p.setPen(pen); p.drawRect(r)
                 p.end()
             if self.nav is not None and self.image_px():
+                w = self.nav.win; ren = w.st.ren
+                if ren is not None and getattr(ren, "path_view", None) and w.selected_part:
+                    from .gui_paths import paint_path
+                    sel = w.path_point[1] if w.path_point and w.path_point[0] == w.selected_part else None
+                    hn = getattr(self.overlay, "hover_name", None) if self.overlay is not None else None
+                    hov = int(hn.split(":")[1]) if hn and hn.startswith("marker:") else None
+                    p = QtG.QPainter(self); paint_path(p, self, ren.path_view, sel, hov); p.end()
                 from .gui_navigate import paint_marker
                 p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_marker(p, self, self.nav); p.end()
 
@@ -254,7 +261,7 @@ def build_gui(args):
 
         def wheelEvent(self, e):
             if self.nav is not None:
-                self.nav.wheel(e.angleDelta().y(), self.frac(e.position().toPoint()))
+                self.nav.wheel(e.angleDelta().y(), self.frac(e.position().toPoint()), e.modifiers())
             else:
                 self.wheel.emit(e.angleDelta().y())
 
@@ -542,7 +549,9 @@ def build_gui(args):
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
             self.prev.boxed.connect(self.on_boxed)
             from .gui_navigate import Navigator
+            from .gui_paths import PointPanel
             self.nav = Navigator(self); self.prev.nav = self.nav
+            self.path_point = None; self.path_edit_paused = None; self.point_panel = PointPanel(self)
             rl.addWidget(self.prev, 1)
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
@@ -616,6 +625,19 @@ def build_gui(args):
                                 size=(w * 2 // 3, h * 2 // 3), drawn=0, last=None)
             self.play_btn.setText("Stop"); self.prev_timer.stop(); self.play_timer.start()
 
+        def play_part(self, pid):
+            """Play only one part in the preview (from its start to its end)."""
+            plan = self.timeline.canvas.plan
+            rng = None
+            if plan is not None:
+                from .storyboard import main_range
+                rng = main_range(plan, pid)
+            if rng is None:
+                return
+            self.stop_play(); self.timeline.set_frame(rng[0]); self.toggle_play()
+            if self.playing:
+                self.playing["stop_at"] = rng[0] + rng[1] - 1
+
         def stop_play(self):
             if not self.playing:
                 return
@@ -630,8 +652,9 @@ def build_gui(args):
             if p is None:
                 return
             f = p["f0"] + int((time.monotonic() - p["t0"]) * p["fps"])
-            end = f >= len(p["frames"]) - 1
-            f = min(f, len(p["frames"]) - 1)
+            last = min(len(p["frames"]) - 1, p.get("stop_at", len(p["frames"]) - 1))
+            end = f >= last
+            f = min(f, last)
             if f != p["last"]:
                 try:
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
@@ -1147,8 +1170,15 @@ def build_gui(args):
                 self.selected_part = None
             self.timeline.set_plan(plan, self.spec, self.st.ds); self.timeline.set_frame(i); self.timeline.set_selected(self.selected_part)
             self.parts_panel.refresh_lines()  # the notes come from this plan
-            vp = self.view_part()
-            self.prev.set_note(f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else "")
+            vp = self.view_part(); ep = self.editing_path()
+            note = (f"Changing the view of part {self.spec['shots'].index(vp) + 1}" if vp else
+                    f"Editing the camera path of part {self.spec['shots'].index(ep) + 1} – click to add points, drag to move, Esc to finish"
+                    if ep else "")
+            cur_note = self.prev.note.text()
+            if note or cur_note.startswith(("Changing the view of part", "Editing the camera path")):
+                self.prev.set_note(note)  # other notes (the first-time hint, skipped frames) stay
+            if self.path_point and self.point_panel.isVisible():
+                self.point_panel.refresh(); self.point_panel.place()
             empty = not any(p.get("on", True) for p in self.spec["shots"])
             self.go_btn.setEnabled(not empty)
             self.go_btn.setToolTip("The movie has no parts. Add one with + Add part." if empty else
@@ -1187,7 +1217,44 @@ def build_gui(args):
         def select_part(self, pid):
             """A block clicked on the timeline: its line opens in the Movie tab."""
             self.end_picks(keep=pid)  # clicks in the preview must never go on adding to a part that is not selected
+            if self.path_point and self.path_point[0] != pid:
+                self.point_panel.close_panel()
+            if self.path_edit_paused != pid:
+                self.path_edit_paused = None
             self.selected_part = pid; self.parts_panel.open(pid, select=False); self.editor.refresh_buttons()
+
+        def editing_path(self):
+            """The selected camera path through points, while it is being edited in the preview (3.5)."""
+            p = self.parts_panel.part(self.selected_part) if self.spec and self.selected_part else None
+            if p is None or p.get("type") != "path" or (p.get("source") or {}).get("kind") != "points" or self.path_edit_paused == p["id"]:
+                return None
+            return p
+
+        def select_path_point(self, pid, i):
+            self.path_point = (pid, i)
+            if self.parts_panel.open_id != pid:
+                self.parts_panel.open(pid)
+            self.point_panel.show_for(pid, i); self.prev.update()
+
+        def point_frame(self, pid, i):
+            """The frame where the camera of a path is at point i."""
+            plan = self.timeline.canvas.plan; ren = self.st.ren
+            marks = (ren._path3d or {}).get("marks") if ren is not None else None
+            if plan is None or not marks or i >= len(marks):
+                return None
+            target = np.asarray(marks[i][1], float)
+            idx = [j for j, f in enumerate(plan.frames) if f.get("part") == pid and f["phase"] == "main" and f["pose"].get("pos") is not None]
+            return min(idx, key=lambda j: float(np.linalg.norm(np.asarray(plan.frames[j]["pose"]["pos"]) - target))) if idx else None
+
+        def look_from_point(self, pid, i):
+            j = self.point_frame(pid, i)
+            if j is not None:
+                self.req = {"frame": j}; self.schedule(0)
+
+        def preview_point(self, pid, i):
+            """While a point's zoom or field of view slider moves: show the view from that point."""
+            self.editor.changed(); j = self.point_frame(pid, i)
+            self.req = {"frame": j} if j is not None else {"frame": self.frame}; self.do_preview(quick=True)
 
         def end_picks(self, keep=None):
             """End every way of clicking in the preview for a part (objects of a close-up, points of a path, the object a
@@ -1305,6 +1372,10 @@ def build_gui(args):
             self.say("Click the object the camera should follow.")
 
         def keyPressEvent(self, e):
+            if e.key() == QtC.Qt.Key_Escape and self.editing_path() is not None and not (self.multi_pick or self.pick_mode or self.waypoint_pick
+                                                                                         or self.path_pick or self.region_pick):
+                self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
+                return
             if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick):
                 self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.pick_btn.setChecked(False)
                 return
@@ -1349,6 +1420,15 @@ def build_gui(args):
                 self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
             if self.multi_pick and self.st.has_segmentation and self.gen is None:
                 return self._multi_click(fx, fy)
+            ep = self.editing_path() if not (self.pick_mode or self.region_pick) and self.gen is None else None
+            if ep is not None and self.st.ren is not None:  # path editor: a click adds a point after the selected one
+                pt = self.st.ren.pick_point(fx, fy)
+                if pt is None:
+                    self.say("Click on a structure or on the slice to add a point.", "err"); return
+                ws = list(ep.get("waypoints") or []); at = (self.path_point[1] + 1) if self.path_point and self.path_point[0] == ep["id"] else len(ws)
+                ws.insert(at, dict(point=[float(v) for v in pt], pause=0.0)); ep["waypoints"] = ws
+                self.editor.commit(select=ep["id"]); self.path_point = (ep["id"], at)
+                self.say(f"Point {at + 1} added.", "ok"); return
             if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:
                 return
             try:

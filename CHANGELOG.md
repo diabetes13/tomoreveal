@@ -12,6 +12,13 @@
 - **Smoother close-ups.** "Keep zoom steady" (on for new close-ups) keeps the camera at one distance, so the object no longer grows and shrinks while the camera orbits, rocks or wiggles. The new wiggle starts and ends at rest, fits whole cycles so it ends where it began, is calmer by default (5°, speed set from slow to fast), has a new "drift" shape, and also works from the top view without turning the picture. Close-ups in older projects move as before.
 - **60 frames per second and motion blur** in Make movie, for extra smooth motion. When the preview cannot keep up while playing, it says so: the movie itself will be smooth.
 - **A steady "follow" camera.** Following a membrane no longer shakes. The camera glides on a smoothed rail of its own while it keeps looking at a gently smoothed line along the membrane, stays at a constant height, keeps the tomogram upright (no rolling), turns at most 20° per second (it slows down at sharp bends instead), and starts and stops gently. **Steadiness** chooses close (follows bends), steady (the default) or very steady, with a slider for fine control. The camera can also follow from behind, looking along the path. **Edit as points** turns a follow path into a path through points you can adjust. Follow paths in older projects move as before.
+- **A clear, easy camera path through points.**
+  - **Drawing:** the path is drawn on top of the preview with thin lines (dashed where hidden, with arrows showing the direction) and numbered points (green S, red E). A small camera mark and a crosshair show where each point looks. None of this goes into the movie.
+  - **Editing:** click to add a point after the selected one, drag a point to move the camera (Alt: up and down), drag its crosshair to change where it looks, and double-click a point to look from there.
+  - **Each point:** clicking it opens a panel for its **zoom** and **field of view**, with "keep for the next points" or "only here" and "keep the size the same" (a dolly zoom along the path). Ctrl + wheel and Alt + wheel change them.
+  - **The list of points:** a description, the zoom (grey with a chain when it is kept from an earlier point), the speed to the next point, and "stop gently".
+  - **The whole path:** one zoom for all points, a zoom for the whole part, and Play path.
+  - **Motion:** the camera now moves at an even speed and the view never flips.
 - **Opacity makes a structure see-through.** Lowering a structure's opacity used to make it vanish or only lighten its outline; now it becomes see-through, its outline fades with it, and 0 % hides it completely.
 
 ## 3.4.1

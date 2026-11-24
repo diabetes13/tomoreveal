@@ -127,12 +127,24 @@ def path_rows(panel, pid, p, form):
             n = QtW.QLabel(why); n.setStyleSheet(DIM); n.setWordWrap(True); form.addRow("", n)
     else:
         wps = p.get("waypoints") or []
+        zs, own_z = sb.point_values(p, "zoom", 1.0)
+        fs, own_f = sb.point_values(p, "fov", float(win.spec.get("style", {}).get("fov", 30)))
+        new_interp = p.get("interp") == 2
+
+        def upd(i, rebuild=False, **kw):
+            ws = part()["waypoints"]; ws[i].update(kw)
+            for k in [k for k, v in kw.items() if v is None]:
+                ws[i].pop(k, None)
+            panel.set(pid, "waypoints", ws, rebuild=rebuild)
         for i, w in enumerate(wps):
-            what = "view" if w.get("pos") is not None else "point"
-            lab = QtW.QLabel(f"{i + 1}: {'a view' if what == 'view' else 'a point'}")
-            lab.setToolTip("A camera position stored with 'Add point at the current view'" if what == "view" else
-                           "A point you clicked; the camera passes near it, looking at it")
-            pause = _spin(0, 30, float(w.get("pause", 0) or 0), lambda v, i=i: (part()["waypoints"][i].update(pause=float(v)), panel.set(pid, "waypoints", part()["waypoints"])),
+            num = QtW.QPushButton(f"{i + 1}"); num.setFixedWidth(30); num.setCheckable(True)
+            num.setChecked(bool(win.path_point and win.path_point == (pid, i)))
+            num.setToolTip("Select this point in the preview (its zoom and field of view open next to it)")
+            num.clicked.connect(lambda _=False, i=i: win.select_path_point(pid, i))
+            desc = QtW.QLineEdit(w.get("note", "")); desc.setPlaceholderText("a point" if w.get("pos") is None else "a view")
+            desc.setToolTip("A short description, for example 'above the vesicle cluster'"); desc.setMinimumWidth(80)
+            desc.editingFinished.connect(lambda i=i, d=desc: upd(i, note=d.text().strip() or None))
+            pause = _spin(0, 30, float(w.get("pause", 0) or 0), lambda v, i=i: upd(i, pause=float(v)),
                           step=0.5, suffix=" s", decimals=1, prefix="stop ")
             pause.setToolTip("The camera stops here for this long")
 
@@ -147,7 +159,38 @@ def path_rows(panel, pid, p, form):
             for text, tip, fn in (("↑", "Move up", lambda _=False, m=move: m(-1)), ("↓", "Move down", lambda _=False, m=move: m(1)),
                                   ("✕", "Delete this point", lambda _=False, d=delete: d())):
                 tb = QtW.QToolButton(); tb.setText(text); tb.setToolTip(tip); tb.clicked.connect(fn); btns.append(tb)
-            form.addRow("Points" if i == 0 else "", _row(lab, pause, *btns))
+            form.addRow("Points" if i == 0 else "", _row(num, desc, pause, *btns))
+            if new_interp:
+                zl = QtW.QLabel(f"{zs[i]:.2f}x · {fs[i]:.0f}°" if own_z[i] or own_f[i] else f"<i>🔗 {zs[i]:.2f}x · {fs[i]:.0f}°</i>")
+                zl.setToolTip("Zoom and field of view here; grey with a chain: kept from an earlier point")
+                if not (own_z[i] or own_f[i]):
+                    zl.setStyleSheet(DIM)
+                extra = [zl]
+                if i < len(wps) - 1:
+                    sp = _combo((("slow", "slow"), ("normal", "normal"), ("fast", "fast")), w.get("speed", "normal"),
+                                lambda v, i=i: upd(i, speed=v))
+                    sp.setToolTip("Speed to the next point")
+                    extra += [QtW.QLabel("to next"), sp]
+                sg = QtW.QCheckBox("stop gently"); sg.setChecked(bool(w.get("stop_gently")))
+                sg.setToolTip("Slow down to a stop at this point, then set off again")
+                sg.toggled.connect(lambda on, i=i: upd(i, stop_gently=bool(on) or None)); extra.append(sg)
+                form.addRow("", _row(*extra))
+        if new_interp and wps:
+            same = QtW.QCheckBox("Same zoom and field of view at all points"); same.setChecked(bool(p.get("same_zoom")))
+            same.setToolTip("One zoom and field of view for the whole path; the points' own values are kept for later")
+            same.toggled.connect(lambda on: panel.set(pid, "same_zoom", bool(on) or None, rebuild=True)); form.addRow("", same)
+            if p.get("same_zoom"):
+                pz = _spin(0.3, 4, float(p.get("path_zoom", 1.0)), lambda v: panel.set(pid, "path_zoom", float(v)), step=0.1, suffix=" x")
+                pf = _spin(10, 60, float(p.get("path_fov", win.spec.get("style", {}).get("fov", 30))), lambda v: panel.set(pid, "path_fov", float(v)),
+                           step=1, suffix="°", decimals=0)
+                pz.setToolTip("Zoom for the whole path"); pf.setToolTip("Field of view for the whole path")
+                form.addRow("Whole path", _row(pz, pf))
+            za = _spin(0.3, 4, float(p.get("zoom_all", 1.0) or 1.0), lambda v: panel.set(pid, "zoom_all", float(v)), step=0.1, suffix=" x",
+                       prefix="all points ")
+            za.setToolTip("Zoom for the whole part: scales the zoom of every point together")
+            play = QtW.QPushButton("Play path"); play.setToolTip("Play just this part in the preview")
+            play.clicked.connect(lambda: win.play_part(pid))
+            form.addRow("Zoom", _row(za, play))
         here = QtW.QPushButton("Add point at the current view")
         here.setToolTip("Stores where the camera is now in the preview")
 
@@ -183,3 +226,226 @@ def path_rows(panel, pid, p, form):
     form.addRow("Other structures", _row(col, op))
     show = QtW.QCheckBox("show the path in the preview"); show.setChecked(bool(p.get("show_path_in_preview", True)))
     show.toggled.connect(lambda v: panel.set(pid, "show_path_in_preview", bool(v))); form.addRow("", show)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3.5 phase 5: the path drawn on the preview (2D, fixed line widths), and the panel of a selected point
+# ---------------------------------------------------------------------------------------------------------------
+from PySide6 import QtGui as QtG  # noqa: E402
+
+START, END, MID, SEL = "#2e9e44", "#d1495b", "#3a6fd8", "#ffd23f"
+
+
+def _dashed(p, a, b, on=6, off=5):
+    v = b - a; L = (v.x() ** 2 + v.y() ** 2) ** 0.5
+    if L < 1e-6:
+        return
+    u = v / L; t = 0.0
+    while t < L:
+        p.drawLine(a + u * t, a + u * min(L, t + on)); t += on + off
+
+
+def paint_path(p, prev, view, selected=None, hover=None):
+    """Path lines 2 px (white with a dark edge, 70 %), dashed where hidden, chevrons every 80 px; numbered markers
+    (S green, E red), a camera mark towards the look-at crosshair, the selected point ringed in yellow."""
+    if not view or not prev.image_px():
+        return
+    p.setRenderHint(QtG.QPainter.Antialiasing)
+    for line in view["lines"]:
+        pts = [(prev.to_widget(x, y), vis) for x, y, vis, ok in line["pts"] if ok]
+        dotted = line["kind"] == "look"
+        for (a, va), (b, vb) in zip(pts, pts[1:]):
+            vis = va and vb
+            for col, wd in ((QtG.QColor(0, 0, 0, 120), 4.0), (QtG.QColor(255, 255, 255, 178), 2.0)):
+                pen = QtG.QPen(col, wd); pen.setCapStyle(QtC.Qt.RoundCap); p.setPen(pen)
+                if dotted or not vis:
+                    _dashed(p, a, b, 2 if dotted else 6, 4 if dotted else 5)
+                else:
+                    p.drawLine(a, b)
+        if line["kind"] != "look":  # chevrons show the direction
+            acc = 0.0
+            for (a, _), (b, _) in zip(pts, pts[1:]):
+                v = b - a; L = (v.x() ** 2 + v.y() ** 2) ** 0.5; acc += L
+                if acc >= 80 and L > 1e-6:
+                    acc = 0.0; u = v / L; n = QtC.QPointF(-u.y(), u.x()); c = b
+                    poly = QtG.QPolygonF([c - u * 5 + n * 4, c, c - u * 5 - n * 4])
+                    p.setPen(QtG.QPen(QtG.QColor(0, 0, 0, 160), 3)); p.drawPolyline(poly)
+                    p.setPen(QtG.QPen(QtG.QColor(255, 255, 255, 220), 1.5)); p.drawPolyline(poly)
+    f = p.font(); f.setBold(True); f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85)); p.setFont(f)
+    for m in view["marks"]:
+        cx, cy, cvis, cok = m["cam"]; lx, ly, lvis, lok = m["look"]
+        c, l = prev.to_widget(cx, cy), prev.to_widget(lx, ly)
+        if cok and lok:  # dotted line to where it looks, and a crosshair there
+            p.setPen(QtG.QPen(QtG.QColor(255, 255, 255, 150), 1, QtC.Qt.DotLine)); p.drawLine(c, l)
+        if lok:
+            for col, wd in ((QtG.QColor(0, 0, 0, 150), 3), (QtG.QColor(255, 255, 255, 220), 1.2)):
+                p.setPen(QtG.QPen(col, wd)); p.drawLine(l + QtC.QPointF(-6, 0), l + QtC.QPointF(6, 0)); p.drawLine(l + QtC.QPointF(0, -6), l + QtC.QPointF(0, 6))
+        if not cok:
+            continue
+        sel = selected == m["i"]; big = sel or hover == m["i"]
+        r = 11 if big else 9
+        if lok:  # a small camera mark on the ring, pointing where it looks
+            v = l - c; L = (v.x() ** 2 + v.y() ** 2) ** 0.5
+            if L > 1e-6:
+                u = v / L; n = QtC.QPointF(-u.y(), u.x()); tip = c + u * (r + 7)
+                p.setPen(QtC.Qt.NoPen); p.setBrush(QtG.QColor(255, 255, 255, 230))
+                p.drawPolygon(QtG.QPolygonF([tip, c + u * (r + 1) + n * 4, c + u * (r + 1) - n * 4]))
+        col = START if m["kind"] == "start" else END if m["kind"] == "end" else MID
+        fill = QtG.QColor(col)
+        if not cvis:
+            fill.setAlpha(150)
+        p.setBrush(fill); p.setPen(QtG.QPen(QtG.QColor(SEL) if sel else QtG.QColor("#ffffff"), 2))
+        p.drawEllipse(c, r, r)
+        p.setPen(QtG.QColor("#ffffff"))
+        txt = "S" if m["kind"] == "start" else "E" if m["kind"] == "end" else str(m["i"] + 1)
+        p.drawText(QtC.QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), QtC.Qt.AlignCenter, txt)
+
+
+ZOOM_RANGE = (0.3, 4.0)
+FOV_RANGE = (10, 60)
+
+
+class PointPanel(QtW.QFrame):
+    """The small panel next to a selected path point: zoom, field of view, keep, look from here / set this view."""
+
+    def __init__(self, win):
+        super().__init__(win.prev); self.win = win; self.pid = None; self.i = None
+        self.setObjectName("pointpanel")
+        self.setStyleSheet("QFrame#pointpanel { background: palette(window); border: 1px solid palette(mid); border-radius: 6px } "
+                           "QFrame#pointpanel QLabel, QFrame#pointpanel QCheckBox, QFrame#pointpanel QRadioButton { background: transparent; border: none }")
+        g = QtW.QGridLayout(self); g.setContentsMargins(8, 6, 8, 6); g.setVerticalSpacing(3)
+        self.title = QtW.QLabel("Point"); self.title.setStyleSheet("font-weight: 600")
+        close = QtW.QToolButton(); close.setText("×"); close.setAutoRaise(True); close.setToolTip("Close")
+        close.clicked.connect(self.close_panel)
+        g.addWidget(self.title, 0, 0, 1, 3); g.addWidget(close, 0, 3)
+        self.zoom = QtW.QSlider(QtC.Qt.Horizontal); self.zoom.setRange(0, 1000); self.zoom.setFixedWidth(140)
+        self.zoom.setToolTip("How close the camera is to where it looks, at this point (0.3x to 4x)")
+        self.zoom_lbl = QtW.QLabel("1.00x")
+        self.fov = QtW.QSlider(QtC.Qt.Horizontal); self.fov.setRange(*FOV_RANGE); self.fov.setFixedWidth(140)
+        self.fov.setToolTip("Field of view: small is telephoto (flat look), large is wide (strong perspective). "
+                            "Changing it along the path with 'Keep the size the same' gives a dolly zoom.")
+        self.fov_lbl = QtW.QLabel("30°")
+        g.addWidget(QtW.QLabel("Zoom"), 1, 0); g.addWidget(self.zoom, 1, 1, 1, 2); g.addWidget(self.zoom_lbl, 1, 3)
+        g.addWidget(QtW.QLabel("Field of view"), 2, 0); g.addWidget(self.fov, 2, 1, 1, 2); g.addWidget(self.fov_lbl, 2, 3)
+        self.same_size = QtW.QCheckBox("Keep the size the same"); self.same_size.setChecked(True)
+        self.same_size.setToolTip("When the field of view changes, change the distance too, so the target keeps its size on screen")
+        g.addWidget(self.same_size, 3, 0, 1, 4)
+        self.keep_next = QtW.QRadioButton("this zoom for the next points"); self.only_here = QtW.QRadioButton("only here")
+        self.keep_next.setToolTip("The following points use this zoom and field of view until one has its own")
+        self.only_here.setToolTip("Only this point; the next points go back to the zoom kept before")
+        g.addWidget(QtW.QLabel("Keep"), 4, 0); g.addWidget(self.keep_next, 4, 1, 1, 2); g.addWidget(self.only_here, 5, 1, 1, 2)
+        self.look_btn = QtW.QPushButton("Look from here"); self.look_btn.setToolTip("Show the preview from this point")
+        self.set_btn = QtW.QPushButton("Set this view"); self.set_btn.setToolTip("Store the camera of the preview in this point")
+        self.del_btn = QtW.QPushButton("Delete"); self.del_btn.setToolTip("Delete this point")
+        h = QtW.QHBoxLayout(); h.addWidget(self.look_btn); h.addWidget(self.set_btn); h.addWidget(self.del_btn); g.addLayout(h, 6, 0, 1, 4)
+        self.note = QtW.QLabel(""); self.note.setStyleSheet(DIM); self.note.setWordWrap(True); g.addWidget(self.note, 7, 0, 1, 4)
+        self.zoom.valueChanged.connect(self._zoom); self.fov.valueChanged.connect(self._fov)
+        self.zoom.sliderReleased.connect(self._commit); self.fov.sliderReleased.connect(self._commit)
+        self.keep_next.toggled.connect(self._keep)
+        self.look_btn.clicked.connect(lambda: self.win.look_from_point(self.pid, self.i))
+        self.set_btn.clicked.connect(self._set_view); self.del_btn.clicked.connect(self._delete)
+        self._busy = False; self.hide()
+
+    @staticmethod
+    def z_to_slider(z):
+        a, b = np.log(ZOOM_RANGE[0]), np.log(ZOOM_RANGE[1]); return int(round(1000 * (np.log(z) - a) / (b - a)))
+
+    @staticmethod
+    def slider_to_z(v):
+        a, b = np.log(ZOOM_RANGE[0]), np.log(ZOOM_RANGE[1]); return float(np.exp(a + (b - a) * v / 1000))
+
+    def part(self):
+        return self.win.parts_panel.part(self.pid) if self.pid else None
+
+    def show_for(self, pid, i):
+        self.pid, self.i = pid, i; self.refresh(); self.place(); self.show(); self.raise_()
+
+    def refresh(self):
+        p = self.part()
+        if p is None or self.i is None or self.i >= len(p.get("waypoints") or []):
+            self.hide(); return
+        self._busy = True
+        zs, own_z = sb.point_values(p, "zoom", 1.0)
+        fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        w = p["waypoints"][self.i]
+        self.title.setText(f"Point {self.i + 1}" + (f" · {w['note']}" if w.get("note") else ""))
+        self.zoom.setValue(self.z_to_slider(zs[self.i])); self.zoom_lbl.setText(f"{zs[self.i]:.2f}x")
+        self.fov.setValue(int(round(fs[self.i]))); self.fov_lbl.setText(f"{fs[self.i]:.0f}°")
+        only = bool(w.get("zoom_only_here")); self.only_here.setChecked(only); self.keep_next.setChecked(not only)
+        same = bool(p.get("same_zoom"))
+        for x in (self.zoom, self.fov, self.keep_next, self.only_here):
+            x.setEnabled(not same)
+        self.note.setText("The whole path uses one zoom (part settings)." if same else
+                          ("" if own_z[self.i] else "Kept from an earlier point; moving a slider gives this point its own."))
+        self.note.setVisible(bool(self.note.text())); self.adjustSize(); self._busy = False
+
+    def place(self):
+        rects = self.win.st.ren.last_rects if self.win.st.ren is not None else {}
+        r = rects.get(f"marker:{self.i}"); prev = self.win.prev
+        img = prev._img
+        if r and img is not None:
+            W, H = img.width(), img.height(); x1, y0 = r["box"][2] / W, r["box"][1] / H
+            pt = prev.to_widget(x1, y0).toPoint() + QtC.QPoint(12, 0)
+        else:
+            pt = QtC.QPoint(prev.width() - self.width() - 40, 40)
+        x = min(max(4, pt.x()), prev.width() - self.width() - 4); y = min(max(4, pt.y()), prev.height() - self.height() - 4)
+        self.move(x, y)
+
+    def _wp(self):
+        p = self.part()
+        return (p, p["waypoints"][self.i]) if p is not None and self.i is not None and self.i < len(p.get("waypoints") or []) else (None, None)
+
+    def _zoom(self, v):
+        if self._busy:
+            return
+        p, w = self._wp()
+        if w is None:
+            return
+        z = self.slider_to_z(v); w["zoom"] = round(z, 4); self.zoom_lbl.setText(f"{z:.2f}x")
+        self.win.preview_point(self.pid, self.i)
+
+    def _fov(self, v):
+        if self._busy:
+            return
+        p, w = self._wp()
+        if w is None:
+            return
+        fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        zs, _ = sb.point_values(p, "zoom", 1.0)
+        old = fs[self.i]; w["fov"] = float(v); self.fov_lbl.setText(f"{v}°")
+        if self.same_size.isChecked():  # d * tan(fov / 2) stays the same: the target keeps its size on screen
+            z = zs[self.i] * np.tan(np.radians(v) / 2) / np.tan(np.radians(old) / 2)
+            w["zoom"] = round(float(z), 4); self._busy = True; self.zoom.setValue(self.z_to_slider(z)); self.zoom_lbl.setText(f"{z:.2f}x"); self._busy = False
+        self.win.preview_point(self.pid, self.i)
+
+    def _keep(self, on):
+        if self._busy:
+            return
+        p, w = self._wp()
+        if w is None:
+            return
+        zs, _ = sb.point_values(p, "zoom", 1.0); fs, _ = sb.point_values(p, "fov", float(self.win.spec.get("style", {}).get("fov", 30)))
+        w["zoom"] = zs[self.i]; w["fov"] = fs[self.i]  # the point gets its own values
+        w["zoom_only_here"] = w["fov_only_here"] = not on
+        self._commit()
+
+    def _commit(self):
+        if self.pid:
+            self.win.editor.commit(select=self.pid); self.refresh()
+
+    def _set_view(self):
+        v = current_view(self.win); p, w = self._wp()
+        if v is None or w is None:
+            return
+        w["pos"] = [float(x) for x in v[0]]; w["focal"] = [float(x) for x in v[1]]; w.pop("point", None)
+        self._commit(); self.win.say(f"Point {self.i + 1} now uses this view.", "ok")
+
+    def _delete(self):
+        p, w = self._wp()
+        if w is None:
+            return
+        del p["waypoints"][self.i]; i = self.i; self.close_panel(); self.win.editor.commit(select=self.pid)
+        self.win.say(f"Deleted point {i + 1}. Undo brings it back.", "ok")
+
+    def close_panel(self):
+        self.hide(); self.win.path_point = None; self.win.prev.update()

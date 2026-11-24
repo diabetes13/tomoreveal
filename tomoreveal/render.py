@@ -67,7 +67,7 @@ class Renderer:
         self._light_key, self._ssao, self._real_shadows, self.real_shadows_ok = ("default",), False, False, False
         self.sil_actors, self._dots = {}, {}  # cartoon outlines and thinned-out meshes for dots, per structure
         self.glow_actors, self.cut_actors, self._cut_cache, self._fx_meshes = {}, {}, {}, {}  # close-up animations
-        self._markers, self._path_actors, self.preview_part = [], [], None
+        self._markers, self._path_actors, self.preview_part, self._path3d, self.path_view = [], [], None, None, None
         self._slice_grey, self._shadow_key = None, None
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
@@ -251,7 +251,7 @@ class Renderer:
         if fr.ortho:
             cam.parallel_projection = True; cam.parallel_scale = p["scale"]
         else:
-            cam.parallel_projection = False; cam.view_angle = fr.fov
+            cam.parallel_projection = False; cam.view_angle = float(p.get("fov", fr.fov))  # 3.5: per point of a camera path
         self._show_path(s, spec, preview)
         self._apply_lighting(lk)
         self._apply_slice_texture(s, spec, lk, show_slice, cb)
@@ -272,8 +272,8 @@ class Renderer:
         if not annotate:
             return fr_img
         img = self.annotate(fr_img, s, spec, size, show_slice, transparent)
-        if self._markers:
-            img = self._draw_markers(img, size)
+        if self._path3d:
+            self._project_path(size)
         return img
 
     def _set_peeling(self, on):
@@ -348,8 +348,9 @@ class Renderer:
 
     # ---------- camera paths: drawn in the preview only ----------
     def _show_path(self, s, spec, preview):
-        """The line of the selected camera path part as a thin tube with arrows, and numbered waypoints (preview only)."""
-        self._markers = []
+        """The selected camera path part, for the preview only (3.5: drawn in 2D by the window, never in a movie):
+        3D lines and points here; projected after the frame is drawn (`_project_path`) into self.path_view."""
+        self._markers = []; self._path3d = None; self.path_view = None
         for a in getattr(self, "_path_actors", []):
             self.pl.renderer.RemoveActor(a)
         self._path_actors = []
@@ -357,46 +358,71 @@ class Renderer:
         part = self._part(spec, sel) if preview and sel else None
         if not part or part.get("type") != "path" or not part.get("show_path_in_preview", True):
             return
-        from .paths import arclength, catmull_rom
-        from .storyboard import PathPending, path_line
-        pv = self.pv; pts = None; src = part.get("source") or {}
+        from .paths import catmull_rom
+        from .storyboard import PATH_CAMERA, PathPending, follow_rails, path_line, point_values
+        src = part.get("source") or {}; lines = []; marks = []
         try:
             if src.get("kind", "follow") == "follow":
                 items = [(it.get("structure"), it.get("component")) for it in src.get("items", [])]
-                pts = path_line(self.ds, items, clip_box(spec, self.shape)) if items else None
-                if pts is not None and part.get("reverse"):
-                    pts = pts[::-1]
+                line = path_line(self.ds, items, clip_box(spec, self.shape)) if items else None
+                if line is not None and part.get("reverse"):
+                    line = line[::-1]
+                if line is not None and part.get("steadiness") is not None:
+                    v = spec.get("view", {}); fr = Framer(self.shape, 16 / 9, 30.0)
+                    md, _ = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
+                    crail, look = follow_rails(part, line, dict(PATH_CAMERA, **(part.get("camera") or {}), _main_dir=list(md)))
+                    lines = [("rail", crail), ("look", look)]
+                elif line is not None:
+                    lines = [("path", line)]
             else:
                 wps = part.get("waypoints") or []
-                foc = [np.asarray(w.get("focal") or w.get("point") or w.get("pos"), float) for w in wps]
-                self._markers = [(i + 1, f) for i, f in enumerate(foc)]
-                pts = catmull_rom(foc)[0] if len(foc) >= 2 else None
+                v = spec.get("view", {}); fr = Framer(self.shape, 16 / 9, 30.0)
+                md, _ = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
+                D = 60.0 * float(dict(PATH_CAMERA, **(part.get("camera") or {}))["distance"])
+                zooms, _ = point_values(part, "zoom", 1.0) if part.get("interp") == 2 else ([1.0] * len(wps), None)
+                cams, looks, raws = [], [], []
+                for w, z in zip(wps, zooms):
+                    F = np.asarray(w.get("focal") or w.get("point") or w.get("pos"), float)
+                    P = np.asarray(w["pos"], float) if w.get("pos") is not None else F + D * np.asarray(md, float)
+                    cams.append(F + (P - F) / max(1e-3, z)); looks.append(F); raws.append(P)
+                marks = list(zip(range(len(wps)), cams, looks))
+                if len(cams) >= 2:
+                    lines = [("path", catmull_rom(cams)[0])]
         except (PathPending, Exception):
-            pts = None
-        r = max(0.6, 0.004 * max(self.shape))
-        cum = arclength(pts) if pts is not None and len(pts) >= 2 else [0.0]
-        if cum[-1] > 1e-3:  # a path that only turns the camera has no line to draw
-            tube = pv.Spline(pts, max(20, len(pts))).tube(radius=r)
-            self._path_actors.append(self.pl.add_mesh(tube, color="#ffd23f", lighting=False, pickable=False))
-        step = cum[-1] / 6 if cum[-1] > 1e-3 else 0
-        for d in (np.arange(step / 2, cum[-1], step) if step else []):  # arrows show the direction
-            i = int(np.searchsorted(cum, d)); i = min(max(1, i), len(pts) - 1)
-            t = pts[i] - pts[i - 1]; t /= np.linalg.norm(t) or 1.0
-            cone = pv.Cone(center=pts[i], direction=t, height=r * 8, radius=r * 3)
-            self._path_actors.append(self.pl.add_mesh(cone, color="#ffd23f", lighting=False, pickable=False))
-        for _, f in self._markers:
-            self._path_actors.append(self.pl.add_mesh(pv.Sphere(radius=r * 3, center=f), color="#ff4fa3", lighting=False, pickable=False))
+            lines, marks = [], []
+        self._path3d = dict(lines=lines, marks=marks, raw=locals().get("raws", []))
+        self._markers = [(i + 1, f) for i, _, f in marks]
 
-    def _draw_markers(self, img, size):
-        """Numbers next to the waypoints; their screen boxes go into last_rects as "marker:i" for dragging."""
-        from PIL import Image, ImageDraw
-        im = Image.fromarray(img); d = ImageDraw.Draw(im); ren = self.pl.renderer; W, H = size
-        f = self._font(max(10, round(H * 0.024)))
-        for n, p in self._markers:
-            ren.SetWorldPoint(*p, 1.0); ren.WorldToDisplay(); x, y, _ = ren.GetDisplayPoint(); y = H - y
-            d.text((x + 6, y - 18), str(n), fill=(255, 79, 163), font=f, stroke_width=2, stroke_fill=(0, 0, 0))
-            self.last_rects[f"marker:{n - 1}"] = dict(box=(x - 8, y - 8, x + 8, y + 8), shown=True)
-        return np.asarray(im)
+    def _project_path(self, size):
+        """Project the path of `_show_path` onto the frame just drawn, with what is hidden behind structures or the
+        slice (from the depth buffer): self.path_view, and the point boxes in last_rects ("marker:i", "look:i")."""
+        if not self._path3d:
+            return
+        W, H = size; ren = self.pl.renderer
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+        arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+        zb = vtk_to_numpy(arr).reshape(H, W)
+
+        def proj(P):
+            ren.SetWorldPoint(*[float(v) for v in P], 1.0); ren.WorldToDisplay(); x, y, z = ren.GetDisplayPoint()
+            xi, yi = int(round(x)), int(round(y))
+            inside = 0 <= xi < W and 0 <= yi < H and 0 <= z <= 1
+            vis = bool(inside and z <= zb[yi, xi] + 2e-4)
+            return (x / W, 1 - y / H, vis, 0 <= z <= 1)
+        lines = []
+        for kind, pts in self._path3d["lines"]:
+            step = max(1, len(pts) // 400)
+            lines.append(dict(kind=kind, pts=[proj(P) for P in pts[::step]] + [proj(pts[-1])]))
+        marks = []; n = len(self._path3d["marks"])
+        for i, P, F in self._path3d["marks"]:
+            c, l = proj(P), proj(F)
+            marks.append(dict(i=i, cam=c, look=l, kind="start" if i == 0 else "end" if i == n - 1 else "mid"))
+            r = 11
+            if c[3]:
+                self.last_rects[f"marker:{i}"] = dict(box=(c[0] * W - r, c[1] * H - r, c[0] * W + r, c[1] * H + r), shown=True)
+            if l[3]:
+                self.last_rects[f"look:{i}"] = dict(box=(l[0] * W - 7, l[1] * H - 7, l[0] * W + 7, l[1] * H + 7), shown=True)
+        self.path_view = dict(lines=lines, marks=marks)
 
     def to_plane(self, fx, fy, z):
         """The point on the plane at height z under a position (fractions of the last frame), or None."""

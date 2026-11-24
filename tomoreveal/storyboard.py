@@ -315,7 +315,7 @@ def new_part(kind, **fields):
     elif kind == "path":
         p = _common(type="path", seconds=10, source=dict(kind="follow", items=[]), waypoints=[], camera=dict(PATH_CAMERA),
                     speed="even", ease=True, reverse=False, others=dict(colour="keep", opacity=1.0), show_path_in_preview=True,
-                    steadiness=50.0)  # 3.5: a steady rail, gentle at the ends
+                    steadiness=50.0, interp=2)  # 3.5: a steady rail; points: even speed, zoom and field of view per point
     elif kind in ("card", "title_card", "end_card"):
         title = fields.pop("title", None)
         if kind == "title_card":
@@ -337,7 +337,7 @@ def new_part(kind, **fields):
 
 # Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
 NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle"), "slide": ("ease_end",), "overview": ("ease_end",),
-              "path": ("steadiness",)}
+              "path": ("steadiness", "interp")}
 WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
 
@@ -1112,6 +1112,128 @@ def steady_follow_poses(part, fr, line, cam, n, fps, main_dir, main_up):
     return [_pose(fr, p, f, u) for p, f, u in zip(pos, foc, ups)]
 
 
+SEGMENT_SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
+
+
+def point_values(part, key, default):
+    """Zoom ("zoom") or field of view ("fov") at each point of a path: a number, or "keep" (also when missing): the
+    value of the last point before it that has its own, unless that point said "only here" (3.5)."""
+    wps = part.get("waypoints") or []
+    if part.get("same_zoom"):  # one value for the whole path
+        v = float(part.get(f"path_{key}", default) or default)
+        return [v] * len(wps), [False] * len(wps)
+    kept, out, own = float(default), [], []
+    for w in wps:
+        v = w.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out.append(float(v)); own.append(True)
+            if not w.get(f"{key}_only_here"):
+                kept = float(v)
+        else:
+            out.append(kept); own.append(False)
+    return out, own
+
+
+def _segment_curve(P, i, u):
+    """Point at fraction u of segment i of the centripetal Catmull-Rom curve through P (fine samples, by arc length)."""
+    from .paths import catmull_rom
+    a, b = max(0, i - 1), min(len(P), i + 3)
+    sub = P[a:b]; curve, at = catmull_rom(sub, 60)
+    j = i - a; seg = curve[at[j]:at[j + 1] + 1]
+    if len(seg) < 2:
+        return np.asarray(P[i], float)
+    cum = np.r_[0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
+    if cum[-1] < 1e-9:
+        return seg[0] + (seg[-1] - seg[0]) * u
+    d = u * cum[-1]
+    return np.array([np.interp(d, cum, seg[:, k]) for k in range(3)])
+
+
+def _hermite(vals, i, u):
+    """Catmull-Rom (uniform) through 1D values: smooth, and constant where neighbouring values are equal."""
+    v = list(vals); p0 = v[max(0, i - 1)]; p1 = v[i]; p2 = v[min(len(v) - 1, i + 1)]; p3 = v[min(len(v) - 1, i + 2)]
+    m1 = (p2 - p0) / 2 if 0 < i else (p2 - p1); m2 = (p3 - p1) / 2 if i + 2 < len(v) else (p2 - p1)
+    if abs(p2 - p1) < 1e-12:
+        return p1
+    h00, h10, h01, h11 = 2 * u ** 3 - 3 * u * u + 1, u ** 3 - 2 * u * u + u, -2 * u ** 3 + 3 * u * u, u ** 3 - u * u
+    out = h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2
+    return min(max(out, min(p1, p2)), max(p1, p2))  # never beyond the two values (no overshoot)
+
+
+def points_poses(part, fr, cam, n, fps, main_dir, main_up):
+    """Poses of a path through points (3.5): position and look-at on their own centripetal Catmull-Rom curves with the
+    same clock per segment (so the view never flips), even speed inside a segment, a speed or a time per segment,
+    gentle stops where the camera pauses or is asked to stop, zoom and field of view per point."""
+    from .paths import upright_ups
+    wps = part.get("waypoints") or []; D = 60.0 * float(cam["distance"])
+    P, F = [], []
+    for w in wps:
+        if w.get("pos") is not None:
+            P.append(np.asarray(w["pos"], float)); F.append(np.asarray(w.get("focal", w["pos"]), float))
+        else:
+            q = np.asarray(w["point"], float); F.append(q); P.append(q + D * np.asarray(main_dir, float))
+    K = len(wps)
+    zooms, _ = point_values(part, "zoom", 1.0); fovs, _ = point_values(part, "fov", fr.fov)
+    zall = float(part.get("zoom_all", 1.0) or 1.0)
+    # time of each segment: its length over its speed, or the seconds asked for
+    def seg_len(Q, i):  # length of segment i of the curve through Q
+        c = np.array([_segment_curve(Q, i, u) for u in np.linspace(0, 1, 24)])
+        return float(np.linalg.norm(np.diff(c, axis=0), axis=1).sum())
+    lens = [seg_len(P, i) + 0.25 * seg_len(F, i) + 1e-6 for i in range(K - 1)]
+    T = max(1e-6, (n - 1) / fps)
+    fixed = {i: float(wps[i].get("seconds")) for i in range(K - 1) if isinstance(wps[i].get("seconds"), (int, float)) and wps[i]["seconds"] > 0}
+    w_free = {i: lens[i] / SEGMENT_SPEEDS.get(wps[i].get("speed", "normal"), 1.0) for i in range(K - 1) if i not in fixed}
+    def stops(i):
+        return i == 0 or i == K - 1 or bool(wps[i].get("stop_gently")) or float(wps[i].get("pause", 0) or 0) > 0
+
+    Te = min(0.75, T / 4)  # seconds of gentle start and stop: constant speed in between
+    extra = {i: 0.5 * Te * (int(stops(i)) + int(stops(i + 1))) for i in w_free}  # time lost while slowing down and setting off
+    left = max(0.05 * T, T - sum(fixed.values()) - sum(extra.values()))
+    dur = [fixed[i] if i in fixed else extra[i] + left * w_free[i] / max(1e-9, sum(w_free.values())) for i in range(K - 1)]
+    scale = T / sum(dur); dur = [d * scale for d in dur]
+    starts = np.r_[0, np.cumsum(dur)]
+
+    def progress_table(i):
+        """Fraction of segment i done against its time: speed ramps up after a stop and down before one."""
+        D = max(1e-9, dur[i]); te = min(Te, D / 2); tt = np.linspace(0, D, 201)
+        sp = np.ones_like(tt)
+        if stops(i):
+            sp *= np.array([smooth01(x / te) for x in tt]) if te > 1e-9 else 1
+        if stops(i + 1):
+            sp *= np.array([smooth01((D - x) / te) for x in tt]) if te > 1e-9 else 1
+        sp = np.maximum(sp, 1e-6); cum = np.r_[0, np.cumsum((sp[1:] + sp[:-1]) / 2 * np.diff(tt))]
+        return tt, cum / cum[-1]
+    tables = [progress_table(i) for i in range(K - 1)]
+
+    def at(t):
+        i = int(min(K - 2, np.searchsorted(starts, t, side="right") - 1)); i = max(0, i)
+        tt, frac = tables[i]
+        u = float(np.interp(t - starts[i], tt, frac))
+        pos, foc = _segment_curve(P, i, u), _segment_curve(F, i, u)
+        z = math.exp(_hermite([math.log(max(1e-3, v)) for v in zooms], i, u)) * zall
+        fv = _hermite(fovs, i, u)
+        return foc + (pos - foc) / z, foc, fv, i, u
+    out = []; seen = set(); pauses = {i: max(0, round(fps * float(w.get("pause", 0) or 0))) for i, w in enumerate(wps)}
+    for j in range(n):
+        t = j / fps if j < n - 1 else T
+        pos, foc, fv, i, u = at(t)
+        for k in range(K):  # stand still at a point with a pause
+            if k not in seen and (starts[k] <= t + 1e-9 if k < K - 1 else j == n - 1):
+                seen.add(k)
+                if pauses[k]:
+                    pk, fk, fvk, _, _ = at(starts[k] if k < K - 1 else T)
+                    out += [(pk, fk, fvk)] * pauses[k]
+        out.append((pos, foc, fv))
+    ups = upright_ups([f - p for p, f, _ in out], np.asarray(main_up, float))
+    res = []
+    for (p, f, fv), up in zip(out, ups):
+        q = _pose(fr, p, f, up)
+        if abs(fv - fr.fov) > 1e-6:
+            q["fov"] = float(fv); q["scale"] = q["dist"] * math.tan(math.radians(fv) / 2)
+        res.append(q)
+    return res
+
+
 def path_poses(part, ds, fr, spec, n, fps, cb):
     """Camera poses of a path part: along the centre line of a structure ("follow"), or through waypoints ("points")."""
     from .paths import arclength, catmull_rom, sample, stable_up
@@ -1149,6 +1271,8 @@ def path_poses(part, ds, fr, spec, n, fps, cb):
     wps = part.get("waypoints") or []
     if len(wps) < 2:
         raise UserError("Add at least two points for the camera to move through.")
+    if part.get("interp") == 2:
+        return points_poses(part, fr, cam, n, fps, main_dir, main_up)
     D = 60.0 * float(cam["distance"])
     P, F = [], []
     for w in wps:

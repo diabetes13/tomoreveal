@@ -91,9 +91,9 @@ def test_the_path_is_drawn_in_the_preview_only(studio):
     f = tr.build_timeline(spec, ds)[0][40]
     studio.ren.preview_part = part["id"]
     a = studio.ren.draw(f, spec, (320, 180), preview=True).astype(int)
-    assert studio.ren._path_actors
+    assert studio.ren.path_view and studio.ren.path_view["lines"]  # 3.5: drawn by the window on top of the preview
     b = studio.ren.draw(f, spec, (320, 180)).astype(int)
-    assert not studio.ren._path_actors and np.abs(a - b).sum() > 0
+    assert studio.ren.path_view is None and np.array_equal(a, b)  # never in the picture itself, so never in a movie
     studio.ren.preview_part = None
 
 
@@ -121,7 +121,8 @@ def test_window_path_parts(tmp_path, demo):
         win.editor.insert(sb.new_part("path", source=dict(kind="follow", items=[{"structure": key, "component": None}])))
         pid = win.selected_part; win.prev_timer.stop(); win.do_preview(); settle()  # the line is worked out in a worker
         assert pid not in win.timeline.canvas.plan.problems and win.st.ds.path_cache
-        win.parts_panel.open(pid); assert win.st.ren._path_actors  # drawn in the preview while selected
+        win.parts_panel.open(pid); win.prev_timer.stop(); win.do_preview(); settle()
+        assert win.st.ren.path_view and win.st.ren.path_view["lines"]  # drawn in the preview while selected
         pts = sb.new_part("path", source=dict(kind="points", items=[])); win.editor.insert(pts); win.parts_panel.open(pts["id"])
         win.prev_timer.stop(); win.do_preview(); settle()
         from tomoreveal.gui_paths import current_view

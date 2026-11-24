@@ -208,9 +208,17 @@ class Navigator:
         elif d["button"] == QtC.Qt.LeftButton and f is not None:
             self.win.on_click(*f)
 
-    def wheel(self, delta, f):
+    def wheel(self, delta, f, mods=QtC.Qt.NoModifier):
         if not self.ready() or not delta:
             return
+        pp = self.win.path_point
+        if pp and pp[0] == self.win.selected_part and mods & (QtC.Qt.ControlModifier | QtC.Qt.AltModifier):  # the selected path point
+            panel = self.win.point_panel
+            if mods & QtC.Qt.ControlModifier:
+                panel.zoom.setValue(panel.zoom.value() + int(40 * delta / 120))
+            else:
+                panel.fov.setValue(panel.fov.value() - int(2 * delta / 120))
+            panel._commit(); return
         self.push()
         self.glide(self.zoom_at(self.target_view(), 1.15 ** (self.wheel_sign * delta / 120.0), f))
 

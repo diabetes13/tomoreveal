@@ -879,6 +879,9 @@ def build_plan(spec, ds):
             f["dissolve_to"] = frames[j] if j < len(frames) else None
     from .overlays import add_bar_lengths
     add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
+    if spec.get("annotations"):  # arrows and text boxes (3.5): opacity, growth and tail angle per frame
+        from .annotations import plan_annotations
+        plan_annotations(spec, ds, frames, segments, fr, fps, w / h)
     return Plan(frames, segments, marks, fps, problems)
 
 
@@ -1437,6 +1440,8 @@ def state_key(s):
     p = s["pose"]
     oth = s["others"] if not isinstance(s["others"], dict) else json.dumps(s["others"], sort_keys=True)
     extra = (json.dumps(s["fx"], sort_keys=True, default=float),) if s.get("fx") else ()  # close-up animations (3.4)
+    if s.get("ann"):  # arrows and text boxes (3.5)
+        extra += (json.dumps(s["ann"], sort_keys=True),)
     if s.get("blend"):  # dissolves and fades between parts (3.5)
         extra += (s["blend"]["via"], s["blend"]["q"], state_key(s["blend"]["src"]))
     return extra + (s["k"], s["reveal"], s.get("cut"), round(s["slice"], 3), round(s["e"], 3), json.dumps(s["target"], sort_keys=True), oth,

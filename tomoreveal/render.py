@@ -805,6 +805,11 @@ class Renderer:
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True))
+        if s.get("ann"):  # arrows and text boxes (3.5), on top of everything
+            from vtkmodules.util.numpy_support import vtk_to_numpy
+            from .annotations import draw as draw_annotations
+            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+            draw_annotations(layer, P, self, s, spec, size, vtk_to_numpy(arr).reshape(H, W))  # rows from the bottom
         self.last_rects = P.rects
         im = Image.alpha_composite(im, layer)
         return np.asarray(im if transparent else im.convert("RGB"))

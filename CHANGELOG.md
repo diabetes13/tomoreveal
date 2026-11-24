@@ -19,6 +19,13 @@
   - **The list of points:** a description, the zoom (grey with a chain when it is kept from an earlier point), the speed to the next point, and "stop gently".
   - **The whole path:** one zoom for all points, a zoom for the whole part, and Play path.
   - **Motion:** the camera now moves at an even speed and the view never flips.
+- **Arrows, pointers and text boxes.**
+  - **Arrows:** "+ Add arrow" (Look tab ▸ Arrows and text), or right-click ▸ Add arrow here, then click a spot on a structure. The arrow's tip stays on that spot while the camera moves, and its label is the structure's name, ready to type over. Drag its tail to turn it or make it longer, and drag its tip to another spot. Shapes: arrow, thin arrow, pointer, ring and bracket, in any colour.
+  - **Text boxes:** add as many as you like, and drag them into place.
+  - **Timing:** each item has its own start and end ("start here" and "end here" use the playhead) and fades in, grows or pops. Its bar on the timeline can be dragged.
+  - **Visibility:** arrows hide while their structure is switched off, not yet revealed, outside the clip box, or out of the picture.
+  - **Several at once:** Ctrl + click selects several, to align them or give them the same look. Labels never overlap.
+  - **Movies:** they are part of every movie format, including the transparent MOV.
 - **Opacity makes a structure see-through.** Lowering a structure's opacity used to make it vanish or only lighten its outline; now it becomes see-through, its outline fades with it, and 0 % hides it completely.
 
 ## 3.4.1

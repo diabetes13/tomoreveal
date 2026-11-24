@@ -265,6 +265,9 @@ class OverlayDrag(QtC.QObject):
         w = self.win
         if w.spec is None or w.pick_mode or w.gen is not None or w.busy or f is None:
             return False
+        am = getattr(w, "ann_mouse", None)
+        if am is not None and am.press(self, f, mods):  # arrows and text boxes (3.5) are on top
+            self.drag = dict(name="ann", mode="ann"); return True
         name = self.hit(f)
         if name and name.startswith(("marker:", "look:")):  # a point of a camera path, or where it looks
             self.drag = dict(name=name, mode="marker", f0=f, moved=False, y0=f[1]); return True
@@ -295,6 +298,8 @@ class OverlayDrag(QtC.QObject):
         d = self.drag; w = self.win
         if d is None or f is None:
             return
+        if d["mode"] == "ann":
+            w.ann_mouse.move(self, f, mods); return
         if d["mode"] == "marker":
             p = self.path_part(); look = d["name"].startswith("look:"); i = int(d["name"].split(":")[1])
             if p is None or i >= len(p.get("waypoints") or []):
@@ -362,6 +367,8 @@ class OverlayDrag(QtC.QObject):
         if self.drag is None:
             return
         d = self.drag; name = d["name"]; self.drag = None; self.guides = []
+        if d["mode"] == "ann":
+            self.win.ann_mouse.release(self); return
         if name.startswith(("marker:", "look:")):
             p = self.path_part()
             if p is not None:
@@ -385,6 +392,9 @@ class OverlayDrag(QtC.QObject):
         self.win.prev.setCursor(QtC.Qt.SizeFDiagCursor if on_h else QtC.Qt.SizeAllCursor if name else QtC.Qt.ArrowCursor)
 
     def context(self, f, gpos):
+        am = getattr(self.win, "ann_mouse", None)
+        if am is not None and self.win.spec is not None and am.context(self, f, gpos):
+            return True
         name = self.hit(f); w = self.win
         if name is None or w.spec is None:
             return False
@@ -423,6 +433,9 @@ class OverlayDrag(QtC.QObject):
         return True
 
     def double(self, f):
+        am = getattr(self.win, "ann_mouse", None)
+        if am is not None and self.win.spec is not None and am.double(self, f):
+            return True
         name = self.hit(f)
         if name is None:
             return False
@@ -444,8 +457,8 @@ class OverlayDrag(QtC.QObject):
         rects = self.rects(); show_all = self.win.toolbar.boxes.isChecked()
         pal = self.win.prev.palette()
         for n, (box, shown) in rects.items():
-            if n.startswith(("marker:", "look:")):
-                continue  # path points draw their own hover ring
+            if n.startswith(("marker:", "look:", "ann:", "anntip:", "anntail:")):
+                continue  # path points and arrows draw their own marks
             if not (show_all or n == self.hover_name or (self.drag and self.drag["name"] == n)):
                 continue
             if not shown and not show_all:

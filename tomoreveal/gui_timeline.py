@@ -9,6 +9,7 @@ TYPE_COLOURS = {"slide": "#4e79a7", "overview": "#59a14f", "focus": "#d1495b", "
 PLAYHEAD = "#ff9f1c"
 RULER_H, ROW_TOP, ROW_H, MARGIN = 18, 22, 36, 8
 COMPACT_H = 20      # row height with "Compact" on
+LANE_H = 9          # one lane of arrow / text bars under the parts
 MIN_BLOCK = 3.0     # never draw a part narrower than this; narrower neighbours merge into one "several parts" mark
 ZOOM_STEP = 1.5     # the - and + buttons
 SEVERAL = "#9a9a9a"
@@ -28,6 +29,8 @@ class TimelineCanvas(QtW.QWidget):
     context_requested = QtC.Signal(str, QtC.QPoint)
     add_requested = QtC.Signal(QtC.QPoint)
     transition_changed = QtC.Signal(str, str, float)  # part id, "overlap_prev" / "overlap_next", seconds (on release)
+    annotation_changed = QtC.Signal(str, str, float, float)  # annotation id, part id, start, end seconds (on release)
+    annotation_selected = QtC.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -69,7 +72,7 @@ class TimelineCanvas(QtW.QWidget):
             if seen:
                 self.ensure_visible()
             self.zoomed.emit()
-        self.update()
+        self.update_height(); self.update()
 
     def part(self, pid):
         for p in (self.spec or {}).get("shots", []):
@@ -198,6 +201,55 @@ class TimelineCanvas(QtW.QWidget):
             out.append(cur)
         return [(ids, x0, max(x1, x0 + MIN_BLOCK)) for ids, x0, x1 in out]
 
+    def ann_bars(self):
+        """Bars of the arrows and text boxes: [(annotation id, part id, x0, x1, lane, start s, end s)], in lanes so that
+        overlapping items never hide each other."""
+        from .annotations import items, shown_in
+        if not self.plan or not self.spec:
+            return []
+        fps = self.plan.fps; bars = []
+        for a in items(self.spec):
+            sh = a.get("show") or {}
+            for pid, d in self.parts.items():
+                if not d["main"] or not shown_in(a, pid):
+                    continue
+                n = d["main"][1] / fps; s0 = float(sh.get("start") or 0.0); s1 = float(sh["end"]) if sh.get("end") is not None else n
+                s1 = min(s1, n)
+                if s1 <= s0:
+                    continue
+                bars.append([a["id"], pid, self.x_of(d["main"][0] + s0 * fps), self.x_of(d["main"][0] + s1 * fps), 0, s0, s1, a])
+        bars.sort(key=lambda b: b[2]); ends = []
+        for b in bars:
+            lane = next((i for i, e in enumerate(ends) if e <= b[2] - 2), len(ends))
+            if lane == len(ends):
+                ends.append(b[3])
+            else:
+                ends[lane] = b[3]
+            b[4] = lane
+        return bars
+
+    def lanes_top(self):
+        return ROW_TOP + self.row_h + 4
+
+    def update_height(self):
+        n = max([b[4] for b in self.ann_bars()] + [-1]) + 1
+        h = ROW_TOP + self.row_h + 6 + (n * LANE_H + 4 if n else 0)
+        if self.minimumHeight() != h:
+            self.setMinimumHeight(h); self.updateGeometry()
+
+    def ann_at(self, pos):
+        """(bar, "move" | "start" | "end") under pos."""
+        top = self.lanes_top()
+        for b in self.ann_bars():
+            y0 = top + b[4] * LANE_H
+            if y0 <= pos.y() <= y0 + LANE_H - 1 and b[2] - 4 <= pos.x() <= b[3] + 4:
+                if abs(pos.x() - b[2]) <= 4:
+                    return b, "start"
+                if abs(pos.x() - b[3]) <= 4:
+                    return b, "end"
+                return b, "move"
+        return None
+
     def several_at(self, pos):
         """Ids of the parts merged under pos (a "several parts" mark), or []."""
         if not (ROW_TOP <= pos.y() <= ROW_TOP + self.row_h):
@@ -304,6 +356,18 @@ class TimelineCanvas(QtW.QWidget):
             order = sorted(self.parts, key=lambda pid: self.parts[pid]["start"]); t = d["target"]
             xi = self.x_of(self.parts[order[t]]["start"]) if t < len(order) else self.x_of(self.total)
             p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 3)); p.drawLine(QtC.QPointF(xi, ROW_TOP - 3), QtC.QPointF(xi, ROW_TOP + self.row_h + 3))
+        # arrows and text boxes: thin bars in lanes under the parts
+        top = self.lanes_top(); fm2 = p.fontMetrics(); sel_ann = getattr(self, "selected_ann", None)
+        for aid, pid, x0, x1, lane, s0, s1, a in self.ann_bars():
+            r = QtC.QRectF(x0, top + lane * LANE_H, max(3.0, x1 - x0), LANE_H - 2)
+            col = QtG.QColor("#ffb000" if a["kind"] == "arrow" else "#7fb3ff"); col.setAlpha(200 if a.get("visible", True) else 70)
+            p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 1.5) if aid == sel_ann else QtC.Qt.NoPen); p.setBrush(col)
+            p.drawRoundedRect(r, 2, 2)
+            word = ((a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")).split()
+            lab = ("→ " if a["kind"] == "arrow" else "T ") + (word[0] if word else "")
+            if r.width() > 24:
+                f2 = p.font(); f2.setPointSizeF(max(6.0, f2.pointSizeF() * 0.8)); p.setFont(f2); p.setPen(QtG.QColor("#000000"))
+                p.drawText(r.adjusted(3, -2, -2, 2), QtC.Qt.AlignVCenter | QtC.Qt.AlignLeft, fm2.elidedText(lab, QtC.Qt.ElideRight, int(r.width() - 4)))
         # playhead with a handle on the ruler; the handle carries a + (add a part here)
         x = self._playhead_x()
         p.setPen(QtG.QPen(QtG.QColor(PLAYHEAD), 2)); p.drawLine(QtC.QPointF(x, 2), QtC.QPointF(x, self.height()))
@@ -385,6 +449,10 @@ class TimelineCanvas(QtW.QWidget):
             return
         if self.on_handle(pos):
             self.add_requested.emit(e.globalPosition().toPoint()); return
+        ab = self.ann_at(pos)
+        if ab is not None:
+            b, how = ab; self.selected_ann = b[0]; self.annotation_selected.emit(b[0])
+            self._drag = dict(kind="ann", bar=b, how=how, x0=pos.x(), s0=b[5], s1=b[6], new=(b[5], b[6])); self.update(); return
         te = self.transition_edge_at(pos)
         if te is not None:
             pid, key, sg = te; part = self.part(pid) or {}
@@ -414,6 +482,17 @@ class TimelineCanvas(QtW.QWidget):
             self.offset = self.clamp_offset(d["off"] - (pos.x() - d["x0"])); self.zoomed.emit(); self.update()
         elif d["kind"] == "playhead":
             self._move_playhead(self.frame_at(pos.x()))
+        elif d["kind"] == "ann":
+            fps = self.plan.fps if self.plan else 30; dt = (pos.x() - d["x0"]) / (self.ppf * fps)
+            step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
+            s0, s1 = d["s0"], d["s1"]
+            if d["how"] == "start":
+                s0 = min(s1 - 0.1, max(0.0, s0 + dt))
+            elif d["how"] == "end":
+                s1 = max(s0 + 0.1, s1 + dt)
+            else:
+                s0, s1 = max(0.0, s0 + dt), max(0.0, s0 + dt) + (s1 - s0)
+            d["new"] = (round(round(s0 / step) * step, 2), round(round(s1 / step) * step, 2)); self.update()
         elif d["kind"] == "tedge":
             step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
             dt = (pos.x() - d["x0"]) / (self.ppf * (self.plan.fps if self.plan else 30))
@@ -442,6 +521,10 @@ class TimelineCanvas(QtW.QWidget):
             return
         if d["kind"] == "pan":
             return
+        if d["kind"] == "ann":
+            if d["new"] != (d["s0"], d["s1"]):
+                self.annotation_changed.emit(d["bar"][0], d["bar"][1], float(d["new"][0]), float(d["new"][1]))
+            self.released.emit(); return
         if d["kind"] == "tedge":
             if d["last"] is not None and d["last"] != d["base"]:
                 self.transition_changed.emit(d["pid"], d["key"], float(d["last"]))
@@ -649,7 +732,8 @@ class Timeline(QtW.QWidget):
         c.frame_changed.connect(self._frame); c.released.connect(self.released)
         c.part_selected.connect(self.part_selected); c.part_activated.connect(self.part_activated)
         c.zoomed.connect(self._sync_scroll); c.part_selected.connect(lambda pid: self.part_btn.setEnabled(True))
-        for name in ("resizing", "resized", "moved", "command", "context_requested", "add_requested", "transition_changed"):
+        for name in ("resizing", "resized", "moved", "command", "context_requested", "add_requested", "transition_changed",
+                     "annotation_changed", "annotation_selected"):
             setattr(self, name, getattr(c, name))
         self.scroll.valueChanged.connect(self._scrolled)
 

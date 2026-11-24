@@ -171,6 +171,8 @@ def build_gui(args):
                     hn = getattr(self.overlay, "hover_name", None) if self.overlay is not None else None
                     hov = int(hn.split(":")[1]) if hn and hn.startswith("marker:") else None
                     p = QtG.QPainter(self); paint_path(p, self, ren.path_view, sel, hov); p.end()
+                from .gui_annotations import paint_selection
+                p = QtG.QPainter(self); paint_selection(p, self, w); p.end()
                 from .gui_navigate import paint_marker
                 p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_marker(p, self, self.nav); p.end()
 
@@ -527,6 +529,9 @@ def build_gui(args):
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("All structures", self.allop_s)
             form.addRow("Title", self.title_le); ll.addLayout(form)
             self.overlay_controls = OverlayControls(self, lay)
+            from .gui_annotations import AnnotationMouse, AnnotationPanel, preview_menu
+            self.ann_panel = AnnotationPanel(self, lay); self.ann_mouse = AnnotationMouse(self)
+            self.arrow_pick = False; self.label_editor = None; self.preview_menu_extras = [preview_menu(self)]
             self.look_controls = LookControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             wg, wl = self._group("Window", lay)
@@ -557,6 +562,8 @@ def build_gui(args):
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
             self.timeline.part_selected.connect(self.select_part); self.timeline.part_activated.connect(self.open_part)
             self.timeline.transition_changed.connect(self.set_transition)
+            self.timeline.annotation_changed.connect(self.set_annotation_time)
+            self.timeline.annotation_selected.connect(lambda aid: (setattr(self.ann_mouse, "selected", [aid]), self.prev.update()))
             g = QtW.QGroupBox("Make the movie"); grid = QtW.QGridLayout(g); self.make_group = g
             self.quality_cb = QtW.QComboBox()
             for t, wh in QUALITY:
@@ -950,6 +957,7 @@ def build_gui(args):
             st = sp["style"]
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
             self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync(); self.export.sync()
+            self.ann_panel.rebuild()
             self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
             self.fps_cb.setCurrentIndex(max(0, self.fps_cb.findData(int(sp.get("output", {}).get("fps", 30)))))
             self.blur_cb.blockSignals(True); self.blur_cb.setChecked(bool(sp.get("output", {}).get("motion_blur", False))); self.blur_cb.blockSignals(False)
@@ -1222,6 +1230,7 @@ def build_gui(args):
             if self.path_edit_paused != pid:
                 self.path_edit_paused = None
             self.selected_part = pid; self.parts_panel.open(pid, select=False); self.editor.refresh_buttons()
+            self.ann_panel.rebuild()
 
         def editing_path(self):
             """The selected camera path through points, while it is being edited in the preview (3.5)."""
@@ -1268,6 +1277,19 @@ def build_gui(args):
                 self.path_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
             if self.region_pick is not None and (self.region_pick[0] is None or self.region_pick[0] != keep):
                 self.end_region_pick()
+            if getattr(self, "arrow_pick", False):
+                self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor)
+
+        def set_annotation_time(self, aid, pid, start, end):
+            """An arrow's or text box's bar moved on the timeline: one undo step."""
+            from .annotations import find
+            a = find(self.spec, aid)
+            if a is None:
+                return
+            if (a.get("show") or {}).get("parts", "all") == "all" and len([p for p in self.spec["shots"] if p.get("on", True)]) > 1:
+                a["show"]["parts"] = [pid]  # its timing is now for this part
+            a["show"]["start"] = round(float(start), 2); a["show"]["end"] = round(float(end), 2)
+            self.editor.commit(); self.ann_panel.rebuild()
 
         def set_transition(self, pid, key, value):
             """A transition's end dragged on the timeline: one undo step."""
@@ -1376,8 +1398,8 @@ def build_gui(args):
                                                                                          or self.path_pick or self.region_pick):
                 self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
                 return
-            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick):
-                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.pick_btn.setChecked(False)
+            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick or self.arrow_pick):
+                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.arrow_pick = False; self.pick_btn.setChecked(False)
                 return
             super().keyPressEvent(e)
 
@@ -1420,6 +1442,9 @@ def build_gui(args):
                 self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
             if self.multi_pick and self.st.has_segmentation and self.gen is None:
                 return self._multi_click(fx, fy)
+            if self.arrow_pick and self.gen is None:  # "+ Add arrow": this click is where it points
+                from .gui_annotations import add_arrow_at
+                self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); add_arrow_at(self, (fx, fy)); return
             ep = self.editing_path() if not (self.pick_mode or self.region_pick) and self.gen is None else None
             if ep is not None and self.st.ren is not None:  # path editor: a click adds a point after the selected one
                 pt = self.st.ren.pick_point(fx, fy)

@@ -52,7 +52,7 @@ def test_old_settings_are_migrated_once(st):
     assert again == old  # idempotent
     new = tr.default_spec(st.ds)
     a, _ = tr.build_timeline(old, st.ds)
-    b_spec = copy.deepcopy(old); b_spec["shots"] = new["shots"] + [old["shots"][3]]
+    b_spec = copy.deepcopy(old); b_spec["shots"] = [sb.as_legacy(p) for p in new["shots"]] + [old["shots"][3]]
     b, _ = tr.build_timeline(b_spec, st.ds)
     assert [sb.state_key(f) for f in a] == [sb.state_key(f) for f in b]  # same movie as the new default parts
     dup = tr.default_spec(st.ds); dup["shots"][1]["id"] = dup["shots"][0]["id"]

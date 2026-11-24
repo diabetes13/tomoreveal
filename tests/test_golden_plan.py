@@ -16,8 +16,9 @@ GOLDEN = os.path.join(HERE, "data", "golden_plan.json")
 
 def plans(ds):
     """(a) the default movie; (b) the default movie plus a close-up of a whole structure and one of a single object."""
-    a = tr.default_spec(ds)
-    b = tr.default_spec(ds)
+    from tomoreveal.storyboard import as_legacy
+    a = tr.default_spec(ds); a["shots"] = [as_legacy(p) for p in a["shots"]]
+    b = tr.default_spec(ds); b["shots"] = [as_legacy(p) for p in b["shots"]]
     vesicles = ds.key_of(2)
     from tomoreveal.storyboard import as_legacy  # parts as saved before 3.5: they must keep moving exactly as pinned
     b["shots"].append(as_legacy(tr.focus_shot({"class": ds.key_of(1)}, "membrane")))

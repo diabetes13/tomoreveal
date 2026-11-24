@@ -8,18 +8,20 @@ import tomoreveal as tr
 from tomoreveal import storyboard as sb
 
 
-def closeup(st, **kw):
+def closeup(st, legacy=False, **kw):
     spec = tr.default_spec(st.ds)
     fields = dict(target=sb.make_target([(st.ds.key_of(2), 2)]), caption="", seconds=4, motion="none")
     fields.update(kw)
     part = sb.new_part("focus", **fields)
+    if legacy:  # as saved by 3.4
+        part = sb.as_legacy(part)
     sb.insert_part(spec, part)
     frames, _ = tr.build_timeline(spec, st.ds)
     return spec, part, [f for f in frames if f["part"] == part["id"] and f["phase"] == "main"]
 
 
 def test_wiggle_follows_the_formula_and_eases(studio):
-    spec, part, fr = closeup(studio, motion="wiggle", wiggle=dict(amplitude=8, frequency=0.5, shape="circle"))
+    spec, part, fr = closeup(studio, legacy=True, motion="wiggle", wiggle=dict(amplitude=8, frequency=0.5, shape="circle"))
     T = (len(fr) - 1) / 30
     base = fr[0]["pose"]["az"]
     for i, f in enumerate(fr):

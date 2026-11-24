@@ -146,6 +146,18 @@ class Renderer:
         """One frame. preview=True also shows helpers that never go into a movie (the path of a camera path part)."""
         ds, style = self.ds, spec.get("style", {})
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
+        if s.get("blend"):  # a dissolve or a fade through black / white between two parts (3.5)
+            b = s["blend"]; q = float(b["q"])
+            a_img = self.draw(dict(b["src"], blend=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
+            b_img = self.draw(dict(s, blend=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
+            if b["via"] in ("black", "white"):
+                tone = np.zeros_like(a_img) if b["via"] == "black" else np.full_like(a_img, 255.0)
+                if transparent and a_img.shape[2] == 4:
+                    tone[..., 3] = 255.0
+                out = a_img + (tone - a_img) * min(1.0, 2 * q) if q < 0.5 else tone + (b_img - tone) * min(1.0, 2 * q - 1)
+            else:
+                out = a_img * (1 - q) + b_img * q
+            return np.clip(np.round(out), 0, 255).astype(np.uint8)
         if s.get("card"):
             return self.draw_card(s, spec, size, aa, transparent, annotate)
         if size != self.size:

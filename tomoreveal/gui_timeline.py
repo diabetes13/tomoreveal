@@ -27,6 +27,7 @@ class TimelineCanvas(QtW.QWidget):
     command = QtC.Signal(str)              # delete, duplicate, split, undo, redo (keys)
     context_requested = QtC.Signal(str, QtC.QPoint)
     add_requested = QtC.Signal(QtC.QPoint)
+    transition_changed = QtC.Signal(str, str, float)  # part id, "overlap_prev" / "overlap_next", seconds (on release)
 
     def __init__(self):
         super().__init__()
@@ -263,6 +264,20 @@ class TimelineCanvas(QtW.QWidget):
                 light = QtG.QColor(col); light.setAlpha(90)
                 p.setPen(QtC.Qt.NoPen); p.setBrush(light); p.drawRect(r)
                 hatch = QtG.QBrush(col, QtC.Qt.BDiagPattern); p.setBrush(hatch); p.drawRect(r)
+        for sg, r in self.segment_rects():  # small handles at both ends of a transition block
+            if sg.get("transition") and r.width() >= 8:
+                col = QtG.QColor(TYPE_COLOURS.get(sg["type"], "#888888")).darker(130)
+                p.setPen(QtC.Qt.NoPen); p.setBrush(col)
+                for x in (r.left() + 1, r.right() - 3):
+                    p.drawRoundedRect(QtC.QRectF(x, r.top() + r.height() * 0.25, 2, r.height() * 0.5), 1, 1)
+        d0 = self._drag
+        if d0 and d0.get("kind") == "tedge" and d0.get("last") is not None:
+            r = [rr for sg, rr in self.segment_rects() if sg is d0["sg"]]
+            if r:
+                fps = self.plan.fps; dv = (d0["last"] - d0["base"]) * fps * self.ppf
+                x = r[0].right() + dv if d0["key"] == "overlap_next" else r[0].left() - dv
+                p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 2, QtC.Qt.DashLine))
+                p.drawLine(QtC.QPointF(x, ROW_TOP - 2), QtC.QPointF(x, ROW_TOP + self.row_h + 2))
         for ids, x0, x1 in self.groups():
             if len(ids) > 1:
                 r = QtC.QRectF(x0, ROW_TOP, x1 - x0, self.row_h)
@@ -326,6 +341,18 @@ class TimelineCanvas(QtW.QWidget):
                 return pid
         return None
 
+    def transition_edge_at(self, pos):
+        """(part id, "overlap_prev" | "overlap_next", segment) when pos is on the left or right end of a transition."""
+        if not (ROW_TOP <= pos.y() <= ROW_TOP + self.row_h):
+            return None
+        for sg, r in self.segment_rects():
+            if sg.get("transition") and r.width() >= 8:
+                if abs(r.left() - pos.x()) <= self.EDGE:
+                    return sg["part"], "overlap_prev", sg
+                if abs(r.right() - pos.x()) <= self.EDGE:
+                    return sg["part"], "overlap_next", sg
+        return None
+
     def on_handle(self, pos):
         """The + handle on the playhead (top of the ruler)."""
         return pos.y() <= 11 and abs(pos.x() - self._playhead_x()) <= 8
@@ -358,6 +385,12 @@ class TimelineCanvas(QtW.QWidget):
             return
         if self.on_handle(pos):
             self.add_requested.emit(e.globalPosition().toPoint()); return
+        te = self.transition_edge_at(pos)
+        if te is not None:
+            pid, key, sg = te; part = self.part(pid) or {}
+            from .storyboard import transition_of
+            self._drag = dict(kind="tedge", pid=pid, key=key, x0=pos.x(), base=float(transition_of(part)[key]), last=None, sg=sg)
+            self.selected = pid; self.part_selected.emit(pid); self.update(); return
         edge = self.edge_at(pos)
         if edge is not None:
             part = self.part(edge)
@@ -374,12 +407,20 @@ class TimelineCanvas(QtW.QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position(); d = self._drag
         if d is None:
-            self.setCursor(QtC.Qt.SizeHorCursor if self.edge_at(pos) else QtC.Qt.PointingHandCursor if self.on_handle(pos) else QtC.Qt.ArrowCursor)
+            self.setCursor(QtC.Qt.SizeHorCursor if (self.edge_at(pos) or self.transition_edge_at(pos)) else
+                           QtC.Qt.PointingHandCursor if self.on_handle(pos) else QtC.Qt.ArrowCursor)
             return
         if d["kind"] == "pan":
             self.offset = self.clamp_offset(d["off"] - (pos.x() - d["x0"])); self.zoomed.emit(); self.update()
         elif d["kind"] == "playhead":
             self._move_playhead(self.frame_at(pos.x()))
+        elif d["kind"] == "tedge":
+            step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
+            dt = (pos.x() - d["x0"]) / (self.ppf * (self.plan.fps if self.plan else 30))
+            v = d["base"] + (dt if d["key"] == "overlap_next" else -dt)  # right end to the right / left end to the left: more overlap
+            v = min(10.0, max(0.0, round(round(v / step) * step, 2)))
+            if v != d["last"]:
+                d["last"] = v; self.update()
         elif d["kind"] == "resize":
             step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
             secs = d["secs"] + (pos.x() - d["x0"]) / (self.ppf * (self.plan.fps if self.plan else 30))
@@ -401,6 +442,10 @@ class TimelineCanvas(QtW.QWidget):
             return
         if d["kind"] == "pan":
             return
+        if d["kind"] == "tedge":
+            if d["last"] is not None and d["last"] != d["base"]:
+                self.transition_changed.emit(d["pid"], d["key"], float(d["last"]))
+            self.released.emit(); return
         if d["kind"] == "resize":
             if d["last"] is not None:
                 self.resized.emit(d["pid"], d["last"])
@@ -604,7 +649,7 @@ class Timeline(QtW.QWidget):
         c.frame_changed.connect(self._frame); c.released.connect(self.released)
         c.part_selected.connect(self.part_selected); c.part_activated.connect(self.part_activated)
         c.zoomed.connect(self._sync_scroll); c.part_selected.connect(lambda pid: self.part_btn.setEnabled(True))
-        for name in ("resizing", "resized", "moved", "command", "context_requested", "add_requested"):
+        for name in ("resizing", "resized", "moved", "command", "context_requested", "add_requested", "transition_changed"):
             setattr(self, name, getattr(c, name))
         self.scroll.valueChanged.connect(self._scrolled)
 

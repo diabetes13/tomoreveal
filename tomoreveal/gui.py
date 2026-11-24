@@ -544,6 +544,7 @@ def build_gui(args):
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
             self.timeline.part_selected.connect(self.select_part); self.timeline.part_activated.connect(self.open_part)
+            self.timeline.transition_changed.connect(self.set_transition)
             g = QtW.QGroupBox("Make the movie"); grid = QtW.QGridLayout(g); self.make_group = g
             self.quality_cb = QtW.QComboBox()
             for t, wh in QUALITY:
@@ -1178,6 +1179,17 @@ def build_gui(args):
                 self.path_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
             if self.region_pick is not None and (self.region_pick[0] is None or self.region_pick[0] != keep):
                 self.end_region_pick()
+
+        def set_transition(self, pid, key, value):
+            """A transition's end dragged on the timeline: one undo step."""
+            from .storyboard import transition_of
+            part = self.parts_panel.part(pid)
+            if part is None:
+                return
+            cur = transition_of(part); cur[key] = float(value); part["transition_in"] = cur
+            self.editor.commit(select=pid)
+            what = "starts before the previous part ends" if key == "overlap_prev" else "runs into this part"
+            self.say(f"The transition now {what} by {value:.1f} s.", "ok")
 
         def open_part(self, pid):
             """Double-click on a block: show the part's settings in the Movie tab."""

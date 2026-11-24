@@ -331,6 +331,34 @@ def _combo(items, current, on_change):
     return cb
 
 
+ENDS = (("no (stop as it is)", "sudden"), ("gently", "gentle"), ("very gently", "very_gentle"))
+EASE_CHOICES = (("sudden", "sudden"), ("gentle", "gentle"), ("very gentle", "very_gentle"))
+TRANSITION_KINDS = (("camera flight", "flight"), ("cut", "cut"), ("cross-dissolve", "dissolve"), ("fade through black", "black"),
+                    ("fade through white", "white"))
+
+
+def _hrow(*ws):
+    w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+    for x in ws:
+        h.addWidget(x)
+    h.addStretch(1)
+    return w
+
+
+def speed_picture(tin, w=56, h=20):
+    """A small picture of the speed over the transition: flat, bell-shaped or one-sided."""
+    pm = QtG.QPixmap(w, h); pm.fill(QtC.Qt.transparent); p = QtG.QPainter(pm); p.setRenderHint(QtG.QPainter.Antialiasing)
+    us = [i / 40 for i in range(41)]
+    ys = [sb.ease_curve(u, tin["ease_out_prev"], tin["ease_in_next"]) for u in us]
+    v = [(ys[min(40, i + 1)] - ys[max(0, i - 1)]) for i in range(41)]; top = max(v) or 1.0
+    path = QtG.QPainterPath(QtC.QPointF(0, h - 1))
+    for i, x in enumerate(v):
+        path.lineTo(QtC.QPointF(i / 40 * (w - 1), h - 1 - (h - 3) * x / top))
+    path.lineTo(QtC.QPointF(w - 1, h - 1))
+    p.setPen(QtG.QPen(QtG.QColor("#ff9f1c"), 1.5)); p.setBrush(QtG.QColor(255, 159, 28, 60)); p.drawPath(path); p.end()
+    return pm
+
+
 def _spin(lo, hi, value, on_change, step=0.5, suffix=" s", decimals=2, special=None):
     sp = QtW.QDoubleSpinBox(); sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(decimals); sp.setSuffix(suffix)
     if special:  # the lowest value stands for "automatic"
@@ -537,11 +565,48 @@ class PartsPanel(QtW.QWidget):
             add("On the picture", ovr); return
         tomo = self.win._tomo_row(p); add("", tomo); r["tomo"] = tomo
         add("On the picture", ovr)
-        tr = p.get("transition")
-        add("Transition in", _spin(-0.1, 10, -0.1 if tr is None else float(tr), lambda v: self.set(pid, "transition", None if v < 0 else v),
-                                   step=0.1, special="automatic"))
-        form.labelForField(form.itemAt(form.rowCount() - 1, QtW.QFormLayout.FieldRole).widget()).setToolTip(
-            "Seconds of camera flight into this part; 0 cuts straight to it")
+        if t in ("slide", "overview", "focus"):
+            add("Slow down at the end", _combo(ENDS, p.get("ease_end", "sudden"), lambda v: self.set(pid, "ease_end", v)))
+        self._transition_rows(pid, p, form)
+
+    def transition_heading(self, pid):
+        """"Transition from part 3 to part 4" (positions among all parts, as numbered on the timeline)."""
+        shots = self.win.spec["shots"]; ids = [q["id"] for q in shots]
+        if pid not in ids:
+            return "Transition"
+        i = ids.index(pid); prev = next((j for j in range(i - 1, -1, -1) if shots[j].get("on", True)), None)
+        return f"Transition from part {prev + 1} to part {i + 1}" if prev is not None else f"Transition into part {i + 1} (from the start)"
+
+    def _transition_rows(self, pid, p, form):
+        """The transition into this part (3.5): kind, length, how it leaves and arrives, overlaps, straight or arc."""
+        r = self.rows[pid]; tin = sb.transition_of(p)
+
+        def set_tr(**kw):
+            q = self.part(pid)
+            if q is not None:
+                cur = sb.transition_of(q); cur.update(kw)
+                self.set(pid, "transition_in", cur); pic.setPixmap(speed_picture(cur))
+        head = QtW.QLabel(f"<b>{self.transition_heading(pid)}</b>"); form.addRow(head); r["transition_head"] = head
+        trs = p.get("transition")
+        secs = _spin(-0.1, 10, -0.1 if trs is None else float(trs), lambda v: self.set(pid, "transition", None if v < 0 else v),
+                     step=0.1, special="automatic")
+        secs.setToolTip("Seconds of the transition into this part; 0 cuts straight to it")
+        kind = _combo(TRANSITION_KINDS, tin["kind"], lambda v: set_tr(kind=v))
+        kind.setToolTip("Camera flight, a cut, a cross-dissolve, or a fade through black or white")
+        form.addRow("Kind", _hrow(kind, secs))
+        pic = QtW.QLabel(); pic.setPixmap(speed_picture(tin)); pic.setToolTip("Speed during the transition: high where the curve is high")
+        leave = _combo(EASE_CHOICES, tin["ease_out_prev"], lambda v: set_tr(ease_out_prev=v)); leave.setToolTip("How gently the camera leaves the previous part")
+        arrive = _combo(EASE_CHOICES, tin["ease_in_next"], lambda v: set_tr(ease_in_next=v)); arrive.setToolTip("How gently the camera arrives at this part")
+        form.addRow("Leave / arrive", _hrow(leave, arrive, pic))
+        op = _spin(0, 10, tin["overlap_prev"], lambda v: set_tr(overlap_prev=v), step=0.1)
+        op.setPrefix("before "); op.setToolTip("Start the transition this many seconds before the previous part ends (its motion goes on meanwhile)")
+        on = _spin(0, 10, tin["overlap_next"], lambda v: set_tr(overlap_next=v), step=0.1)
+        on.setPrefix("into "); on.setToolTip("This part's own motion already starts this many seconds before the transition ends")
+        form.addRow("Overlap", _hrow(op, on))
+        path = _combo((("straight", "straight"), ("arc (a little higher in the middle)", "arc")), tin["path"], lambda v: set_tr(path=v))
+        path.setToolTip("Fly straight, or a little higher in the middle (for long moves)")
+        form.addRow("Flight path", path)
+        r["transition_rows"] = (head, kind, secs, leave, arrive, op, on, path)
 
     def _view_rows(self, pid, p, form):
         """View: the main view, or this part's own camera position (Tilt, Rotate, Zoom)."""

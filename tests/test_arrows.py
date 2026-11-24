@@ -180,3 +180,23 @@ def test_add_arrows_and_text_in_the_window(window, monkeypatch):
     ga.item_menu(win, a["id"], QtCore.QPoint(0, 0))
     assert "Delete" in seen and "Duplicate" in seen
     assert not errs, errs
+
+
+def test_clicks_beside_an_arrow_do_not_fail(window):
+    """3.5.0 bug: with an arrow on the picture, every other click in the preview raised KeyError 'ann:...'."""
+    from PySide6 import QtCore, QtTest
+    app, win, errs = window
+    ds = win.st.ds; a = an.new_arrow(vesicle_centre(ds), ds.key_of(2), 1, "vesicle"); t = an.new_text("note")
+    win.spec["annotations"] = [a, t]; win.editor.commit()
+    req = win._main_req(); req["at"]["u"] = 0.5; win.req = req; win.prev_timer.stop(); win.do_preview()
+    for _ in range(10):
+        app.processEvents()
+    assert f"ann:{a['id']}" in win.st.ren.last_rects
+    for fx, fy in ((0.05, 0.95), (0.5, 0.5), (0.9, 0.1), (0.3, 0.7)):
+        pt = win.prev.to_widget(fx, fy).toPoint()
+        QtTest.QTest.mousePress(win.prev, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, pt)
+        QtTest.QTest.mouseRelease(win.prev, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, pt)
+        win.prev.overlay.hover((fx, fy))
+    for _ in range(5):
+        app.processEvents()
+    assert not errs, errs

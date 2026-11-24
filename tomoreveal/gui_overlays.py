@@ -199,7 +199,7 @@ class OverlayDrag(QtC.QObject):
         if name.startswith("block:"):
             c = self.card(); i = int(name[6:])
             return c["blocks"][i] if c and i < len(c.get("blocks", [])) else None
-        return ov.overlay_settings(self.win.spec)[name]
+        return ov.overlay_settings(self.win.spec).get(name)  # None for arrows and text boxes ("ann..."): they move on their own
 
     def update(self, name, **kw):
         if name.startswith("block:"):
@@ -271,7 +271,8 @@ class OverlayDrag(QtC.QObject):
         name = self.hit(f)
         if name and name.startswith(("marker:", "look:")):  # a point of a camera path, or where it looks
             self.drag = dict(name=name, mode="marker", f0=f, moved=False, y0=f[1]); return True
-        hs = [n for n in self.rects() if (not n.startswith(("block:", "marker:", "look:")) or self.card()) and self.on_handle(n, f)
+        hs = [n for n in self.rects() if not n.startswith("ann") and (not n.startswith(("block:", "marker:", "look:")) or self.card())
+              and self.on_handle(n, f)
               and (self.rects()[n][1] or w.toolbar.boxes.isChecked())]
         if hs:
             name = hs[0]; mode = "resize"

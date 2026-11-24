@@ -2,6 +2,7 @@
 
 ## 3.5.0
 
+- **Fixed: clicking in the preview while an arrow or text box was on the picture** wrote an error (KeyError 'ann:...') and did nothing.
 - **Fixed: a new close-up could add its object to an earlier close-up.** If "+ Click objects in the preview" was still on for one close-up, later clicks (also those meant for a new close-up) went into that first close-up. Only one way of clicking in the preview is now active at a time, and selecting another part ends it. You can still add objects to a close-up later.
 - **Close-ups can hide the other structures:** "Other structures" now offers grey, darker, unchanged colour and **hidden**.
 - **Close-up of a frame you draw:** "Frame a region..." in a close-up's settings (or + Add part ▸ Close-up ▸ a region I draw in the preview) lets you drag a frame over the preview; the close-up then shows only what is inside it, for example where two objects touch, instead of whole objects.

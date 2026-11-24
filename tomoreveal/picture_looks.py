@@ -169,8 +169,9 @@ class PictureLooks:
                     else:  # keep the edge where a membrane meets something else; drop its folds and inner walls
                         edge &= ~ndimage.binary_erosion(gm, iterations=2)
             alpha = np.clip(ndimage.gaussian_filter(edge.astype(np.float32), 0.5) * 1.6, 0, 1) * 0.9
-            col = np.zeros((H, W, 3), np.float32) + (np.array([0, 0, 0]) if L35["outline_colour"] == "black" else np.array([40, 40, 40]))
-            if L35["outline_colour"] == "shade" or L35["glass"]:
+            glow = L35["outline_colour"] == "glow"
+            col = np.zeros((H, W, 3), np.float32) + {"black": 0.0, "glow": 190.0}.get(L35["outline_colour"], 40.0)
+            if L35["outline_colour"] in ("shade", "glow") or L35["glass"]:
                 key = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
                 lut = {c[0] * 65536 + c[1] * 256 + c[2]: kk for c, kk in ids.items()}
                 near_id = ndimage.grey_dilation(np.where(bg, 0, key), size=3)  # the structure next to each outline pixel
@@ -183,11 +184,22 @@ class PictureLooks:
                     elif L35["outline_colour"] == "shade":
                         c = class_spec(spec, self.ds, kk).get("color", self.ds.classes[kk]["color"])
                         col[m] = np.array(hex2rgb(c)) * 255 * 0.45
+                    elif glow:  # the structure's own colour, lighter, so the edge seems to shine
+                        c = np.array(hex2rgb(class_spec(spec, self.ds, kk).get("color", self.ds.classes[kk]["color"])))
+                        col[m] = (c + (1.0 - c) * 0.2) * 255
+            if glow:
+                alpha = np.minimum(1.0, alpha / 0.9)
             m = alpha > 0.004  # only where there is an outline
             a3 = alpha[m][:, None]
             out[..., :3][m] = out[..., :3][m] * (1 - a3) + col[m] * a3
             if transparent and out.shape[2] == 4:
                 out[..., 3][m] = np.maximum(out[..., 3][m], alpha[m] * 255 / 0.9)
+            if glow:  # a soft halo around each edge, added on top (light adds up, as on an X-ray screen)
+                sg = 4.0 * H / 1080.0
+                halo = np.stack([ndimage.gaussian_filter(alpha * col[..., i], sg) for i in range(3)], axis=-1) * 0.9
+                out[..., :3] = out[..., :3] + halo
+                if transparent and out.shape[2] == 4:
+                    out[..., 3] = np.maximum(out[..., 3], np.clip(halo.max(axis=-1), 0, 255))
         return np.clip(np.round(out), 0, 255).astype(np.uint8)
 
     def _vignette_state(self, s, spec, lk, size):

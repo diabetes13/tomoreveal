@@ -130,7 +130,7 @@ def vignette_weight(W, H, cx, cy, size, softness, shape="round"):
 # ---------------------------------------------------------------------------------------------------------------
 LOOKS = (("Classic", "classic"), ("Soft", "soft"), ("Soft on black", "dark"), ("Ceramic", "ceramic"),
          ("Ceramic with see-through membranes", "ceramic_glass"), ("Glass membranes", "glass"), ("Illustration", "illustration"),
-         ("On the tomogram", "tomogram"))
+         ("On the tomogram", "tomogram"), ("X-ray", "xray"))
 LOOK_NOTES = {
     "classic": "As in earlier versions: lit colours on black.",
     "soft": "White background, soft shadows in creases, thin outlines.",
@@ -140,9 +140,11 @@ LOOK_NOTES = {
     "glass": "Soft, with pale see-through membranes outlined at their outer edge.",
     "illustration": "Thick black outlines and flat light, like a textbook drawing.",
     "tomogram": "The structures over the grey tomogram slice.",
+    "xray": "Everything see-through on black, with glowing edges in each structure's colour: good for crowded scenes.",
 }
 GLASS_OUTLINES = (("all edges", "all"), ("outer edge only", "outer"), ("none", "none"))
-MATERIALS = (("normal", "normal"), ("ceramic (matte, soft sheen)", "ceramic"))
+MATERIALS = (("normal", "normal"), ("ceramic (matte, soft sheen)", "ceramic"), ("X-ray (see-through, glowing)", "xray"))
+XRAY_OPACITY = 0.3  # every structure with the X-ray material: see-through, so what lies behind and inside shows
 MEMBRANE_LOOKS = (("their own colour", "own"), ("see-through (glass)", "glass"), ("solid cream (ceramic)", "cream"))
 CREAM = "#efe7d4"
 BACKGROUNDS = (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("gradient (light grey to white)", "gradient"),
@@ -155,7 +157,8 @@ REACHES = (("short", "short"), ("normal", "normal"), ("long", "long"))
 REACH_SCALE = {"short": 0.6, "normal": 1.0, "long": 1.8}
 OUTLINES = (("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick"))
 OUTLINE_PX = {"off": 0.0, "thin": 1.5, "medium": 2.5, "thick": 3.5}  # at 1080 lines, scaled with the frame height
-OUTLINE_COLOURS = (("dark", "dark"), ("black", "black"), ("darker shade of each colour", "shade"))
+OUTLINE_COLOURS = (("dark", "dark"), ("black", "black"), ("darker shade of each colour", "shade"),
+                   ("glowing, in each colour", "glow"))
 FADES = (("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong"))
 FADE_AMOUNT = {"off": 0.0, "light": 0.25, "medium": 0.5, "strong": 0.7}
 STYLE35_DEFAULTS = dict(preset="classic", background=None, shadow="none", reach="normal", outline="off", outline_colour="dark",
@@ -178,6 +181,8 @@ LOOK_PRESETS = {
                          depth_fade="light", lighting=True, richer=True, glass_outline="outer"),
     "tomogram": dict(background="tomogram", shadow="medium", outline="thin", outline_colour="dark", between=True, glass=False,
                      depth_fade="off", lighting=True, richer=False),
+    "xray": dict(background="black", shadow="none", outline="thin", outline_colour="glow", between=True, glass=False,
+                 depth_fade="medium", lighting=True, richer=False, material="xray"),
 }
 MEMBRANE_WORDS = ("membrane", "er", "envelope", "vesicle")
 

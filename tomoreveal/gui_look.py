@@ -324,14 +324,16 @@ class Look35Controls(QtC.QObject):
         self.reach = combo(lk.REACHES, "reach", "How far the soft shadows reach")
         f.addRow("Soft shadows", _row(self.shadow, QtW.QLabel("reach"), self.reach))
         self.outline = combo(lk.OUTLINES, "outline", "Dark outlines around every structure (the same width in the preview and the movie)")
-        self.ocol = combo(lk.OUTLINE_COLOURS, "outline_colour", "Colour of the outlines")
+        self.ocol = combo(lk.OUTLINE_COLOURS, "outline_colour", "Colour of the outlines. Glowing: each structure's own colour "
+                                                                  "with a soft halo (best on black)")
         f.addRow("Outlines", _row(self.outline, self.ocol))
         self.between = QtW.QCheckBox("also between touching structures")
         self.between.setToolTip("Outlines where two structures touch at the same depth (draws each frame twice)")
         self.between.toggled.connect(lambda v: self.set(between=bool(v))); f.addRow("", self.between)
         self.fade = combo(lk.FADES, "depth_fade", "Far things fade towards the background: gives depth")
         f.addRow("Depth fade", self.fade)
-        self.material = combo(lk.MATERIALS, "material", "Ceramic: bright and matte with a broad soft sheen, like a porcelain model")
+        self.material = combo(lk.MATERIALS, "material", "Ceramic: bright and matte with a broad soft sheen, like a porcelain "
+                                                        "model. X-ray: every structure see-through, so what is behind and inside shows")
         self.pastel = QtW.QCheckBox("paler colours")
         self.pastel.setToolTip("Colours mixed a little towards white, as on a ceramic model")
         self.pastel.toggled.connect(lambda v: self.set(pastel=bool(v)))

@@ -228,6 +228,7 @@ class Renderer(PreviewPicking, PictureLooks):
         keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
         each = (mode.get("each") or {}) if not legacy else {}  # per structure in this close-up (3.5): glass / hide
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
+        from .look import XRAY_OPACITY
         translucent = False; self._legend_col = {}
         for kk, act in self.actors.items():
             c = class_spec(spec, ds, kk)
@@ -246,6 +247,8 @@ class Renderer(PreviewPicking, PictureLooks):
             if L35["pastel"] and not mem:
                 from .look import pastel
                 col = pastel(col)
+            if L35["material"] == "xray":  # X-ray: every structure see-through
+                op *= XRAY_OPACITY
             self._legend_col[kk] = col  # the colour the legend shows: as drawn by the look
             if e <= 0 or not items or keep or kk in whole:
                 act.SetVisibility(True)
@@ -278,6 +281,7 @@ class Renderer(PreviewPicking, PictureLooks):
                 act.SetVisibility(True)
                 act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
                 op = float(min(1.0, max(0.0, class_spec(spec, ds, tid).get("opacity", 1.0)))) * all_op
+                op *= XRAY_OPACITY if L35["material"] == "xray" else 1.0
                 set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
         translucent |= self._apply_fx(s.get("fx") or {}, items, spec, e, keep, all_op)
         # Depth peeling only while some structure is see-through and the slice is opaque or hidden: with OSMesa (VTK 9.6)
@@ -587,6 +591,7 @@ class Renderer(PreviewPicking, PictureLooks):
         if matte:
             amb, spec_amt = 0.45, 0.04
         ceramic = pre == "default" and getattr(self, "_l35", {}).get("material") == "ceramic"
+        xray = pre == "default" and getattr(self, "_l35", {}).get("material") == "xray"
         glass = False
         for kk, act in self.actors.items():
             st = style_of(spec, ds.classes[kk]["key"]); pr = act.GetProperty(); kind = st["kind"]
@@ -595,6 +600,8 @@ class Renderer(PreviewPicking, PictureLooks):
             pr.SetAmbient(amb); pr.SetDiffuse(0.6 if matte else 0.8); pr.SetSpecular(spec_amt); pr.SetSpecularPower(15)
             if ceramic:  # a porcelain model: bright, matte, with a broad soft sheen
                 pr.SetAmbient(0.5); pr.SetDiffuse(0.62); pr.SetSpecular(0.12); pr.SetSpecularPower(6)
+            elif xray:  # X-ray: luminous rather than lit, with a small glint
+                pr.SetAmbient(0.7); pr.SetDiffuse(0.35); pr.SetSpecular(0.3); pr.SetSpecularPower(25)
             mesh = ds.meshes.get(kk)
             if kind == "dots" and mesh is not None:
                 pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))

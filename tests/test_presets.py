@@ -80,3 +80,32 @@ def test_presets_tab_pictures_and_saved_looks(window):
     win.presets.delete("Mine"); win.presets.delete("Mine")  # twice: the list is rebuilt each time
     assert "Mine" not in gp.saved_presets() and ("mine", "Mine") not in win.presets.cards
     assert not errs
+
+
+def xray_frame(ds, ren, look):
+    spec = tr.default_spec(ds)
+    spec["style"].update(legend=False, slice_label=False, ortho=True); spec["view"].update(tilt=0, az=0)
+    k1, k2 = ds.key_of(1), ds.key_of(2)
+    spec["classes"][k1].update(color=FRONT); spec["classes"][k2].update(color=BACK)
+    lk.apply_look(spec, look); lk.set_look(spec, depth_fade="off")
+    spec["shots"] = [tr.storyboard.new_part("overview", seconds=0.1, motion="none")]
+    f = tr.build_timeline(spec, ds)[0][0]
+    return spec, ren.draw(f, spec, (320, 320)).astype(int)
+
+
+def test_xray_shows_what_is_behind_and_glows_at_the_edges(slabs):
+    ds, ren = slabs
+    from test_see_through import centre_of
+    spec, img = xray_frame(ds, ren, "xray")
+    assert spec["style"]["bg"] == "#000000"
+    assert all(abs(a.GetProperty().GetOpacity() - lk.XRAY_OPACITY) < 1e-6 for a in ren.actors.values() if a.GetVisibility())
+    both = centre_of(ds, ren, img, 35, 40)  # the front slab over the back one: both colours show
+    assert both[0] > 25 and both[2] > 25, both
+    _, solid = xray_frame(ds, ren, "dark")
+    assert centre_of(ds, ren, solid, 35, 40)[2] < 10  # a solid look hides the back slab there
+    # the edges shine in the structure's own colour (lighter), with a halo onto the black background
+    red = (img[..., 0] > 200) & (img[..., 1] > 40) & (img[..., 1] < 200)
+    assert red.sum() > 100
+    bgd = img.sum(2) < 5
+    halo = ndimage.binary_dilation(red, iterations=5) & ~ndimage.binary_dilation(red, iterations=1)
+    assert (img[halo].sum(1) > 20).mean() > 0.3 and bgd.sum() > 0.2 * img.shape[0] * img.shape[1]

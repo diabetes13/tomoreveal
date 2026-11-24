@@ -308,7 +308,8 @@ def new_part(kind, **fields):
         p = _common(type="overview", seconds=3, motion="none", angle=25, view=dict(tilt=42.0, az=0.0, zoom=1.0),
                     transition=VIEW_TRANSITION)
     elif kind == "focus":
-        p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30, tilt=0.0)  # from the top (3.5)
+        p = _common(type="focus", seconds=5, target=None, others="grey", motion="orbit", zoom=1.0, angle=30, tilt=0.0,  # from the top (3.5)
+                    steady_zoom=True, wiggle=dict(WIGGLE_3_5))
     elif kind == "hold":
         p = _common(type="hold", seconds=2)
     elif kind == "path":
@@ -334,7 +335,8 @@ def new_part(kind, **fields):
 
 
 # Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
-NEW_IN_3_5 = {"focus": ("tilt", "ease_end"), "slide": ("ease_end",), "overview": ("ease_end",)}
+NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle"), "slide": ("ease_end",), "overview": ("ease_end",)}
+WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
 
 def as_legacy(part):
@@ -754,10 +756,15 @@ def build_plan(spec, ds):
             need_structures()
             ft, fz = float(part.get("tilt", max(tilt, 50))), max(0.05, float(part.get("zoom", 1)))
 
-            def fp(d=0.0, blo=blo, bhi=bhi, ft=ft, fz=fz):
-                return zoomed(fr.fit(blo, bhi, ft, az + d, 1.0), fz)
-
             m, ang = part.get("motion", "orbit"), float(part.get("angle", 30))
+            steady = steady_framing(part, fr, blo, bhi, ft, az, m, ang) if part.get("steady_zoom") else None
+
+            def fp(d=0.0, blo=blo, bhi=bhi, ft=ft, fz=fz, steady=steady):
+                p = fr.fit(blo, bhi, ft, az + d, 1.0)
+                if steady is not None:  # the same distance at every angle: the object does not grow and shrink (3.5)
+                    p["dist"], p["scale"] = steady
+                return zoomed(p, fz)
+
             anim = closeup_animation(part, ds, fr, fp, n, fps, k0=st["k"], nz=nz)
             if anim is None:  # orbit / rock / still without effects: exactly as in 3.3
                 anim = (lambda u, fp=fp, m=m, ang=ang: dict(pose=fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)))
@@ -886,6 +893,60 @@ def fx_settings(part):
     return out
 
 
+def steady_framing(part, fr, lo, hi, tilt, az, motion, angle):
+    """(distance, scale) that frames the box at every angle a close-up's motion reaches (sampled at 36 angles)."""
+    pts = [(tilt, az)]
+    if motion == "orbit":
+        pts = [(tilt, az + 360.0 * k / 36) for k in range(36)]
+    elif motion == "rock":
+        pts = [(tilt, az + angle * math.sin(2 * math.pi * k / 36)) for k in range(36)]
+    elif motion == "wiggle":
+        w = fx_settings(part)["wiggle"]; A = float(w["amplitude"])
+        if w.get("smooth"):  # the directions the 3.5 wiggle really reaches
+            T = max(0.1, float(part.get("seconds", 5))); base = dict(c=np.zeros(3), tilt=tilt, az=az, dist=1.0, scale=1.0)
+            for t in np.linspace(0, T, 90):
+                q = turned_pose(fr, base, *wiggle_offsets(w, float(t), T)); pts.append((q["tilt"], q["az"]))
+        pts += [(min(89.0, max(0.0, tilt + A * math.sin(2 * math.pi * k / 36))), az + A * math.cos(2 * math.pi * k / 36)) for k in range(36)]
+    fits = [fr.fit(lo, hi, t, a, 1.0) for t, a in pts]
+    return max(f["dist"] for f in fits), max(f["scale"] for f in fits)
+
+
+def wiggle_offsets(w, t, T):
+    """(sideways, up/down) turn of the viewing direction in degrees at time t of a close-up of T seconds (3.5 wiggle):
+    zero speed and position at both ends, a whole number of cycles, shapes circle / eight / drift."""
+    A = float(w.get("amplitude", 5.0)); shape = w.get("shape", "circle")
+    Te = min(0.75, T / 2)
+
+    def rise(x):  # "smootherstep": speed and acceleration are 0 at both of its ends, so the acceleration never jumps
+        x = min(1.0, max(0.0, x))
+        return x * x * x * (x * (6 * x - 15) + 10)
+    env = rise(t / Te) * rise((T - t) / Te)
+    if shape == "drift":  # slow and non-repeating
+        x = 0.6 * math.sin(2 * math.pi * 0.13 * t + 1.1) + 0.4 * math.sin(2 * math.pi * 0.21 * t + 2.3)
+        y = 0.6 * math.sin(2 * math.pi * 0.34 * t + 0.7)
+        return A * env * x, A * env * y
+    f = max(1, round(float(w.get("frequency", 0.35)) * T)) / max(1e-6, T)  # whole cycles: it ends where it began
+    if shape == "eight":
+        return A * env * math.sin(2 * math.pi * f * t), A / 2 * env * math.sin(4 * math.pi * f * t)
+    return A * env * math.sin(2 * math.pi * f * t), A * env * (1 - math.cos(2 * math.pi * f * t)) / 2
+
+
+def turned_pose(fr, base, dx, dy):
+    """The pose with its viewing direction turned by dx degrees sideways and dy degrees up/down around the centre,
+    keeping the picture upright (no roll). Gives pos and up, so it also works when looking straight down."""
+    from .paths import tilt_az
+    d0, up0 = fr.axes(base["tilt"], base["az"]); d0, up0 = np.asarray(d0, float), np.asarray(up0, float)
+    right = np.cross(up0, d0)
+    a, b = math.radians(dx), math.radians(dy)
+    d = d0 * math.cos(a) * math.cos(b) + right * math.sin(a) * math.cos(b) + up0 * math.sin(b)
+    d /= np.linalg.norm(d)
+    up = up0 - d * float(up0 @ d); up /= np.linalg.norm(up)
+    t, az = tilt_az(d, fr.u)
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        t, az = base["tilt"], base["az"]
+    return dict(base, tilt=float(t), az=float(az), wdir=d, pos=np.asarray(base["c"]) + base["dist"] * d, up=up)
+
+
 def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
     """Frame function u -> state changes for a close-up's main phase with wiggle, push-in, highlight or an object effect;
     None when the close-up has none of them (it is then drawn exactly as before)."""
@@ -901,7 +962,11 @@ def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
 
     def fn(u):
         t = u * T; d = {}; fx = {}
-        if m == "wiggle":
+        if m == "wiggle" and wig.get("smooth"):  # 3.5: calm start and end, whole cycles, no roll
+            dx, dy = wiggle_offsets(wig, t, T)
+            p = turned_pose(fr, base, dx, dy)
+            fx["wiggle"] = [round(dx, 4), round(dy, 4)]
+        elif m == "wiggle":
             A = float(wig["amplitude"]) * smooth01(t / 0.5) * smooth01((T - t) / 0.5); f = float(wig["frequency"])
             if wig.get("shape") == "eight":
                 daz, dtl = A * math.sin(2 * math.pi * f * t), A / 2 * math.sin(4 * math.pi * f * t)
@@ -916,6 +981,8 @@ def closeup_animation(part, ds, fr, fp, n, fps, k0=0, nz=1):
             need = fr.fit(lo, hi, p["tilt"], p["az"], 1.02)  # never so close that the objects leave the frame
             p = dict(p, dist=max(p["dist"] / z, need["dist"]), scale=max(p["scale"] / z, need["scale"]))
             fx["push"] = round(z, 4)
+        if p.get("wdir") is not None:  # a turned (wiggle) pose: the camera position follows the distance
+            p = dict(p, pos=np.asarray(p["c"]) + p["dist"] * p["wdir"])
         d["pose"] = p
         if hl["kind"] == "pulse":
             fx["pulse"] = round((1 - math.cos(2 * math.pi * max(1, int(hl.get("pulses", 2))) * u)) / 2, 4)

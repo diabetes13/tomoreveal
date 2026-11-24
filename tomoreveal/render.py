@@ -904,6 +904,32 @@ def _discard(*paths):
             pass
 
 
+BLUR_SAMPLES, BLUR_SHUTTER = 4, 0.5  # motion blur: 4 pictures spread over half of the frame interval
+
+
+def moving(a, b):
+    """True when the camera moves between two frame states (motion blur is only worth its cost then)."""
+    p, q = a["pose"], b["pose"]
+    return (not np.allclose(p["c"], q["c"]) or abs(p["tilt"] - q["tilt"]) > 1e-6 or abs(((p["az"] - q["az"] + 180) % 360) - 180) > 1e-6
+            or abs(p["dist"] - q["dist"]) > 1e-6
+            or (p.get("pos") is not None and q.get("pos") is not None and not np.allclose(p["pos"], q["pos"])))
+
+
+def motion_blurred(ren, s, nxt, spec, size, aa, transparent):
+    """The average of BLUR_SAMPLES pictures with the camera between this frame and the next (3.5)."""
+    from .storyboard import lerp_pose
+    acc = None
+    for k in range(BLUR_SAMPLES):
+        u = BLUR_SHUTTER * k / BLUR_SAMPLES
+        pose = lerp_pose(s["pose"], nxt["pose"], u)
+        if s["pose"].get("pos") is not None and nxt["pose"].get("pos") is not None:
+            pose["pos"] = np.asarray(s["pose"]["pos"]) * (1 - u) + np.asarray(nxt["pose"]["pos"]) * u
+            up = np.asarray(s["pose"]["up"]) * (1 - u) + np.asarray(nxt["pose"]["up"]) * u; pose["up"] = up / (np.linalg.norm(up) or 1.0)
+        img = ren.draw(dict(s, pose=pose), spec, size, aa=aa, transparent=transparent).astype(np.float32)
+        acc = img if acc is None else acc + img
+    return np.clip(np.round(acc / BLUR_SAMPLES), 0, 255).astype(np.uint8)
+
+
 class MovieJob:
     """Renders a movie frame by frame: iterate it to get (frames done, total, last image). Closing it before the end
     cancels the movie and deletes its partial files. With resume=True, the frames of the complete chunks of an
@@ -917,6 +943,7 @@ class MovieJob:
         self.size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
         from .look import look_settings
         self.aa = look_settings(spec)["aa"]["movie"]
+        self.blur = bool(o.get("motion_blur", False))
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         if frames_dir:
             os.makedirs(frames_dir, exist_ok=True)
@@ -965,9 +992,12 @@ class MovieJob:
             i, s = self.i, self.frames[self.i]
             key = (state_key(s), s.get("part"), s.get("bar_nm"), s.get("card"), round(float(s.get("card_fade", 1)), 4),
                    round(float(s.get("dissolve", 0) or 0), 4))  # overlays may differ per part
-            if key != self.last_key:
-                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa,
-                                         transparent=self.alpha or (self.transparent and bool(self.frames_dir)))
+            tr = self.alpha or (self.transparent and bool(self.frames_dir))
+            nxt = self.frames[i + 1] if (self.blur and i + 1 < len(self.frames)) else None
+            if self.blur and nxt is not None and not s.get("card") and not s.get("blend") and moving(s, nxt):
+                self.img = motion_blurred(self.ren, s, nxt, self.spec, self.size, self.aa, tr); self.last_key = None
+            elif key != self.last_key:
+                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=tr)
                 self.last_key = key
             if self.frames_dir:  # one PNG per frame, also while the picture holds still (pauses stay in the sequence)
                 imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)

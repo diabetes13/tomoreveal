@@ -731,6 +731,10 @@ class PartsPanel(QtW.QWidget):
         form.addRow("Tilt", _spin(-1, 85, float(p["tilt"]) if p.get("tilt") is not None else -1,
                                   lambda v: self.set(pid, "tilt", None if v < 0 else v), step=5, suffix="\u00b0", decimals=0,
                                   special="automatic"))
+        steady = QtW.QCheckBox("Keep zoom steady"); steady.setChecked(bool(p.get("steady_zoom")))
+        steady.setToolTip("The camera keeps the same distance while it moves, so the object does not grow and shrink")
+        steady.toggled.connect(lambda on: self.set(pid, "steady_zoom", bool(on) or None))
+        form.addRow("", steady)
         form.addRow("Vignette", self._vignette_row(pid, p))
 
     def _fx(self, pid, key, rebuild=False, **kw):
@@ -752,9 +756,17 @@ class PartsPanel(QtW.QWidget):
             w = S["wiggle"]
             amp = _spin(1, 30, float(w["amplitude"]), lambda v: self._fx(pid, "wiggle", amplitude=v), step=1, suffix="\u00b0", decimals=0)
             amp.setToolTip("How far the camera swings around the object")
-            fq = _spin(0.1, 2, float(w["frequency"]), lambda v: self._fx(pid, "wiggle", frequency=v), step=0.1, suffix=" per second", decimals=1)
-            shp = _combo((("circle", "circle"), ("figure eight", "eight")), w.get("shape", "circle"), lambda v: self._fx(pid, "wiggle", shape=v))
-            form.addRow("Wiggle", row(amp, fq, shp))
+            if w.get("smooth"):  # 3.5: speed as Slow - Fast; whole cycles are fitted to the close-up
+                fq = QtW.QSlider(QtC.Qt.Horizontal); fq.setRange(15, 80); fq.setFixedWidth(90); fq.setValue(round(100 * float(w["frequency"])))
+                fq.setToolTip("Slow (left) to fast (right). The speed is adjusted so the camera ends where it began.")
+                fq.valueChanged.connect(lambda v: self._fx(pid, "wiggle", frequency=v / 100))
+                speed = row(QtW.QLabel("slow"), fq, QtW.QLabel("fast"))
+                shapes = (("circle", "circle"), ("figure eight", "eight"), ("drift (slow, never repeats)", "drift"))
+            else:  # a close-up from an older project: as it was
+                speed = _spin(0.1, 2, float(w["frequency"]), lambda v: self._fx(pid, "wiggle", frequency=v), step=0.1, suffix=" per second", decimals=1)
+                shapes = (("circle", "circle"), ("figure eight", "eight"))
+            shp = _combo(shapes, w.get("shape", "circle"), lambda v: self._fx(pid, "wiggle", shape=v))
+            form.addRow("Wiggle", row(amp, shp)); form.addRow("Wiggle speed", speed)
         pu = S["push"]
         on = QtW.QCheckBox("push in"); on.setChecked(bool(pu["on"])); on.setToolTip("The camera moves slowly closer during the close-up")
         on.toggled.connect(lambda v: self._fx(pid, "push", rebuild=True, on=bool(v)))

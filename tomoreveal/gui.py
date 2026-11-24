@@ -38,6 +38,9 @@ def cmd_icon(args):
     print(f"wrote {args.path}")
 
 
+SKIP_NOTE = "The preview skips frames; the movie will be smooth"
+
+
 def build_gui(args):
     from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
     from .gui_data import DataPanel, clear_layout
@@ -562,6 +565,18 @@ def build_gui(args):
             self.aa_movie.activated.connect(lambda j: self.spec is not None and (ensure_look(self.spec)["aa"].__setitem__("movie", self.aa_movie.itemData(j)), self.schedule()))
             self.export = ExportControls(self, grid, 2)  # rows 2-5: save as, file size and codec, notes, estimates
             grid.addWidget(QtW.QLabel("Smooth edges"), 6, 0); grid.addWidget(self.aa_movie, 6, 1)
+            self.fps_cb = QtW.QComboBox()  # 3.5: smoother motion
+            for t, d in (("30 frames/s", 30), ("60 frames/s", 60)):
+                self.fps_cb.addItem(t, d)
+            self.fps_cb.setToolTip("Smoother motion: 60 fps. Files are about 1.6 times larger and rendering takes twice as long.")
+            self.fps_cb.activated.connect(lambda j: self.spec is not None and (self.spec["output"].__setitem__("fps", int(self.fps_cb.itemData(j))),
+                                                                           self.schedule()))
+            self.blur_cb = QtW.QCheckBox("Motion blur")
+            self.blur_cb.setToolTip("Blur fast-moving detail a little, as a camera would, so fine membranes do not look stepped while the "
+                                    "camera moves. Renders 4 pictures per frame (4 times slower); used for the movie only, not the preview.")
+            self.blur_cb.toggled.connect(lambda on: self.spec is not None and (self.spec["output"].__setitem__("motion_blur", bool(on)),
+                                                                              self.schedule()))
+            grid.addWidget(self.fps_cb, 6, 2); grid.addWidget(self.blur_cb, 6, 3, 1, 2)
             self.go_btn = QtW.QPushButton("Make movie"); self.go_btn.setStyleSheet("font-weight:600; padding:6px 18px"); self.go_btn.clicked.connect(self.make_movie)
             self.cancel_btn = QtW.QPushButton("Cancel"); self.cancel_btn.clicked.connect(self.cancel_render)
             self.open_btn = QtW.QPushButton("Play movie"); self.open_btn.clicked.connect(lambda: self._open(self.last_movie))
@@ -605,6 +620,8 @@ def build_gui(args):
             if not self.playing:
                 return
             last = self.playing["last"]; self.playing = None; self.play_timer.stop(); self.play_btn.setText("Play")
+            if self.prev.note.text() == SKIP_NOTE:
+                self.prev.set_note("")
             if last is not None:  # leave the preview on the frame it stopped at, at full quality
                 self.req = {"frame": last}; self.schedule(0)
 
@@ -620,7 +637,10 @@ def build_gui(args):
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
+                skipped = p["last"] is not None and f - p["last"] > 1
                 p["last"] = f; p["drawn"] += 1
+                if skipped and not p.get("noted"):  # 3.5: judge smoothness from the movie, not from the preview
+                    p["noted"] = True; self.prev.set_note(SKIP_NOTE)
                 self.prev.set_image(to_qimage(img)); self.frame = f
                 self.timeline.set_frame(f)
             if end:
@@ -908,6 +928,8 @@ def build_gui(args):
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
             self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync(); self.export.sync()
             self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
+            self.fps_cb.setCurrentIndex(max(0, self.fps_cb.findData(int(sp.get("output", {}).get("fps", 30)))))
+            self.blur_cb.blockSignals(True); self.blur_cb.setChecked(bool(sp.get("output", {}).get("motion_blur", False))); self.blur_cb.blockSignals(False)
             self.apply_help()
             self.bg_cb.setCurrentIndex(max(0, self.bg_cb.findData(st.get("bg", "#000000"))))
             self._setv(self.contrast_s, st.get("contrast", [1, 99])[0] * 2)

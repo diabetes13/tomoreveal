@@ -3,7 +3,10 @@
 A slide frame, an overview frame and a close-up frame, 320 x 180, no anti-aliasing. Software and hardware rendering
 differ slightly, so the check is a mean absolute difference below 2 (0-255 scale), not an exact match.
 
-Regenerate tests/data/golden_frames.npz only on purpose, after checking that a change of the picture is wanted:
+Windows has reference pictures of its own (golden_frames_win.npz): text and film grain are drawn differently there, by 3 to 5
+on the same scale.
+
+Regenerate the file of this system only on purpose, after checking that a change of the picture is wanted:
     python tests/test_golden_frames.py
 """
 import os
@@ -14,7 +17,7 @@ import numpy as np
 import tomoreveal as tr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GOLDEN = os.path.join(HERE, "data", "golden_frames.npz")
+GOLDEN = os.path.join(HERE, "data", "golden_frames_win.npz" if sys.platform == "win32" else "golden_frames.npz")
 SIZE = (320, 180)
 TOLERANCE = 2.0
 

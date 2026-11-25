@@ -54,11 +54,8 @@ class MovieEditor(QtC.QObject):
         return self.win.timeline.canvas.plan
 
     def reset_history(self):
-        """New data loaded: start a new history."""
-        self.history.clear()
-        if self.spec is not None:
-            self.history.push(self.spec)
-        self.refresh_buttons()
+        """Another movie, or older steps that no longer fit the data: start a new history."""
+        self.history.clear(); self.record()
 
     def record(self):
         """Store the settings as one undo step (any change: structures, view, clip, look, parts)."""
@@ -74,7 +71,7 @@ class MovieEditor(QtC.QObject):
         has = self.spec is not None
         sel = self.target() if has else None
         self.add_btn.setEnabled(has); self.dup_btn.setEnabled(bool(sel)); self.del_btn.setEnabled(bool(sel))
-        self.undo_btn.setEnabled(self.history.can_undo); self.redo_btn.setEnabled(self.history.can_redo)
+        self.undo_btn.setEnabled(has and self.history.can_undo); self.redo_btn.setEnabled(has and self.history.can_redo)
         self.split_btn.setEnabled(self.can_split())
 
     def can_split(self):
@@ -225,12 +222,14 @@ class MovieEditor(QtC.QObject):
         self.win.say("The movie is back to the three default parts. Undo brings your parts back.", "ok")
 
     def undo(self):
-        self._record_pending(); self._restore(self.history.undo())
+        if self.spec is not None:  # (while nothing is shown, a kept movie keeps its history)
+            self.record_pending(); self._restore(self.history.undo())
 
     def redo(self):
-        self._record_pending(); self._restore(self.history.redo())
+        if self.spec is not None:
+            self.record_pending(); self._restore(self.history.redo())
 
-    def _record_pending(self):
+    def record_pending(self):
         """A change still waiting for the history timer is one undo step of its own."""
         if self.hist_timer.isActive():
             self.hist_timer.stop(); self.record()
@@ -416,10 +415,7 @@ class PartsPanel(QtW.QWidget):
 
     # ---- helpers ----
     def part(self, pid):
-        for p in self.win.spec["shots"]:
-            if p["id"] == pid:
-                return p
-        return None
+        return next((p for p in (self.win.spec or {}).get("shots", []) if p["id"] == pid), None)
 
     def _problems(self):
         plan = self.win.timeline.canvas.plan
@@ -444,6 +440,8 @@ class PartsPanel(QtW.QWidget):
     def sync(self, force=False):
         """Rebuild when the list of parts changed (ids or order, or other data); otherwise update the lines in place."""
         spec, info = self.win.spec, self.win.info or {}
+        if spec is None:  # e.g. a worker that ended after everything was unloaded
+            return
         sig = (id(spec), tuple(p["id"] for p in spec["shots"]), bool(info.get("has_tomogram")), bool(info.get("has_segmentation")),
                tuple(c["key"] for c in info.get("structures", [])))
         if force or sig != self._sig:

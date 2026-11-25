@@ -1,5 +1,16 @@
 # Change log
 
+## Unreleased
+
+- **No work is lost around projects.** **Start over** asks about changes that are not saved, like File ▸ New (the button did not). **Revert to saved** asks a question of its own and always goes back to the saved file; before, it offered Save and then ignored it. Closing the window while a movie is being made also asks about unsaved changes; Cancel keeps the window and the movie going.
+- **The movie is kept when nothing is shown.** Removing or switching off all data used to drop your movie. It now waits for the next data, can be saved meanwhile, and File ▸ New starts over. Saving while data is loading no longer loses the list of data files. A kept movie that is shown on other data becomes a new project and does not overwrite the old file.
+- **Restored work is safe until it is saved.** The autosave is deleted only when a new one has been written, files given on the command line wait for the Restore question and are not loaded over restored work, and a restored project that was never saved stays unsaved. An autosave also records the size and time of its data files, so another file of the same name is not used without asking.
+- **A project that can't be opened** no longer takes your open work with it when its data files are missing, and a project that fails while it is read leaves no path behind that Save would write to.
+- **Undo works across a change of data.** Adding, removing or switching data, and a load that fails, no longer empty the undo list. It is cleared only for another movie or another grid.
+- **Looking does not change a project.** Opening a part, or clicking an item on the picture, no longer marks the project as changed or adds an undo step.
+- **New and Open end what is running** (playback, a glide, typing in a label, a threshold that is waiting), which could otherwise raise an error or reach the next project.
+- On Windows, a project in a folder whose name changed letter case keeps its names, colours and close-ups.
+
 ## 3.5.0
 
 - **Dragonfly 2025 sessions open.** Sessions saved by Dragonfly 2025 were refused with "not a compressed Dragonfly session (no 'ORSZ' header)": they are laid out differently inside. They now open like older ones, with the names, colours and hidden structures from Dragonfly. A tomogram stored in the session as 16-bit numbers (as Dragonfly 2025 stores 8-bit data) is now used too; before, only 32-bit ones were.

@@ -15,7 +15,7 @@ import traceback
 
 import numpy as np
 
-from .common import UserError, VIEWS, __version__
+from .common import UserError, VIEWS, __version__, norm_path
 from .dragonfly import OrsSession, guess_roi
 from .matching import apply_match, match_volume
 from .movie import render_movie
@@ -25,7 +25,7 @@ from .volumes import Dataset, clean_labels, guess_kind, load_volume, looks_like_
 
 # what _init_sources creates: the whole state of the loaded sources, which a failed change puts back
 _SOURCE_STATE = ("ds", "sessions", "tomo_files", "seg_sources", "hidden", "tomo_source", "_tomo_auto", "_tomo_loaded",
-                 "_seg_loaded", "_matches", "_stale", "match_note")
+                 "_seg_loaded", "_matches", "_stale", "match_note", "flip")
 
 
 def _atomic(method):
@@ -64,11 +64,7 @@ class Studio:
     # ---- loading ----
     # Tomogram source: None, "file:<path>" or "session:<path>:<image index>".
     # Segmentation sources (self.seg_sources, in order): "dragonfly:<path>:<object title>", "labels:<path>", "scores:<path>".
-    @staticmethod
-    def _norm(p):
-        """The absolute path, with the letter case on disk (but mapped and subst drives kept as typed)."""
-        a = os.path.abspath(os.path.expanduser(str(p).strip().strip('"'))); r = os.path.realpath(a)
-        return r if os.path.normcase(r) == os.path.normcase(a) else a
+    _norm = staticmethod(norm_path)
 
     @property
     def has_tomogram(self):

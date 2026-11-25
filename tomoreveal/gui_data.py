@@ -51,7 +51,7 @@ class DataPanel(QtW.QWidget):
         self.demo_btn = QtW.QPushButton("Try demo data"); self.demo_btn.setToolTip("Load a small made-up tomogram to try the program")
         self.demo_btn.clicked.connect(on_demo)
         self.over_btn = QtW.QPushButton("Start over"); self.over_btn.setToolTip("Unload everything")
-        self.over_btn.clicked.connect(on_start_over)
+        self.over_btn.clicked.connect(lambda _=False: on_start_over())
         row.addWidget(self.demo_btn); row.addStretch(1); row.addWidget(self.over_btn); lay.addLayout(row)
         self.progress = dim(""); self.progress.setVisible(False); lay.addWidget(self.progress)
         self.empty_lbl = dim("Nothing loaded yet. A Dragonfly session alone is enough: its stored image is used as the tomogram.")

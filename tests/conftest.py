@@ -64,5 +64,6 @@ def private_data_dir(tmp_path_factory):
     except ImportError:
         return
     ProjectManager.ask_save = lambda self, what: "discard"
+    ProjectManager.ask_revert = lambda self: True
     ProjectManager.ask_restore = lambda self, when: "later"
     ProjectManager.ask_relink = lambda self, problems: True

@@ -1,5 +1,5 @@
 """Shared constants and small helpers."""
-
+import os
 
 __version__ = "3.5.0"
 
@@ -25,6 +25,12 @@ def label_dtype(max_label):
     """The smallest signed integer type that holds label numbers up to max_label (int8, int16 or int32)."""
     import numpy as np
     return np.int8 if max_label <= 127 else np.int16 if max_label <= 32767 else np.int32
+
+
+def norm_path(p):
+    """The absolute path, with the letter case on disk (but mapped and subst drives kept as typed). Source keys hold it."""
+    a = os.path.abspath(os.path.expanduser(str(p).strip().strip('"'))); r = os.path.realpath(a)
+    return r if os.path.normcase(r) == os.path.normcase(a) else a
 
 
 def read_json(path):

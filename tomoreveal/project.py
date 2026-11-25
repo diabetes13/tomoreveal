@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from .common import UserError, __version__
+from .common import UserError, __version__, norm_path
 
 FORMAT = "tomoreveal-project"
 SCHEMA = 2
@@ -30,19 +30,22 @@ def fingerprint(path, chunk=1 << 20):
     return h.hexdigest()
 
 
-def file_entry(key, kind, path, project_path=None, **extra):
-    """One source of a project: the absolute path, the path relative to the project file, size, time and fingerprint."""
-    d = dict(key=key, kind=kind, path=path, relpath=None, size=0, mtime=0.0, fingerprint="")
-    if project_path:
+def file_entry(key, kind, path, project_path=None, fingerprints=True, **extra):
+    """One source of a project: the absolute path, the path relative to the project file, size, time and (it reads a part
+    of the file) fingerprint.
+    A file that is not there now keeps what `extra` (its earlier entry) knows about it."""
+    d = dict(key=key, kind=kind, path=path, relpath=None, size=0, mtime=0.0, fingerprint=""); d.update(extra)
+    if project_path and (d["relpath"] is None or os.path.exists(path)):
         try:
             d["relpath"] = os.path.relpath(path, os.path.dirname(os.path.abspath(project_path)))
         except ValueError:  # another drive (Windows)
             d["relpath"] = None
     try:
-        d.update(size=os.path.getsize(path), mtime=os.path.getmtime(path), fingerprint=fingerprint(path))
+        d.update(size=os.path.getsize(path), mtime=os.path.getmtime(path))
+        if fingerprints:
+            d["fingerprint"] = fingerprint(path)
     except OSError:
         pass
-    d.update(extra)
     return d
 
 
@@ -110,13 +113,11 @@ def read_project(path):
 # ---------------------------------------------------------------------------------------------------------------
 # what is loaded <-> project
 # ---------------------------------------------------------------------------------------------------------------
-def studio_sources(st, project_path=None, fingerprints=True):
-    """The files loaded in a Studio, as project sources (one per file)."""
+def source_state(st):
+    """What a Studio has loaded (one source per file) and what is switched on, as project data. No file is touched."""
     out = []
 
     def entry(key, kind, path, **extra):
-        if fingerprints:
-            return file_entry(key, kind, path, project_path, **extra)
         return dict(key=key, kind=kind, path=path, **extra)
     for p in st.tomo_files:
         out.append(entry("file:" + p, "tomogram", p))
@@ -128,7 +129,8 @@ def studio_sources(st, project_path=None, fingerprints=True):
             out.append(entry(s["key"], "labels", s["path"]))
         elif s["kind"] == "scores":
             out.append(entry(s["key"], "scores", s["path"], threshold=float(s.get("thr", st.default_thr))))
-    return out
+    return dict(sources=out, tomogram_source=st.tomo_source, tomogram_auto=bool(st._tomo_auto),
+                segmentation_enabled={s["key"]: bool(s["enabled"]) for s in st.seg_sources})
 
 
 def card_pictures(spec):
@@ -144,20 +146,30 @@ def card_pictures(spec):
     return list(dict.fromkeys(out))
 
 
-def make_project(st, spec, ui=None, project_path=None, fingerprints=True, extra=None):
-    """Project data for what a Studio has loaded plus the movie settings. `extra`: unknown keys read earlier, kept."""
-    data = dict(extra or {})
-    data.update(format=FORMAT, schema=SCHEMA, app_version=__version__,
+def make_project(state, spec, ui=None, extra=None):
+    """Project data for what is loaded (source_state) plus the movie settings, with plain entries (see with_file_facts).
+    `extra`: unknown keys read earlier, kept."""
+    data = dict(extra or {}); pictures = [dict(key="image:" + p, kind="image", path=p) for p in card_pictures(spec)]
+    data.update(state, format=FORMAT, schema=SCHEMA, app_version=__version__,
                 saved=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                sources=studio_sources(st, project_path, fingerprints) + [
-                    (file_entry if fingerprints else (lambda k, kind, p, pp: dict(key=k, kind=kind, path=p)))("image:" + p, "image", p, project_path)
-                    for p in card_pictures(spec)],
-                tomogram_source=st.tomo_source,
-                tomogram_auto=bool(st._tomo_auto),
-                segmentation_enabled={s["key"]: bool(s["enabled"]) for s in st.seg_sources},
-                spec=copy.deepcopy(spec), ui=dict(ui or {}))
-    data["spec"] = json.loads(json.dumps(data["spec"], default=float)) if data["spec"] is not None else None
+                sources=[dict(e) for e in state["sources"]] + pictures,
+                spec=json.loads(json.dumps(spec, default=float)), ui=dict(ui or {}))
     return data
+
+
+def with_file_facts(data, project_path=None, fingerprints=True):
+    """The same project data; each source also has what finds its file again and tells whether it is still the same
+    (fingerprints=False: size and time only, for autosaves)."""
+    return dict(data, sources=[file_entry(project_path=project_path, fingerprints=fingerprints, **e) for e in data["sources"]])
+
+
+def saved_state(data, resolved):
+    """The sources and what was switched on as a project file has them (skipped files too), for make_project. Files found
+    elsewhere are where they are now."""
+    m = path_mapping(resolved)
+    state = remap({k: data.get(k) for k in ("sources", "tomogram_source", "tomogram_auto", "segmentation_enabled")}, m)
+    state["sources"] = [dict(e, path=m.get(e["path"], e["path"])) for e in state["sources"] if e.get("kind") != "image"]
+    return state
 
 
 def core(data):
@@ -200,17 +212,21 @@ def locate(entry, project_path=None):
     found = next((c for c in cands if c and os.path.isfile(c)), None)
     if found is None and folder and entry.get("path"):
         found = _search(os.path.basename(entry["path"]), folder)
+        if found and not any(entry.get(k) for k in ("size", "mtime", "fingerprint")):
+            return found, "changed"  # only the name is the same: the user decides
     if found is None:
         return None, "missing"
     return found, check(entry, found)
 
 
 def check(entry, path):
-    """"ok" when the file at path is the one the project saw, else "changed"."""
+    """"ok" when the file at path is the one the project saw, else "changed". The time counts only without a fingerprint."""
     try:
         if entry.get("size") and os.path.getsize(path) != entry["size"]:
             return "changed"
-        if entry.get("fingerprint") and fingerprint(path) != entry["fingerprint"]:
+        if entry.get("fingerprint"):
+            return "ok" if fingerprint(path) == entry["fingerprint"] else "changed"
+        if entry.get("mtime") and abs(os.path.getmtime(path) - entry["mtime"]) > 0.01:
             return "changed"
     except OSError:
         return "changed"
@@ -223,9 +239,9 @@ def resolve_sources(data, project_path=None):
 
 
 def path_mapping(resolved):
-    """{old path: new path} for sources that were found somewhere else."""
-    return {r["entry"]["path"]: os.path.abspath(r["path"]) for r in resolved
-            if r.get("path") and r["entry"].get("path") and os.path.abspath(r["path"]) != r["entry"]["path"]}
+    """{old path: new path, as in Studio's source keys} for sources that were found somewhere else."""
+    return {r["entry"]["path"]: norm_path(r["path"]) for r in resolved
+            if r.get("path") and r["entry"].get("path") and norm_path(r["path"]) != r["entry"]["path"]}
 
 
 def remap(obj, mapping):
@@ -249,7 +265,13 @@ def remap(obj, mapping):
 
 def load_into(st, data, resolved, log=print):
     """Load the found sources of a project into an empty Studio and switch on what was switched on.
-    resolved: resolve_sources() after the user's choices; entries with path None are skipped. Returns st.info()."""
+    resolved: resolve_sources() after the user's choices; entries with path None are skipped. Returns st.info().
+    When a file can't be read, the Studio is left empty."""
+    with st._rollback():
+        return _load_into(st, data, resolved, log)
+
+
+def _load_into(st, data, resolved, log):
     mapping = path_mapping(resolved)
     use = [r for r in resolved if r.get("path") and r["entry"].get("kind") != "image"]
     paths = [st._norm(r["path"]) for r in use]  # the same spelling as Studio's source keys

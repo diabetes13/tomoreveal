@@ -3,7 +3,7 @@ Parts are always found by their id, never by their position in the list."""
 import copy
 
 from .common import UserError
-from .storyboard import build_plan, main_range, migrate_spec, new_id
+from .storyboard import build_plan, main_range, merge_settings, migrate_spec, new_id
 
 
 def _index(spec, part_id):
@@ -90,6 +90,12 @@ class History:
         if len(self.states) > self.limit:
             del self.states[0]
         self.pos = len(self.states) - 1
+
+    def merge(self, new):
+        """What is loaded has changed (new: default_spec() of it): every stored state knows the structures that came, as
+        the settings do, so each step can still be shown."""
+        for s in self.states:
+            merge_settings(s, copy.deepcopy(new))
 
     @property
     def can_undo(self):

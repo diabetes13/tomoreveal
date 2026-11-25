@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import traceback
+from types import SimpleNamespace
 
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
@@ -101,10 +102,12 @@ class RelinkDialog(QtW.QDialog):
 class ProjectManager(QtC.QObject):
     """Owns the project of a window: path, saved state, autosave. Hooked into Main by gui.build_gui."""
 
-    def __init__(self, win):
+    def __init__(self, win, files=()):
         super().__init__(win)
         self.win, self.path, self.saved_core, self.extra = win, None, None, {}
-        self.pending = None          # (data, resolved, dirty) while a project is being loaded
+        self.files = list(files)     # from the command line: loaded once the question about a crash is answered
+        self.pending = None          # data, resolved, dirty, autosave (restored from) while a project is being loaded
+        self.kept = None             # state, spec, info: the project as last shown, while a job runs or nothing can be shown
         self.closed = False          # after a clean exit nothing is autosaved any more
         self.autosave = pj.Autosave(f"{os.getpid()}_{id(self) % 100000}")
         self.last_autosave, self.autosaved_core = 0.0, None
@@ -146,11 +149,40 @@ class ProjectManager(QtC.QObject):
     # ---- state ----
     @property
     def loaded(self):
-        return self.win.spec is not None
+        return self.win.spec is not None or self.kept is not None
 
-    def data(self, fingerprints=False, project_path=None):
+    def data(self):
+        """The project as it is now. While a job changes what is loaded, and while nothing is shown: as last shown."""
+        w = self.win; k = self.kept if w.busy or w.spec is None else None
+        state = k.state if k is not None else pj.source_state(w.st)
+        return pj.make_project(state, w.spec if w.spec is not None else k.spec, self.ui_state(), self.extra)
+
+    def hold(self):
+        """A job is about to change what is loaded: keep the project as it is shown now."""
         w = self.win
-        return pj.make_project(w.st, w.spec, self.ui_state(), project_path or self.path, fingerprints, extra=self.extra)
+        if w.spec is not None:
+            self.kept = SimpleNamespace(state=pj.source_state(w.st), spec=w.spec, info=w.info)
+
+    def nothing_shown(self):
+        """Called by the window when nothing that is loaded can be shown. The movie stays until there is data again, if
+        there is work to lose; so does a project that was just opened."""
+        p = self.pending
+        if p is not None and self.kept is None:
+            self.kept = SimpleNamespace(state=pj.saved_state(p.data, p.resolved), spec=pj.project_spec(p.data, p.resolved), info=None)
+            self.saved_core = None if p.dirty else self.current_core()
+        elif p is None and not self.path and not self.dirty:
+            self.kept = self.saved_core = None
+        self.refresh()
+
+    def take_kept(self, info):
+        """(The kept movie, a note) now that data can be shown again; (None, "") when there is none to go on with."""
+        k, self.kept = self.kept, None
+        if k is None or self.win.spec is not None or self.pending is not None:
+            return None, ""
+        if k.info["dims"] == info["dims"] or set(k.spec["classes"]) & set(info["spec"]["classes"]) or not self.path:
+            return k, ""
+        name = os.path.basename(self.path); self.path = self.saved_core = None  # Save must not replace that project
+        return k, f"The new data has nothing in common with {name}. Your movie settings were kept; save them as a new project."
 
     def ui_state(self):
         w = self.win
@@ -180,28 +212,37 @@ class ProjectManager(QtC.QObject):
             if c != self.autosaved_core and not self.auto_timer.isActive():
                 self.auto_timer.start(int(1000 * max(3.0, 30.0 - (time.monotonic() - self.last_autosave))))
 
+    def forget(self):
+        """No project: what the window shows next is a new one."""
+        self.path, self.extra, self.saved_core, self.pending, self.kept = None, {}, None, None, None
+        self.refresh()
+
     def mark_saved(self):
+        if self.pending is not None:
+            self.pending.dirty = False
         self.saved_core = self.current_core(); self.refresh()
 
     # ---- autosave ----
     def autosave_now(self):
-        """Write the autosave (small JSON, on this thread). Skipped when nothing is loaded."""
+        """Write the autosave (small JSON, on this thread). Skipped when nothing is loaded. True when it was written."""
         self.auto_timer.stop()
         if not self.loaded or self.closed:
-            return
+            return False
         try:
-            d = self.data(fingerprints=False); d["unsaved"] = self.dirty
-            self.autosave.write(d, self.path)
+            d = self.data(); d["unsaved"] = self.dirty
+            self.autosave.write(pj.with_file_facts(d, self.path, fingerprints=False), self.path)
             self.last_autosave, self.autosaved_core = time.monotonic(), pj.core(d)
+            return True
         except Exception:
             traceback.print_exc()
+            return False
 
     def clean_exit(self):
         self.closed = True; self.auto_timer.stop(); self.timer.stop(); self.autosave.clear()
 
     def startup_checks(self):
-        """Offer to restore work after a crash, and mention movies that were interrupted."""
-        found = pj.orphaned_autosaves()
+        """Offer to restore work after a crash, mention movies that were interrupted, then load the files of the command line."""
+        found = pj.orphaned_autosaves(); choice = None
         if found:
             path, t = found[0]
             when = datetime.datetime.fromtimestamp(t).strftime("%H:%M" if time.time() - t < 20 * 3600 else "%d %B, %H:%M")
@@ -211,6 +252,8 @@ class ProjectManager(QtC.QObject):
             elif choice == "discard":
                 pj.discard_autosave(path)
         self.note_partial_movies()
+        if self.files and choice != "restore":
+            self.win.load(paths=self.files)
 
     def note_partial_movies(self):
         folder = self.win.folder_le.text().strip()
@@ -228,8 +271,7 @@ class ProjectManager(QtC.QObject):
             data = pj.read_project(path)
         except UserError as exc:
             self.win.say(str(exc), "err"); return
-        if self.open_data(data, data.get("autosave_of"), dirty=True):
-            pj.discard_autosave(path)
+        self.open_data(data, data.get("autosave_of"), dirty=True, autosave=path)
 
     # ---- asking (replaced in tests) ----
     def ask_save(self, what):
@@ -239,6 +281,14 @@ class ProjectManager(QtC.QObject):
         b_save = box.addButton("Save", QtW.QMessageBox.AcceptRole); b_dis = box.addButton("Don't save", QtW.QMessageBox.DestructiveRole)
         box.addButton("Cancel", QtW.QMessageBox.RejectRole); box.exec()
         return "save" if box.clickedButton() is b_save else "discard" if box.clickedButton() is b_dis else "cancel"
+
+    def ask_revert(self):
+        """True to go back to the saved version. Saving is not offered: it would overwrite what one goes back to."""
+        box = QtW.QMessageBox(self.win); box.setWindowTitle("TomoReveal"); box.setIcon(QtW.QMessageBox.Question)
+        box.setText("Go back to the saved version? Your changes since then are lost.")
+        b_back = box.addButton("Go back", QtW.QMessageBox.DestructiveRole); b_no = box.addButton("Cancel", QtW.QMessageBox.RejectRole)
+        box.setDefaultButton(b_no); box.setEscapeButton(b_no); box.exec()
+        return box.clickedButton() is b_back
 
     def ask_restore(self, when):
         box = QtW.QMessageBox(self.win); box.setWindowTitle("TomoReveal"); box.setIcon(QtW.QMessageBox.Question)
@@ -301,7 +351,7 @@ class ProjectManager(QtC.QObject):
     def save_to(self, path):
         path = os.path.abspath(path)
         try:
-            pj.write_atomic(path, self.data(fingerprints=True, project_path=path))
+            pj.write_atomic(path, pj.with_file_facts(self.data(), path))
         except OSError as exc:
             self.win.say(f"Could not save the project: {exc}", "err"); return False
         self.path = path; self.win.settings.setValue("project_dir", os.path.dirname(path)); self._add_recent(path)
@@ -309,7 +359,7 @@ class ProjectManager(QtC.QObject):
         return True
 
     def revert(self):
-        if self.path and (not self.dirty or self.ask_save("going back to the saved version") != "cancel"):
+        if self.path and not self.win.busy and self.win.gen is None and (not self.dirty or self.ask_revert()):
             self.open(self.path, ask=False)
 
     def open(self, path, ask=True):
@@ -325,7 +375,10 @@ class ProjectManager(QtC.QObject):
         self._add_recent(os.path.abspath(path))
         return self.open_data(data, os.path.abspath(path))
 
-    def open_data(self, data, path, dirty=False):
+    def open_data(self, data, path, dirty=False, autosave=None):
+        """Load a project's data. autosave: where it was restored from; that file goes only when ours has taken its place."""
+        if self.win.busy or self.win.gen is not None:
+            return False
         resolved = pj.resolve_sources(data, path)
         problems = [r for r in resolved if r["status"] != "ok"]
         if problems:
@@ -337,26 +390,24 @@ class ProjectManager(QtC.QObject):
         known = {"format", "schema", "app_version", "saved", "sources", "tomogram_source", "tomogram_auto", "segmentation_enabled",
                  "spec", "ui", "autosave_of", "unsaved"}
         w = self.win
-        w.stop_play(); w.st.reset(); w.info = w.spec = None; w.data.refresh(w.st.info()); w.show_empty()
-        self.path, self.extra = path, {k: v for k, v in data.items() if k not in known}
-        self.pending = (data, resolved, dirty)
-        skipped = [os.path.basename(r["entry"]["path"]) for r in resolved if not r.get("path")]
         if not any(r.get("path") for r in resolved if r["entry"].get("kind") != "image"):
-            self.pending = None; self.saved_core = None; self.refresh()
             w.say("None of the project's data files could be used." if resolved else "The project has no data files.", "err")
             return False
-        self._skipped = skipped
+        w.unload()
+        self.path, self.extra = path, {k: v for k, v in data.items() if k not in known}
+        self.pending = SimpleNamespace(data=data, resolved=resolved, dirty=dirty, autosave=autosave)
+        self._skipped = [os.path.basename(r["entry"]["path"]) for r in resolved if not r.get("path")]
         w.run_job(lambda log: pj.load_into(w.st, data, resolved, log), "Opening the project: reading the files ...")
         return True
 
-    def after_apply(self):
-        """Called by the window after new data was shown: put the project's settings in place."""
+    def after_apply(self, fresh):
+        """Called by the window after new data was shown: put the project's settings in place. fresh: a new movie started."""
         if self.pending is None:
-            if self.path is None and self.saved_core is None and self.loaded:
-                self.saved_core = self.current_core()  # data just loaded into a new project: nothing to save yet
+            if fresh:
+                self.saved_core = self.current_core()  # nothing to save yet
             self.refresh(); return
-        data, resolved, dirty = self.pending; self.pending = None
-        w = self.win; sp = pj.project_spec(data, resolved)
+        p, self.pending = self.pending, None; data = p.data
+        w = self.win; sp = pj.project_spec(data, p.resolved)
         if sp:
             from .storyboard import merge_settings
             w.spec = merge_settings(sp, w.info["spec"], same_grid=True)
@@ -375,13 +426,21 @@ class ProjectManager(QtC.QObject):
             w.req = {"frame": int(ui["playhead_frame"])}
         w.timeline.canvas.pending_view = ui.get("timeline") if isinstance(ui.get("timeline"), dict) else None
         w.schedule(0)
-        self.saved_core = None if dirty else self.current_core()
+        self.saved_core = None if p.dirty else self.current_core()
         self.refresh()
+        if p.autosave and self.autosave_now():
+            pj.discard_autosave(p.autosave)
         name = os.path.basename(self.path) if self.path else "the project"
-        msg = f"Opened {name}." if not dirty else "Your work was restored. Save it to keep it."
+        msg = f"Opened {name}." if not p.dirty else "Your work was restored. Save it to keep it."
         if self._skipped:
             msg += f" Left out: {', '.join(self._skipped)}."
         w.say(msg, "ok")
 
     def load_failed(self):
-        self.pending = None; self.refresh()
+        """Reading files failed. A project that was being opened is forgotten, so nothing is saved over it; returns the
+        start of the message that says so."""
+        if self.pending is None or self.kept is not None:
+            return ""
+        name = os.path.basename(self.path) if self.path else "The project"
+        self.forget()
+        return f"{name} could not be opened: "

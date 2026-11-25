@@ -306,16 +306,15 @@ class OverlayDrag(QtC.QObject):
         box = self.rects()[name][0]; item = self.item(name)
         if item is None:
             return False
-        if item.get("x") is None or item.get("y") is None:  # at its default place: give it an explicit position (nothing moves)
-            sz = self.image_size(); anchor, ax, ay = ov.anchor_for([box[0] * sz[0], box[1] * sz[1], box[2] * sz[0], box[3] * sz[1]], *sz)
-            self.update(name, x=ax, y=ay, anchor=anchor if mode == "move" else item.get("anchor") or anchor)
-            if mode == "resize":  # keep the anchor where it is, so the box grows away from it
-                v, hz = (item.get("anchor") or anchor).split("-")
-                self.update(name, x={"left": box[0], "center": (box[0] + box[2]) / 2, "right": box[2]}[hz],
-                            y={"top": box[1], "middle": (box[1] + box[3]) / 2, "bottom": box[3]}[v])
-        item = self.item(name); fld = self.size_field(item)
-        self.drag = dict(name=name, mode=mode, f0=f, box0=box, size0=float(item.get(fld, 1.0)), field=fld,
-                         anchor_pt=(float(item["x"]), float(item["y"])))
+        x, y, place = item.get("x"), item.get("y"), {}
+        if mode == "resize" and (x is None or y is None):  # at its default place: the first move gives it an explicit one
+            sz = self.image_size()
+            anchor = item.get("anchor") or ov.anchor_for([box[0] * sz[0], box[1] * sz[1], box[2] * sz[0], box[3] * sz[1]], *sz)[0]
+            v, hz = anchor.split("-")  # keep the anchor where it is, so the box grows away from it
+            x = {"left": box[0], "center": (box[0] + box[2]) / 2, "right": box[2]}[hz]
+            y = {"top": box[1], "middle": (box[1] + box[3]) / 2, "bottom": box[3]}[v]; place = dict(x=x, y=y, anchor=anchor)
+        fld = self.size_field(item)
+        self.drag = dict(name=name, mode=mode, f0=f, box0=box, size0=float(item.get(fld, 1.0)), field=fld, anchor_pt=(x, y), place=place)
         return True
 
     def move(self, f, mods):
@@ -368,7 +367,7 @@ class OverlayDrag(QtC.QObject):
             s = min(hi, max(lo, d["size0"] * d1 / d0))
             if mods & QtC.Qt.ShiftModifier:
                 s = round(s * (10 if d["field"] == "size" else 100)) / (10 if d["field"] == "size" else 100)
-            self.update(d["name"], **{d["field"]: s})
+            self.update(d["name"], **d["place"], **{d["field"]: s})
         w.req = {"frame": w.frame}; w.do_preview(quick=True); w.prev.update()
 
     def snap(self, x0, y0, bw, bh):

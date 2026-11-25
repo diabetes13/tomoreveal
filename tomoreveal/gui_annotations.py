@@ -195,7 +195,7 @@ def pick_colour(win, aid, key, title):
     a = an.find(win.spec, aid)
     if a is None:
         return
-    st = a.setdefault("style", {}); cur = st.get(key)
+    cur = (a.get("style") or {}).get(key)
     c = QtW.QColorDialog.getColor(QtG.QColor(cur if cur and cur != "auto" else "#3a6ea5"), win, title)
     if not c.isValid():
         return
@@ -242,11 +242,14 @@ def item_menu(win, aid, gpos, pointer=None):
         m.addAction("Remove this pointer", lambda: change(win, aid, lambda b: b["more"].pop(pointer) if pointer < len(b.get("more") or []) else None))
     if an.pointers(a):
         m.addAction("Remove the extra pointers", lambda: change(win, aid, lambda b: b.pop("more", None)))
-    st = a.setdefault("style", {})
+    st = a.get("style") or {}
+
+    def restyle(key, v):
+        change(win, aid, lambda b: b.setdefault("style", {}).__setitem__(key, v))
     if arrow:
         sh = m.addMenu("Shape")
         for t, v in an.SHAPES:
-            act = sh.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("shape", v))); act.setCheckable(True)
+            act = sh.addAction(t, lambda v=v: restyle("shape", v)); act.setCheckable(True)
             act.setChecked(st.get("shape", "arrow") == v)
         pl = m.addMenu("Keep it")
         for t, v in an.PLACES:
@@ -258,7 +261,7 @@ def item_menu(win, aid, gpos, pointer=None):
             if v == "fill":
                 act = bx.addAction("coloured box (choose a colour) ...", lambda: pick_colour(win, aid, "fill", "Colour of the box"))
             else:
-                act = bx.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("box", v)))
+                act = bx.addAction(t, lambda v=v: restyle("box", v))
             act.setCheckable(True); act.setChecked(st.get("box", "dark") == v)
         if a.get("pin"):
             m.addAction("Keep it on the picture (2D, stays put)", lambda: change(win, aid, lambda b: unpin(win, b)))
@@ -266,7 +269,7 @@ def item_menu(win, aid, gpos, pointer=None):
             m.addAction("Pin it to the spot next to it (3D, moves with the camera)", lambda: pin_text(win, aid))
     co = m.addMenu("Colour")
     for t, v in COLOURS:
-        act = co.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("color", v))); act.setCheckable(True)
+        act = co.addAction(t, lambda v=v: restyle("color", v)); act.setCheckable(True)
         act.setChecked(st.get("color", "auto") == v)
     other = co.addAction("other colour ...", lambda: pick_colour(win, aid, "color", "Colour")); other.setCheckable(True)
     other.setChecked(st.get("color", "auto") not in [v for _, v in COLOURS])
@@ -369,7 +372,7 @@ def edit_label(win, aid):
     win.label_editor = le
 
     def done():
-        b = an.find(win.spec, aid)
+        b = an.find(win.spec, aid) if win.spec else None
         if b is not None and le.isVisible():
             if b["kind"] == "arrow":
                 b.setdefault("label", {})["text"] = le.text()

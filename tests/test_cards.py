@@ -89,8 +89,8 @@ def test_project_keeps_card_pictures(studio, tmp_path):
     path = str(tmp_path / "logo.png"); Image.new("RGBA", (10, 10), (0, 0, 255, 255)).save(path)
     spec = tr.default_spec(studio.ds)
     card = sb.new_part("end_card"); card["blocks"].append(sb.image_block(path)); edits.insert_part(spec, card)
-    data = pj.make_project(studio, spec, project_path=str(tmp_path / "p.tomoreveal"))
-    p = str(tmp_path / "p.tomoreveal"); pj.write_atomic(p, data)
+    p = str(tmp_path / "p.tomoreveal")
+    pj.write_atomic(p, pj.with_file_facts(pj.make_project(pj.source_state(studio), spec), p))
     back = pj.read_project(p)
     assert back["spec"]["shots"][-1]["blocks"][-1]["path"] == path
     assert any(s["kind"] == "image" and s["path"] == path for s in back["sources"])

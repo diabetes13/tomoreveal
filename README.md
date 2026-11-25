@@ -122,7 +122,7 @@ The application writes a small made-up tomogram in a temporary folder and opens 
 
 ### 1. Load the files
 
-Drop the files on the window, or use the buttons in the **Data** tab. You can drop all files at the same time, and add more later: new files are added to what is loaded. **Start over** unloads everything.
+Drop the files on the window, or use the buttons in the **Data** tab. You can drop all files at the same time, and add more later: new files are added to what is loaded. **Start over** unloads everything and begins a new project (it asks first about changes that are not saved). **Remove** unloads one file; when nothing is left to show, your movie is kept and comes back with the next data.
 
 ![Empty window](docs/images/01-start.png)
 
@@ -423,9 +423,9 @@ Save the movies in a folder that is not your data folder.
 
 ## Save your work
 
-- **File > Save** (Ctrl+S) saves a project file (`.tomoreveal`). It records where your data files are, which tomogram and segmentations are switched on, and every setting of the movie. It does not copy the data. **File > Open project** (or dropping the project file on the window) brings everything back. The window title shows the project's name, with a * when there are unsaved changes; opening another project, starting over or quitting asks whether to save first.
+- **File > Save** (Ctrl+S) saves a project file (`.tomoreveal`). It records where your data files are, which tomogram and segmentations are switched on, and every setting of the movie. It does not copy the data. **File > Open project** (or dropping the project file on the window) brings everything back. The window title shows the project's name, with a * when there are unsaved changes; opening another project, starting over or quitting asks whether to save first. **File > Revert to saved** takes back every change since the last save.
 - If you move the data and the project together, the project still finds the files. If a file is missing or has changed, one dialog lists them: **Locate...**, **Skip**, or **Use it anyway**. Skipped files are left out; their structures and close-ups come back when you locate the file later.
-- **If TomoReveal crashes**: your tomograms, sessions and segmentation files are only ever read, so a crash cannot damage them. Your settings are autosaved a few seconds after each change and just before a movie starts; when you start TomoReveal again, it offers to **Restore** your work.
+- **If TomoReveal crashes**: your tomograms, sessions and segmentation files are only ever read, so a crash cannot damage them. Your settings are autosaved a few seconds after each change and just before a movie starts; when you start TomoReveal again, it offers to **Restore** your work. Restored work counts as not saved until you save it.
 - **If a movie is interrupted** (a crash, a power cut), start TomoReveal, restore or open your project, and press **Make movie** with the same name: it offers to **continue** the movie from where it stopped, as long as the settings are the same. A movie is renamed to its final name only when it is complete, so a half-written file never looks like a finished movie.
 - **Help > Show log folder** opens the folder with error logs, useful when reporting a problem.
 

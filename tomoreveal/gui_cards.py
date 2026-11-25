@@ -47,7 +47,7 @@ def card_rows(panel, pid, p, form):
             panel.set(pid, "blocks", q["blocks"], rebuild=rebuild)
 
     # background
-    bg = p.setdefault("background", dict(kind="color", color="#000000", color2="#1c1f26", image=None))
+    bg = p.get("background") or {}
     kind = QtW.QComboBox()
     for t, d in BACKGROUNDS:
         kind.addItem(t, d)
@@ -79,7 +79,7 @@ def card_rows(panel, pid, p, form):
     form.addRow("Background", _row(*widgets))
 
     # blocks
-    blocks = p.setdefault("blocks", [])
+    blocks = p.get("blocks") or []
     for i, b in enumerate(blocks):
         box = QtW.QFrame(); box.setFrameShape(QtW.QFrame.StyledPanel); v = QtW.QVBoxLayout(box); v.setContentsMargins(4, 2, 4, 2)
         head = QtW.QHBoxLayout(); v.addLayout(head)
@@ -141,13 +141,14 @@ def card_rows(panel, pid, p, form):
         q = part()
         if q is None:
             return
+        blocks = q.setdefault("blocks", [])
         if kind == "text":
-            q["blocks"].append(sb.text_block("Text", y=min(0.9, 0.3 + 0.12 * len(q["blocks"]))))
+            blocks.append(sb.text_block("Text", y=min(0.9, 0.3 + 0.12 * len(blocks))))
         else:
             f, _ = QtW.QFileDialog.getOpenFileName(win, "Picture (a logo, a microscope image ...)", os.path.expanduser("~"), PICTURES)
             if not f:
                 return
-            q["blocks"].append(sb.image_block(f))
+            blocks.append(sb.image_block(f))
         changed(True)
     add_text.clicked.connect(lambda: add_block("text")); add_pic.clicked.connect(lambda: add_block("image"))
     tip = QtW.QLabel("Drag blocks in the preview to move them, or their corner to resize them."); tip.setStyleSheet(DIM)

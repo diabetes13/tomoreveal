@@ -86,7 +86,7 @@ def build_gui(args):
             self.param_timer.timeout.connect(self.apply_params)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
             self._build(); self._menus(); self.editor = MovieEditor(self); self.show_empty()
-            self.project = ProjectManager(self)
+            self.project = ProjectManager(self, getattr(args, "files", None) or ())
             self._help_menu(); self.apply_help()
             QtC.QTimer.singleShot(500, self._test_real_shadows)
             # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
@@ -512,7 +512,9 @@ def build_gui(args):
                 self.tabs.setTabVisible(i, False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
             self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.voxel_row.setVisible(False)
-            self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
+            kept = hasattr(self, "project") and self.project.kept is not None
+            self.prev.clear_image("Your movie is kept. Add data, or File ▸ New to start over." if kept else
+                                  "Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
 
         def set_busy(self, flag, msg=None):
             """While files are read: the Data tab shows a progress line and the other tabs are disabled."""
@@ -543,7 +545,9 @@ def build_gui(args):
             """Run a Studio call that returns info() in the Worker thread; the renderer is made afterwards on this thread."""
             if self.busy or self.gen is not None:
                 return
-            self.set_busy(True, msg)
+            if self._thr_pending:  # now, while the structures still have these numbers
+                self.thr_timer.stop(); self.apply_thresholds()
+            self.editor.record_pending(); self.project.hold(); self.set_busy(True, msg)
             self.worker = Worker(fn)
             self.worker.log.connect(lambda m: (self.say(m), self.data.log(m)))
             self.worker.done.connect(self._loaded); self.worker.failed.connect(self._load_failed)
@@ -639,7 +643,7 @@ def build_gui(args):
             self.set_busy(False); self.apply_info(info)
 
         def _load_failed(self, msg):
-            self.set_busy(False); self.project.load_failed()
+            self.set_busy(False); msg = self.project.load_failed() + msg
             try:
                 self.st.ensure_renderer()
                 self.apply_info(self.st.info(), keep_message=True)
@@ -647,23 +651,40 @@ def build_gui(args):
                 traceback.print_exc()
             self.say(msg, "err")
 
-        def start_over(self, ask=True):
+        def start_over(self):
             """Unload everything: a new, empty project (File > New)."""
             if self.busy or self.gen is not None:
                 return
-            if ask and not self.project.confirm_discard("starting over"):
+            if not self.project.confirm_discard("starting over"):
                 return
-            self.st.reset(); self.info = self.spec = None; self.data.refresh(self.st.info()); self.show_empty(); self.say("")
-            pm = self.project; pm.path, pm.extra, pm.saved_core = None, {}, None; pm.autosave.remove(); pm.refresh()
+            self.unload(); self.project.autosave.remove(); self.say("")
+
+        def unload(self):
+            """Leave the current work (whoever calls this has asked): end everything that would go on using its settings
+            or its renderer, then empty the window."""
+            self.stop_play(); self.end_picks(); self.pick_btn.setChecked(False); self.editor.pending_after = None
+            self.point_panel.close_panel()
+            le, self.label_editor = self.label_editor, None
+            if le is not None:
+                le.hide(); le.deleteLater()
+            for t in (self.thr_timer, self.param_timer, self.prev_timer, self.editor.hist_timer, self.nav.anim):
+                t.stop()
+            self._thr_pending = {}; self._param_pending = {}; self.nav._anim = None
+            self.st.reset(); self.info = self.spec = None
+            self.editor.reset_history(); self.data.refresh(self.st.info()); self.project.forget(); self.show_empty()
 
         def apply_info(self, info, keep_message=False):
             prev = self.info
-            same = bool(prev and prev.get("can_show") and info.get("can_show") and self.spec)
             self.info = info; self.data.refresh(info)
             if not info.get("can_show"):
                 if not keep_message:
                     self.say(info.get("message", ""))
-                self.spec = None; self.show_empty(); self.project.load_failed(); return
+                self._thr_pending = {}; self.thr_timer.stop()  # for structures that are not there now
+                self.spec = None; self.project.nothing_shown(); self.show_empty(); return
+            kept, note = self.project.take_kept(info)
+            if kept is not None:
+                self.spec, prev = kept.spec, kept.info
+            same = bool(prev and prev.get("can_show") and self.spec)
             if not same:
                 self.spec = info["spec"]; self.req = self._main_req()
                 if self.project.pending is None:  # a new project (not one being opened): the Soft look (3.5, the user's choice)
@@ -674,7 +695,6 @@ def build_gui(args):
                             part["motion"] = "none"
             else:  # keep the user's settings of every structure that is still there
                 merge_settings(self.spec, info["spec"], same_grid=prev.get("dims") == info.get("dims"))
-            self.editor.reset_history()  # loading other data starts a new history
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
@@ -683,10 +703,14 @@ def build_gui(args):
             self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
             self.build_controls()
             if not keep_message:
-                self.say("Loaded. Change anything on the left; the preview follows.", "ok")
+                self.say(note or "Loaded. Change anything on the left; the preview follows.", "ok")
             self._refind_objects()
+            if same and prev.get("dims") == info.get("dims") and prev.get("flip") == info.get("flip"):
+                self.editor.history.merge(info["spec"]); self.editor.refresh_buttons()
+            else:  # older steps belong to another movie, another grid, or name objects whose numbers have changed
+                self.editor.reset_history()
             self.schedule(0)
-            self.project.after_apply()
+            self.project.after_apply(fresh=not same)
             self.data.refresh(self.info); self.apply_help()  # names the user gave the files, from the settings
 
         # ---------- controls ----------
@@ -857,7 +881,7 @@ def build_gui(args):
             has_t, has_s = self.info.get("has_tomogram"), self.info.get("has_segmentation")
             pass  # (3.5: the help text is the group's tooltip)
             self.parts_panel.sync()
-            tst = sp["style"].setdefault("tomogram", dict(show=True, opacity=1.0))
+            tst = sp["style"].get("tomogram") or {}
             self._setv(self.tshow_cb, tst.get("show", True)); self._setv(self.topac_s, 100 * float(tst.get("opacity", 1.0)))
             self.tslice_group.setEnabled(bool(has_t)); self.tslice_group.setToolTip("" if has_t else "needs a tomogram")
             self._sweep_hint()
@@ -897,7 +921,10 @@ def build_gui(args):
 
         def _tomo_row(self, sh, index=None):
             """'Tomogram: as default / shown / faded / hidden' for one shot, with the faded opacity and the fade time."""
-            t = shot_tomogram(sh); sh["tomogram"] = t; sh.pop("slice", None)
+            t = shot_tomogram(sh)
+
+            def put(**kw):
+                sh["tomogram"] = dict(shot_tomogram(sh), **kw); sh.pop("slice", None); self.schedule()
             w = QtW.QWidget(); row = QtW.QHBoxLayout(w); row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(QtW.QLabel("Tomogram"))
             cb = QtW.QComboBox()
@@ -910,17 +937,17 @@ def build_gui(args):
             fade.setValue(float(t["fade"])); fade.setToolTip("How long the change takes at the start of this shot")
 
             def mode_changed(j):
-                t["mode"] = cb.itemData(j); op.setVisible(t["mode"] == "faded"); self._sweep_hint(); self.schedule()
+                put(mode=cb.itemData(j)); op.setVisible(cb.itemData(j) == "faded"); self._sweep_hint()
             cb.activated.connect(mode_changed)
-            op.valueChanged.connect(lambda v: (t.__setitem__("opacity", v / 100), self.schedule()))
-            fade.valueChanged.connect(lambda v: (t.__setitem__("fade", float(v)), self.schedule()))
+            op.valueChanged.connect(lambda v: put(opacity=v / 100))
+            fade.valueChanged.connect(lambda v: put(fade=float(v)))
             whole = QtW.QCheckBox("whole part"); whole.setChecked(bool(t.get("whole")))
             whole.setToolTip("Change the tomogram slowly over the whole part instead of in the first seconds. Good for a slide that "
                              "reveals the segmentation while the tomogram fades away.")
             fade.setEnabled(not whole.isChecked())
 
             def whole_changed(on):
-                t["whole"] = bool(on); fade.setEnabled(not on); self.schedule()
+                put(whole=bool(on)); fade.setEnabled(not on)
             whole.toggled.connect(whole_changed)
             row.addWidget(cb); row.addWidget(op); row.addWidget(fade); row.addWidget(whole); row.addStretch(1)
             has_t = bool(self.info and self.info.get("has_tomogram"))
@@ -998,6 +1025,8 @@ def build_gui(args):
             if self.busy or self.gen is not None:
                 self.thr_timer.start(); return
             pend, self._thr_pending = self._thr_pending, {}
+            if self.spec is None:
+                return
             reset = 0  # close-ups of single objects set back to the whole structure
             QtW.QApplication.setOverrideCursor(QtC.Qt.WaitCursor)
             try:
@@ -1598,9 +1627,10 @@ def build_gui(args):
                 r = QtW.QMessageBox.question(self, "TomoReveal", "A movie is still being made. Stop it and quit?")
                 if r != QtW.QMessageBox.Yes:
                     e.ignore(); return
-                self.cancel_render()
-            elif not self.project.confirm_discard("closing TomoReveal"):
+            if not self.project.confirm_discard("closing TomoReveal"):
                 e.ignore(); return
+            if self.gen is not None:  # it went on while the questions were open, so it may have ended
+                self.cancel_render()
             self.playing = None; self.play_timer.stop(); self.prev_timer.stop(); self.thr_timer.stop()  # nothing draws after this
             if getattr(self, "_hang_watch", None) is not None:  # closing may wait for a load: not a freeze
                 import faulthandler
@@ -1640,8 +1670,6 @@ def build_gui(args):
         except Exception:
             pass
     sys.excepthook = excepthook
-    if getattr(args, "files", None):
-        QtC.QTimer.singleShot(300, lambda: win.load(paths=args.files))
     return app, win
 
 

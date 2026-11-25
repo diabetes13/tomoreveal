@@ -46,15 +46,49 @@ class Framer:
 
     def fit(self, lo, hi, tilt, az, margin=1.07):
         """Pose that just frames the box lo..hi."""
+        p, up = self.axes(tilt, az)
+        c, dist, scale = self.fit_dir(lo, hi, p, up, margin)
+        return dict(c=c, tilt=float(tilt), az=float(az), dist=dist, scale=scale)
+
+    def fit_dir(self, lo, hi, p, up, margin=1.07):
+        """(centre, distance, scale) that just frame the box lo..hi seen along p (centre -> camera) with this up."""
         lo, hi = np.asarray(lo, float), np.asarray(hi, float)
         hi = np.maximum(hi, lo + 1.0); c = (lo + hi) / 2  # at least one voxel wide: a zero-size box has no distance
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]) - c
         th = math.tan(math.radians(self.fov) / 2)
-        p, up = self.axes(tilt, az); right = np.cross(up, p)
+        right = np.cross(up, p)
         xc, yc, zc = np.abs(corners @ right), np.abs(corners @ up), corners @ p
         dist = float(np.max(zc + np.maximum(yc / th, xc / (th * self.aspect)))) * margin
         scale = float(np.max(np.maximum(yc, xc / self.aspect))) * margin
-        return dict(c=c, tilt=float(tilt), az=float(az), dist=dist, scale=scale)
+        return c, dist, scale
+
+
+SPIN_AXES = (("around Z (up and down through the slices)", "z"), ("around X", "x"), ("around Y", "y"))
+
+
+def _turn(axis, deg):
+    """Rotation matrix of deg degrees around the x, y or z axis of the volume."""
+    a = math.radians(deg); c, s = math.cos(a), math.sin(a)
+    return {"x": np.array([[1, 0, 0], [0, c, -s], [0, s, c]]), "y": np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
+            "z": np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+
+
+def axis_turn_poses(fr, p0, axis, angles, lo, hi):
+    """Camera poses turned around the volume's x or y axis (through the rotation centre of p0) by each angle. The
+    distance is the one that frames lo..hi at every angle reached, so nothing leaves the picture on the way round."""
+    from .paths import _pose
+    d0, up0 = fr.axes(p0["tilt"], p0["az"]); c = np.asarray(p0["c"], float)
+    zoom = p0["dist"] / max(1e-9, fr.fit(lo, hi, p0["tilt"], p0["az"], 1.07)["dist"])  # the view's own zoom (and pan)
+    samples = np.linspace(min(angles), max(angles), 25) if len(angles) else [0.0]
+    D = max(fr.fit_dir(lo, hi, _turn(axis, a) @ d0, _turn(axis, a) @ up0)[1] for a in samples) * zoom
+    out = []
+    for a in angles:
+        R = _turn(axis, a); pos = c + D * (R @ d0)
+        q = _pose(fr, pos, c, R @ up0)
+        if fr.ortho:
+            q["scale"] = p0["scale"] * D / p0["dist"]
+        out.append(q)
+    return out
 
 
 def view_pan(view):
@@ -115,6 +149,65 @@ def part_region(part):
         return None
     lo, hi = np.asarray(r["lo"], float), np.asarray(r["hi"], float)
     return np.minimum(lo, hi), np.maximum(np.maximum(lo, hi), np.minimum(lo, hi) + 1.0)
+
+
+def flip_spec(spec, shape, axes):
+    """Points, boxes and slice numbers of the settings moved along when the volume is flipped in `axes` (3.5): arrows,
+    drawn frames, camera path points, view offsets, the clip box and slice numbers then still mean the same things.
+    (Objects in focus are found again by the window, which can look at the new surfaces.)"""
+    nz, ny, nx = shape; n = {"x": nx, "y": ny, "z": nz}; idx = {"x": 0, "y": 1, "z": 2}
+    axes = [a for a in "xyz" if a in axes]
+    if not axes:
+        return spec
+
+    def pt(p):
+        if p is None:
+            return p
+        q = [float(v) for v in p]
+        for a in axes:
+            q[idx[a]] = n[a] - 1 - q[idx[a]]
+        return q
+
+    def offset(p):
+        if p is None:
+            return p
+        q = [float(v) for v in p]
+        for a in axes:
+            q[idx[a]] = -q[idx[a]]
+        return q
+
+    def span(ab, a):
+        lo, hi = int(ab[0]), int(ab[1])
+        return [n[a] - 1 - hi, n[a] - 1 - lo]
+    for a in spec.get("annotations") or []:
+        for anc in [a.get("anchor"), a.get("pin")] + list(a.get("more") or []):
+            if isinstance(anc, dict) and anc.get("xyz") is not None:
+                anc["xyz"] = pt(anc["xyz"])
+    for v in [spec.get("view")] + [p.get("view") for p in spec.get("shots", [])]:
+        if isinstance(v, dict) and v.get("pan") is not None:
+            v["pan"] = offset(v["pan"])
+    for p in spec.get("shots", []):
+        r = p.get("region")
+        if isinstance(r, dict) and r.get("lo") is not None and r.get("hi") is not None:
+            lo, hi = pt(r["lo"]), pt(r["hi"])
+            r["lo"], r["hi"] = [min(u, w) for u, w in zip(lo, hi)], [max(u, w) for u, w in zip(lo, hi)]
+        for w in p.get("waypoints") or []:
+            for key in ("point", "pos", "focal"):
+                if isinstance(w, dict) and w.get(key) is not None:
+                    w[key] = pt(w[key])
+        if p.get("type") == "slide" and "z" in axes:
+            for key in ("from", "to"):
+                v = p.get(key)
+                if isinstance(v, int) and not isinstance(v, bool):  # a chosen slice stays the same slice ("first" and
+                    p[key] = nz - 1 - v                                 # "last" stay the bottom and the top)
+    c = spec.get("clip")
+    if isinstance(c, dict):
+        for a in axes:
+            if c.get(a):
+                c[a] = span(c[a], a)
+    if "z" in axes and spec.get("z_range"):
+        spec["z_range"] = span(spec["z_range"], "z")
+    return spec
 
 
 def focus_box(part, ds, pad=True):
@@ -667,7 +760,8 @@ def build_plan(spec, ds):
             slide = (lambda u, a=a, b=b: dict(k=a + int(round(u * (b - a)))))
             pb = _pause_frames(fps, part.get("pause_before"))
             slide_w = with_end_ease(slide, part)
-            skip = go_to(ov(), a, t, slice_to=(target_of(part) if back else None), tr=tr,
+            vw = part.get("view") or None  # a view of its own (3.5): for example one slice from the top, zoomed in
+            skip = go_to(ov(0.0, vw), a, t, slice_to=(target_of(part) if back else None), tr=tr,
                          nxt=None if pb else (lambda j, f=slide_w, n=n: f(j / (n - 1) if n > 1 else 1.0)), nn=n)
             if back:
                 start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
@@ -692,16 +786,25 @@ def build_plan(spec, ds):
             t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
             back = st["e"] > 0
             m, ang = part.get("motion", "rock"), float(part.get("angle", 25))
-            main = (lambda u, m=m, ang=ang, vw=vw: dict(pose=ov(ang * math.sin(2 * math.pi * u) if m == "rock" else 360.0 * u if m == "spin" else 0.0, vw)))
+            turn = (lambda u, m=m, ang=ang: ang * math.sin(2 * math.pi * u) if m == "rock" else 360.0 * u if m == "spin" else 0.0)
+            axis = part.get("spin_axis", "z") if m in ("rock", "spin") else "z"
+            if axis in ("x", "y"):  # turning around another axis of the volume (3.5): poses worked out once, in steps of 1/n
+                uu = [i / (n - 1) if n > 1 else 1.0 for i in range(n)]
+                tp = axis_turn_poses(fr, ov(0.0, vw), axis, [turn(u) for u in uu], lo, hi)
+                main = (lambda u, tp=tp, n=n: dict(pose=tp[int(round(min(1.0, max(0.0, u)) * (n - 1)))]))
+                start_pose = tp[0]
+            else:
+                main = (lambda u, turn=turn, vw=vw: dict(pose=ov(turn(u), vw)))
+                start_pose = ov(0.0, vw)
             ep = part if m == "spin" else None  # "slow down at the end" suits a spin, not a rock (it already ends at rest)
             main_w = with_end_ease(main, ep)
-            skip = go_to(ov(0.0, vw), st["k"], t, slice_to=ramp["s1"] if back else None, tr=tr,
+            skip = go_to(start_pose, st["k"], t, slice_to=ramp["s1"] if back else None, tr=tr,
                          nxt=lambda j, f=main_w, n=n: f(j / (n - 1) if n > 1 else 1.0), nn=n)
             if back:
                 start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
             st["caption"] = part.get("caption", "")
             emit_main(n, main, _mark_label(part), skip, ep)
-            pose[0] = ov(0.0, vw)
+            pose[0] = start_pose
         elif typ == "focus":
             tgt = part.get("target") or {}
             try:
@@ -715,12 +818,13 @@ def build_plan(spec, ds):
             start_fade(part)
             need_structures()
             ft, fz = float(part.get("tilt", max(tilt, 50))), max(0.05, float(part.get("zoom", 1)))
+            faz = float(part["view"]["az"]) if isinstance(part.get("view"), dict) and part["view"].get("az") is not None else az
 
             m, ang = part.get("motion", "orbit"), float(part.get("angle", 30))
-            steady = steady_framing(part, fr, blo, bhi, ft, az, m, ang) if part.get("steady_zoom") else None
+            steady = steady_framing(part, fr, blo, bhi, ft, faz, m, ang) if part.get("steady_zoom") else None
 
-            def fp(d=0.0, blo=blo, bhi=bhi, ft=ft, fz=fz, steady=steady):
-                p = fr.fit(blo, bhi, ft, az + d, 1.0)
+            def fp(d=0.0, blo=blo, bhi=bhi, ft=ft, fz=fz, steady=steady, faz=faz):
+                p = fr.fit(blo, bhi, ft, faz + d, 1.0)
                 if steady is not None:  # the same distance at every angle: the object does not grow and shrink (3.5)
                     p["dist"], p["scale"] = steady
                 return zoomed(p, fz)
@@ -769,6 +873,10 @@ def build_plan(spec, ds):
             pose[0] = fp()
         elif typ == "hold":
             start_fade(part)
+            vw = part.get("view") or None
+            if vw:  # a view of its own (3.5): the camera flies there first
+                t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
+                go_to(ov(0.0, vw), st["k"], t, tr=tr)
             st["caption"] = part.get("caption", "")
             emit(n, lambda u: {}, "main", _mark_label(part))
         elif typ == "path":
@@ -907,8 +1015,10 @@ PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored b
     "shadow": (("as in the Look tab", None), ("none", "none"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
     "outline": (("as in the Look tab", None), ("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick")),
     "depth_fade": (("as in the Look tab", None), ("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
-    "membranes": (("as in the Look tab", None), ("their own colour", "own"), ("see-through (glass)", "glass"), ("solid cream", "cream")),
+    "membranes": (("as in the Look tab", None), ("their own colour", "own"), ("see-through (glass)", "glass"), ("solid colour", "cream")),
     "tomo_shadow": (("as in the Look tab", None), ("on", True), ("off", False)),
+    # smoother membrane surfaces in this part (structures ticked "Treat as membrane"); the levels of volumes.SOFTEN
+    "soften": (("as in the Structures tab", None), ("off", 0), ("a little", 1), ("more", 2), ("much", 3)),
 }
 LOOK_BLEND = 0.6
 

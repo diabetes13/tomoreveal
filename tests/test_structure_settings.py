@@ -92,7 +92,7 @@ def test_settings_are_saved_in_the_project(demo, tmp_path):
             pytest.skip("3D rendering is not available here")
         key = win.st.ds.key_of(4)
         win.spec["classes"][key].update(opacity=0.5, min_object_voxels=50, smoothing=5); win.spec["style"]["structures_opacity"] = 0.8
-        win.apply_params()
+        win.apply_params(); surfaces_made(app, win)
         k = win.st.ds.id_of(key)
         assert win.st.ds.param(k, "min_object_voxels") == 50 and win.st.ds.param(k, "smoothing") == 5
         path = str(tmp_path / "p.tomoreveal"); assert win.project.save_to(path); win.close()
@@ -102,11 +102,28 @@ def test_settings_are_saved_in_the_project(demo, tmp_path):
         assert win.spec["classes"][key]["opacity"] == 0.5 and win.spec["style"]["structures_opacity"] == 0.8
         assert win.st.ds.param(k, "min_object_voxels") == 50 and win.st.ds.param(k, "smoothing") == 5
         win.editor.history.push(win.spec)
-        win.spec["classes"][key]["min_object_voxels"] = 0; win.apply_params(); win.editor.record()
+        win.spec["classes"][key]["min_object_voxels"] = 0; win.apply_params(); surfaces_made(app, win); win.editor.record()
         assert win.st.ds.param(k, "min_object_voxels") == 0
-        win.editor.undo()  # undo rebuilds the surface as it was
+        win.editor.undo(); surfaces_made(app, win)  # undo rebuilds the surface as it was
         assert win.st.ds.param(k, "min_object_voxels") == 50
         win.close()
         assert not errs, errs
     finally:
         sys.excepthook = old
+
+
+def surfaces_made(app, win):
+    """New surfaces are made in a worker thread: wait for it, then for the swap."""
+    from PySide6 import QtCore
+    for _ in range(3):
+        for _ in range(20):
+            app.processEvents()
+        if win.param_timer.isActive():
+            win.param_timer.stop(); win.apply_params()
+        wk = win._surf_worker
+        if wk is not None and wk.isRunning():
+            loop = QtCore.QEventLoop(); wk.finished.connect(loop.quit)
+            if wk.isRunning():
+                loop.exec()
+        for _ in range(20):
+            app.processEvents()

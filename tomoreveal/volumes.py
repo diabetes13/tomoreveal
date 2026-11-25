@@ -114,6 +114,27 @@ SOFTEN_SIGMA = {1: 0.7, 2: 1.0, 3: 1.4}  # voxels; with 1.4 a membrane 2 voxels 
 SOFTEN_STEPS = {1: 30, 2: 60, 3: 120}    # extra smoothing steps (they do not shrink the surface)
 
 
+def _keep_thin(m, g):
+    """The blurred mask g, with the parts the blur would lose put back: thin sheets, thin rods and small objects. Voxels
+    of the mask that end up more than one voxel away from what the blur keeps are lost parts (a bump on a surface is
+    within one voxel of it, so bumps still go). Those parts get a much lighter blur instead, joined to what was kept."""
+    from scipy import ndimage
+    kept = g > 0.5
+    lost = m & ~kept
+    if not lost.any():
+        return g
+    near = ndimage.binary_dilation(kept, structure=np.ones((3, 3, 3), bool))
+    far = lost & ~near
+    if not far.any():
+        return g
+    back = ndimage.binary_dilation(far, structure=np.ones((3, 3, 3), bool), iterations=2, mask=lost)  # up to the kept part
+    light = ndimage.gaussian_filter(back.astype(np.float32), 0.5) * KEEP_GAIN
+    return np.maximum(g, light)
+
+
+KEEP_GAIN = 1.8  # a single voxel blurred by 0.5 peaks at 0.32: x 1.8 keeps it above the surface level (0.5)
+
+
 def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None):
     """Smoothed isosurface of a boolean (z,y,x) array, returned in (x,y,z) voxel coordinates.
     soften (1..3): the mask is blurred a little before the surface is made, which takes away the bumps and ridges a
@@ -131,7 +152,7 @@ def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None):
         # at the grid's edge the structure goes on (copied outwards) while it is blurred; elsewhere there is nothing
         sub = np.pad(mask.astype(np.float32), [(pad if lo else 0, pad if hi else 0) for lo, hi in at_edge], mode="edge")
         sub = np.pad(sub, [(0 if lo else pad, 0 if hi else pad) for lo, hi in at_edge])
-        sub = ndimage.gaussian_filter(sub, sig)
+        sub = _keep_thin(sub > 0.5, ndimage.gaussian_filter(sub, sig))
         sub[[0, -1], :, :] = 0; sub[:, [0, -1], :] = 0; sub[:, :, [0, -1]] = 0  # closed surfaces
     try:
         v, f, _, _ = marching_cubes(sub, 0.5, step_size=step)
@@ -160,7 +181,9 @@ class Dataset:
         self.tomo_name = self.seg_name = ""
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
         self._labels = {}      # structure id -> (label array of its source, label value)
-        self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing) -> surface, kept while sources change
+        self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing, soften) -> surface, kept while sources change
+        import threading
+        self._mesh_lock = threading.Lock()  # surfaces are also made in a worker thread of the window
         self.smooth, self.step = smooth, step
         self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations, "soften": 0..3} (the user's choices)
         self.path_cache = {}   # camera paths along structures (paths.centre_line), computed once per change
@@ -259,9 +282,40 @@ class Dataset:
             return int(self.smooth if v is None else v)
         return int(v or 0)
 
-    def _cache_key(self, k):
-        c = self.classes[k]
-        return (c["key"], c.get("threshold"), self.param(k, "min_object_voxels"), self.param(k, "smoothing"), self.param(k, "soften"))
+    def _cache_key(self, k, soften=None, params=None):
+        """The settings a surface is made with. soften: another level than the structure's own (a part's own, 3.5);
+        params: {"min_object_voxels", "smoothing", "soften"} wanted instead of the current ones."""
+        c = self.classes[k]; p = params or {}
+        mov = int(p["min_object_voxels"]) if "min_object_voxels" in p else self.param(k, "min_object_voxels")
+        sm = int(p["smoothing"]) if "smoothing" in p else self.param(k, "smoothing")
+        so = int(soften) if soften is not None else int(p["soften"]) if "soften" in p else self.param(k, "soften")
+        return (c["key"], c.get("threshold"), mov, sm, so)
+
+    MESH_CACHE = 48  # surfaces kept for settings not shown now (going back to one is then instant)
+
+    def make_surface(self, k, soften=None, params=None):
+        """The surface of structure k with its settings (or this soften level, or these settings), from the cache or
+        made now. Does not change which surface is shown, so it may run in a worker thread while the window draws."""
+        ck = self._cache_key(k, soften, params)
+        with self._mesh_lock:
+            if ck in self._mesh_cache:
+                m = self._mesh_cache[ck] = self._mesh_cache.pop(ck)  # recently used
+                return m
+        sl = self.bbox.get(k)
+        if sl is None:
+            return None
+        mask = self.kept_mask(k, sl, ck[2])
+        m = surface(mask, [s.start for s in sl], ck[3], self.step, ck[4], self.shape) if mask.any() else None
+        with self._mesh_lock:
+            self._mesh_cache[ck] = m
+            if len(self._mesh_cache) > self.MESH_CACHE:
+                shown = {id(x) for x in list(self.meshes.values())}
+                for old in [c for c, v in self._mesh_cache.items() if id(v) not in shown][:len(self._mesh_cache) - self.MESH_CACHE]:
+                    del self._mesh_cache[old]
+        return m
+
+    def surface_ready(self, k, soften=None, params=None):
+        return self._cache_key(k, soften, params) in self._mesh_cache
 
     def set_params(self, k, **kw):
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
@@ -274,13 +328,15 @@ class Dataset:
         cached = self._mesh_cache.get(self._cache_key(k))
         if cached is not None:
             self.meshes[k] = cached
+        elif self._cache_key(k) in self._mesh_cache:
+            pass  # nothing left with these settings
         elif had or not self.classes[k]["background"]:
             self._mesh(k, force=True)
         return True
 
-    def kept_mask(self, k, sl):
-        """The structure's voxels in sl, without connected objects smaller than its minimum object size."""
-        m = self.mask(k, sl); n = self.param(k, "min_object_voxels")
+    def kept_mask(self, k, sl, n=None):
+        """The structure's voxels in sl, without connected objects smaller than its minimum object size (or n)."""
+        m = self.mask(k, sl); n = self.param(k, "min_object_voxels") if n is None else int(n)
         if n > 1 and m.any():
             from scipy import ndimage
             lbl, cnt = ndimage.label(m, structure=np.ones((3, 3, 3), bool))
@@ -306,11 +362,9 @@ class Dataset:
         sl = self.bbox.get(k)
         if sl is None or (self.classes[k]["background"] and not force):
             return
-        mask = self.kept_mask(k, sl)
-        m = surface(mask, [s.start for s in sl], self.param(k, "smoothing"), self.step, self.param(k, "soften"),
-                                    self.shape) if mask.any() else None
+        m = self.make_surface(k)
         if m is not None:
-            self.meshes[k] = m; self._mesh_cache[self._cache_key(k)] = m
+            self.meshes[k] = m
 
     def build_meshes(self, log=print):
         for k in self.classes:
@@ -359,9 +413,10 @@ class Dataset:
             raise KeyError(cid)
         return tuple(slice(o.start + b.start, o.stop + b.start) for o, b in zip(objs[cid - 1], self.bbox[k]))
 
-    def comp_mesh(self, k, cid):
+    def comp_mesh(self, k, cid, soften=None):
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
-        return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1, self.param(k, "soften"), self.shape)
+        return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1,
+                       self.param(k, "soften") if soften is None else int(soften), self.shape)
 
     def targets_box(self, tgt, pad=True):
         """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""

@@ -55,8 +55,31 @@ class AnnotationMouse:
         if aid not in self.selected:
             self.selected = [aid]
         kind = "tip" if name.startswith("anntip:") else "tail" if name.startswith("anntail:") and a["kind"] == "arrow" else "move"
-        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False, more=j,
+        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False, more=j, tip0=self.tip_at(a),
                          start={x: (dict(an.find(w.spec, x).get("pos") or {}) if an.find(w.spec, x) else {}) for x in self.selected})
+        return True
+
+    def tip_at(self, a):
+        """Where an arrow's tip is on the picture now (fractions), or None."""
+        if a.get("kind") != "arrow":
+            return None
+        if an.is_2d(a):
+            return tuple(float(v) for v in a["tip2d"])
+        ren = self.win.st.ren
+        if ren is None or not (a.get("anchor") or {}).get("xyz"):
+            return None
+        (tx, ty), front = ren.project(a["anchor"]["xyz"])
+        return (tx, ty) if front else None
+
+    def put_tip(self, a, f):
+        """Move an arrow's tip to f: on the picture (2D), or onto the 3D spot under f (3D; nothing there: unchanged)."""
+        w = self.win
+        if an.is_2d(a):
+            a["tip2d"] = [round(min(1.0, max(0.0, f[0])), 4), round(min(1.0, max(0.0, f[1])), 4)]; return True
+        anc = pick_anchor(w, f)
+        if anc is None:
+            return False
+        a["anchor"] = anc
         return True
 
     def move(self, od, f, mods):
@@ -67,25 +90,28 @@ class AnnotationMouse:
         if a is None:
             return
         d["moved"] = True; ren = w.st.ren
-        if d["kind"] == "tail":  # angle and length of the tail, on screen
-            (tx, ty), _ = ren.project(a["anchor"]["xyz"]); W, H = ren.size
+        if a["kind"] == "arrow" and d["kind"] == "move":  # the whole arrow: its tip goes along with the mouse
+            if d["tip0"] is not None:
+                self.put_tip(a, (d["tip0"][0] + f[0] - d["f0"][0], d["tip0"][1] + f[1] - d["f0"][1]))
+        elif d["kind"] == "tail":  # angle and length of the tail, on screen
+            tp = self.tip_at(a)
+            if tp is None:
+                return
+            (tx, ty) = tp; W, H = ren.size
             dx, dy = (f[0] - tx) * W, (f[1] - ty) * H
             a["tail"]["angle"] = round(math.degrees(math.atan2(-dy, dx)) % 360, 1)
             a["tail"]["length"] = round(max(0.02, min(0.6, math.hypot(dx, dy) / H)), 4)
         elif d["kind"] == "tip":  # point the tip at another spot
-            p = ren.pick_point(*f)
-            if p is not None:
-                hit = None
-                try:
-                    hit = w.st.pick(w.spec_for(), {"frame": w.frame, "x": f[0], "y": f[1]})
-                except Exception:
-                    pass
-                anc = dict(xyz=[float(v) for v in p], structure=hit.get("class") if hit and hit.get("found") else None,
-                           component=hit.get("component") if hit and hit.get("found") else None)
-                if d.get("more") is not None and d["more"] < len(a.get("more") or []):  # one of its extra pointers
+            if d.get("more") is not None and d["more"] < len(a.get("more") or []):  # one of its extra pointers
+                anc = pick_anchor(w, f)
+                if anc is not None:
                     a["more"][d["more"]] = anc
-                else:
-                    a["anchor" if a["kind"] == "arrow" else "pin"] = anc
+            elif a["kind"] == "arrow":
+                self.put_tip(a, f)
+            else:
+                anc = pick_anchor(w, f)
+                if anc is not None:
+                    a["pin"] = anc
         else:  # move text boxes (all selected ones together); a pinned box comes loose
             for aid in self.selected:
                 b = an.find(w.spec, aid)
@@ -126,6 +152,85 @@ class AnnotationMouse:
         edit_label(self.win, _split(name)[0]); return True
 
 
+def pick_anchor(win, f):
+    """{"xyz", "structure", "component"} of the 3D spot under f (fractions of the picture), or None (nothing there)."""
+    ren = win.st.ren
+    p = ren.pick_point(*f) if ren is not None else None
+    if p is None:
+        return None
+    hit = None
+    try:
+        hit = win.st.pick(win.spec_for(), {"frame": win.frame, "x": f[0], "y": f[1]})
+    except Exception:
+        pass
+    found = bool(hit and hit.get("found"))
+    return dict(xyz=[float(v) for v in p], structure=hit.get("class") if found else None,
+                component=hit.get("component") if found else None)
+
+
+def set_place(win, aid, how):
+    """An arrow on the spot in 3D (it moves with the camera) or on the picture in 2D (it stays where it is on screen).
+    It stays where it is now in the preview when switched."""
+    a = an.find(win.spec, aid)
+    if a is None or a["kind"] != "arrow":
+        return
+    now = win.ann_mouse.tip_at(a)
+    if how == "2d":
+        if now is None:
+            win.say("Move the playhead to where the arrow shows, then switch it.", "err"); return
+        a["place"] = "2d"; a["tip2d"] = [round(now[0], 4), round(now[1], 4)]
+    else:
+        a["place"] = "3d"
+        anc = pick_anchor(win, now) if now is not None else None
+        if anc is not None:
+            a["anchor"] = anc
+        elif not (a.get("anchor") or {}).get("xyz"):
+            win.say("There is nothing under the tip to pin it to. Drag the tip onto a structure or the slice.", "err")
+            a["place"] = "2d"; return
+    commit(win)
+
+
+def pick_colour(win, aid, key, title):
+    """A colour from the colour wheel for an item's text / arrow ("color") or its box ("fill")."""
+    a = an.find(win.spec, aid)
+    if a is None:
+        return
+    st = a.setdefault("style", {}); cur = st.get(key)
+    c = QtW.QColorDialog.getColor(QtG.QColor(cur if cur and cur != "auto" else "#3a6ea5"), win, title)
+    if not c.isValid():
+        return
+
+    def fn(b):
+        b.setdefault("style", {})[key] = c.name()
+        if key == "fill":
+            b["style"]["box"] = "fill"
+    change(win, aid, fn)
+
+
+def unpin(win, b):
+    """A text box pinned to a spot in 3D stays where it is now on the picture instead (2D)."""
+    od = win.prev.overlay; r = od.rects().get(f"ann:{b['id']}") if od is not None else None
+    b["pin"] = None
+    if r:
+        b["pos"] = dict(x=round(r[0][0], 4), y=round(r[0][1], 4), anchor="top-left")
+
+
+def pin_text(win, aid):
+    """Pin a text box to the 3D spot at the middle of its left edge: it then moves with the camera."""
+    a = an.find(win.spec, aid); od = win.prev.overlay
+    r = od.rects().get(f"ann:{aid}") if od is not None and a is not None else None
+    if r is None:
+        return
+    x0, y0, x1, y1 = r[0]; anc = None
+    for fx in (x0, x0 - 0.01, x0 + 0.01, (x0 + x1) / 2):
+        anc = pick_anchor(win, (fx, (y0 + y1) / 2))
+        if anc is not None:
+            break
+    if anc is None:
+        win.say("There is nothing behind the box to pin it to. Move it next to a structure or onto the slice first.", "err"); return
+    change(win, aid, lambda b: b.__setitem__("pin", anc))
+
+
 def item_menu(win, aid, gpos, pointer=None):
     a = an.find(win.spec, aid)
     if a is None:
@@ -143,15 +248,28 @@ def item_menu(win, aid, gpos, pointer=None):
         for t, v in an.SHAPES:
             act = sh.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("shape", v))); act.setCheckable(True)
             act.setChecked(st.get("shape", "arrow") == v)
+        pl = m.addMenu("Keep it")
+        for t, v in an.PLACES:
+            act = pl.addAction(t, lambda v=v: set_place(win, aid, v)); act.setCheckable(True)
+            act.setChecked(("2d" if an.is_2d(a) else "3d") == v)
     else:
         bx = m.addMenu("Box")
         for t, v in an.BOXES:
-            act = bx.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("box", v))); act.setCheckable(True)
-            act.setChecked(st.get("box", "dark") == v)
+            if v == "fill":
+                act = bx.addAction("coloured box (choose a colour) ...", lambda: pick_colour(win, aid, "fill", "Colour of the box"))
+            else:
+                act = bx.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("box", v)))
+            act.setCheckable(True); act.setChecked(st.get("box", "dark") == v)
+        if a.get("pin"):
+            m.addAction("Keep it on the picture (2D, stays put)", lambda: change(win, aid, lambda b: unpin(win, b)))
+        else:
+            m.addAction("Pin it to the spot next to it (3D, moves with the camera)", lambda: pin_text(win, aid))
     co = m.addMenu("Colour")
     for t, v in COLOURS:
         act = co.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("color", v))); act.setCheckable(True)
         act.setChecked(st.get("color", "auto") == v)
+    other = co.addAction("other colour ...", lambda: pick_colour(win, aid, "color", "Colour")); other.setCheckable(True)
+    other.setChecked(st.get("color", "auto") not in [v for _, v in COLOURS])
     m.addAction("Duplicate", lambda: (an.duplicate(win.spec, aid), commit(win)))
     cp = m.addMenu("Copy to")
     for i, p in enumerate(win.spec.get("shots", [])):
@@ -397,8 +515,20 @@ class AnnotationPanel(QtC.QObject):
         look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
             combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
         col = combo(COLOURS, st.get("color", "auto"), "color", "Colour")
+        if st.get("color", "auto") not in [v for _, v in COLOURS]:  # chosen from the colour wheel
+            col.addItem("own colour", st["color"]); col.setCurrentIndex(col.count() - 1)
+        wheel = QtW.QToolButton(); wheel.setFixedSize(26, 22)
+        shown = st.get("fill") if not arrow and st.get("box") == "fill" else (st.get("color") if st.get("color", "auto") != "auto" else None)
+        wheel.setStyleSheet(f"background:{shown}; border:1px solid palette(mid); border-radius:3px" if shown else "")
+        wheel.setText("" if shown else "🎨")
+        if arrow:
+            wheel.setToolTip("Choose the colour of the arrow from a colour wheel")
+            wheel.clicked.connect(lambda: pick_colour(w, aid, "color", "Colour of the arrow"))
+        else:
+            wheel.setToolTip("Fill the box with a colour from a colour wheel (the text turns black or white, whichever reads)")
+            wheel.clicked.connect(lambda: pick_colour(w, aid, "fill", "Colour of the box"))
         dele = QtW.QToolButton(); dele.setText("✕"); dele.setToolTip("Delete this item"); dele.clicked.connect(lambda: delete(w, aid))
-        for x in (vis, kind, txt, look, col, dele):
+        for x in (vis, kind, txt, look, col, wheel, dele):
             h.addWidget(x)
         h.setStretch(2, 1)
         h2 = QtW.QHBoxLayout(); h2.setContentsMargins(22, 0, 0, 0); v.addLayout(h2)

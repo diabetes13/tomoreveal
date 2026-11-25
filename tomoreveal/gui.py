@@ -13,7 +13,7 @@ from .common import UserError, VIEWS
 from .demo import make_demo
 from .movie import movie_frames, poster_path
 from .render import software_rendering_available
-from .storyboard import focus_shot, merge_settings, shot_tomogram
+from .storyboard import flip_spec, focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
 
@@ -349,7 +349,7 @@ def build_gui(args):
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
             self._struct_open = set()  # structures whose settings are open in the Structures tab
-            self._param_pending = {}
+            self._param_pending = {}; self._soften_cb = {}; self._surf_worker = None
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
             self.prev_timer = QtC.QTimer(self); self.prev_timer.setSingleShot(True); self.prev_timer.timeout.connect(self.do_preview)
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
@@ -698,11 +698,14 @@ def build_gui(args):
             step = p.get("step", 1)
             f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
             if f != p["last"]:
-                t0 = time.monotonic()
+                t0 = time.monotonic(); self.st.ren.surface_async = True
                 try:
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
+                finally:
+                    self.st.ren.surface_async = False
+                self._make_part_surfaces()
                 dt = time.monotonic() - t0
                 p["avg"] = dt if p.get("avg") is None else 0.7 * p["avg"] + 0.3 * dt
                 if p["drawn"] >= 2:
@@ -831,6 +834,75 @@ def build_gui(args):
         def remove_source(self, key):
             self.data.remove(key)
 
+        def _object_refs(self):
+            """Every place the settings name one object of a structure: dicts holding a structure key and a component."""
+            out = []
+            for p in self.spec.get("shots", []):
+                tgt = p.get("target") or {}
+                if tgt.get("class") is not None and tgt.get("component") is not None:
+                    out.append((tgt, "class"))
+                for it in tgt.get("items") or []:
+                    if it.get("component") is not None:
+                        out.append((it, "structure"))
+                for it in (p.get("source") or {}).get("items") or []:
+                    if it.get("component") is not None:
+                        out.append((it, "structure"))
+            for a in self.spec.get("annotations") or []:
+                for anc in [a.get("anchor"), a.get("pin")] + list(a.get("more") or []):
+                    if isinstance(anc, dict) and anc.get("structure") is not None and anc.get("component") is not None:
+                        out.append((anc, "structure"))
+            return out
+
+        def flip_volume(self, axes):
+            """Show the volume flipped (Data tab, 3.5). The settings' points move along; the objects in focus are found
+            again after the flip by one of their voxels (their numbers change when the volume is flipped)."""
+            axes = tuple(a for a in "xyz" if a in axes)
+            if self.busy or self.gen is not None or not self.spec or not self.info:
+                self.data.refresh(self.st.info()); return
+            toggled = set(self.st.flip) ^ set(axes)
+            if not toggled:
+                return
+            ds = self.st.ds; nz, ny, nx = ds.shape; n = {"x": nx, "y": ny, "z": nz}; fix = []
+            for ref, field in self._object_refs():
+                k = ds.id_of(ref.get(field))
+                try:
+                    sl = ds._comp_slices(k, int(ref["component"])); lbl, objs, _ = ds.components(k)
+                    o = objs[int(ref["component"]) - 1]; vox = np.argwhere(lbl[o] == int(ref["component"]))
+                    z, y, x = vox[len(vox) // 2] + np.array([s.start for s in sl])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
+                p = {"x": float(x), "y": float(y), "z": float(z)}
+                for a in toggled:
+                    p[a] = n[a] - 1 - p[a]
+                fix.append((ref, field, (p["x"], p["y"], p["z"])))
+            flip_spec(self.spec, ds.shape, toggled)
+            if axes:
+                self.spec["flip"] = list(axes)
+            else:
+                self.spec.pop("flip", None)
+            self._flip_fix = fix
+            self.run_job(lambda log: self.st.set_flip(axes, log=log, make_renderer=False), "Flipping the volume and building 3D surfaces ...")
+
+        def _refind_objects(self):
+            """After a flip: each object in focus by the voxel it had, now flipped."""
+            fix, self._flip_fix = getattr(self, "_flip_fix", None), None
+            if not fix:
+                return
+            ds = self.st.ds; lost = 0
+            for ref, field, xyz in fix:
+                k = ds.id_of(ref.get(field)); cid = None
+                try:
+                    cid = ds.pick_component(k, xyz, r=2) if k is not None else None
+                except (KeyError, IndexError, TypeError, ValueError):
+                    cid = None
+                if cid:
+                    ref["component"] = int(cid)
+                else:
+                    lost += 1
+            if lost:
+                self.say(f"{lost} object{'s' if lost != 1 else ''} in focus could not be found again after the flip; "
+                         "choose them again in their close-up.", "err")
+
         def _loaded(self, info):
             try:
                 self.st.ensure_renderer()
@@ -884,6 +956,7 @@ def build_gui(args):
             self.build_controls()
             if not keep_message:
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
+            self._refind_objects()
             self.schedule(0)
             self.project.after_apply()
             self.data.refresh(self.info); self.apply_help()  # names the user gave the files, from the settings
@@ -919,7 +992,7 @@ def build_gui(args):
             so.setCurrentIndex(next((i for i, (_, d) in enumerate(SOFTEN) if d == int(sc.get("soften", 0) or 0)), 0))
             so.setToolTip("Smoother surface: takes away the bumps and ridges a segmentation leaves, for example on membranes. "
                           "'Much' can lose parts thinner than 2 voxels")
-            so.activated.connect(lambda i, k=k: self._param_changed(k, "soften", SOFTEN[i][1]))
+            so.activated.connect(lambda i, k=k: self._param_changed(k, "soften", SOFTEN[i][1])); self._soften_cb[k] = so
             f.addRow("Smoother surface", so)
             style_rows(self, f, k)
             from .gui_look import membrane_row
@@ -929,39 +1002,83 @@ def build_gui(args):
         def _param_changed(self, key, name, v):
             self.spec["classes"][key][name] = v; self._param_pending[key] = True; self.param_timer.start(); self.schedule()
 
+        def _wanted_params(self, c):
+            sc = self.spec["classes"].get(c["key"], {})
+            return dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
+                        smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
+                        soften=int(sc.get("soften", 0) or 0))
+
         def apply_params(self):
-            """Rebuild the surfaces whose speck size or smoothing changed (after the controls settle)."""
+            """Rebuild the surfaces whose speck size or smoothing changed (after the controls settle). New surfaces are
+            made in a worker thread, so the window keeps answering; they are swapped in when they are ready."""
+            if self.busy or self.gen is not None or (self._surf_worker is not None and self._surf_worker.isRunning()):
+                self.param_timer.start(); return
+            if not self.spec or not self.info:
+                return
+            ds = self.st.ds; todo = []
+            for c in self.info.get("structures", []):
+                k = c["id"]; want = self._wanted_params(c)
+                if k in ds.classes and any(ds.param(k, n) != v for n, v in want.items()) and not ds.surface_ready(k, params=want) \
+                        and (k in ds.meshes or not ds.classes[k]["background"]):
+                    todo.append((k, want))
+            if not todo:
+                return self._params_ready()
+            self.say("Making the new surfaces ..."); self._param_pending = {}
+
+            def work(log):
+                for k, want in todo:
+                    ds.make_surface(k, params=want)
+                return True
+            self._surf_worker = Worker(work)
+            self._surf_worker.done.connect(lambda _r: (self.say(""), self._params_ready()))
+            self._surf_worker.failed.connect(lambda msg: (self.say(msg, "err"), self._params_ready()))
+            self._surf_worker.start()
+
+        def _params_ready(self):
+            """Swap in the surfaces of the current settings (made already: quick) and bring the controls in line."""
             if self.busy or self.gen is not None:
                 self.param_timer.start(); return
             self._param_pending = {}
-            QtW.QApplication.setOverrideCursor(QtC.Qt.WaitCursor)
-            try:
-                self._sync_params()
-            finally:
-                QtW.QApplication.restoreOverrideCursor()
+            if self._sync_params():
+                self.sync_surface_controls()
+            if hasattr(self, "look35"):
+                self.look35.sync()
             self.schedule(0)
 
-        def _sync_params(self):
-            """Bring the surfaces in line with the settings (after a change, undo, or opening a project)."""
+        def sync_surface_controls(self):
+            """The "Smoother surface" choice of each structure, after it was changed elsewhere (Look tab, undo)."""
+            from .volumes import SOFTEN
+            for key, so in list(self._soften_cb.items()):
+                try:
+                    v = int((self.spec["classes"].get(key) or {}).get("soften", 0) or 0)
+                    so.blockSignals(True); so.setCurrentIndex(next((i for i, (_, d) in enumerate(SOFTEN) if d == v), 0))
+                    so.blockSignals(False)
+                except RuntimeError:  # rebuilt meanwhile
+                    self._soften_cb.pop(key, None)
+
+        def _sync_params(self, ready_only=False):
+            """Bring the surfaces in line with the settings (after a change, undo, or opening a project). ready_only:
+            only those whose new surface is made already; the others are made in a worker thread (apply_params)."""
             if not self.spec or not self.info:
                 return False
-            changed = False
+            changed = False; later = False
             for c in self.info.get("structures", []):
-                sc = self.spec["classes"].get(c["key"], {}); k = c["id"]
-                want = dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
-                            smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
-                            soften=int(sc.get("soften", 0) or 0))
+                k = c["id"]; want = self._wanted_params(c)
                 if any(self.st.ds.param(k, n) != v for n, v in want.items()):
+                    if ready_only and not self.st.ds.surface_ready(k, params=want):
+                        later = True; continue  # made in the worker thread first (apply_params)
                     try:
                         r = self.st.set_structure_params(c["key"], **want)
                     except UserError as exc:
                         self.say(str(exc), "err"); continue
                     c.update(mesh=r["mesh"]); changed = True
+            if later:
+                self.param_timer.start(0)
             return changed
 
         def build_controls(self):
             sp = self.spec
-            self._sync_params()
+            self._sync_params(ready_only=True)
             grid = self.struct_grid
             while grid.count():
                 it = grid.takeAt(0); w = it.widget()  # store it first: after setParent(None), it.widget() is None
@@ -1239,6 +1356,7 @@ def build_gui(args):
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             self.st.ren.preview_part = self.selected_part; self.st.ds.path_async = True
             try:
+                self.st.ren.surface_async = True
                 img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
@@ -1247,6 +1365,10 @@ def build_gui(args):
                     self.say("Graphics problem: switched to software rendering (slower).", "err")
                     return self.do_preview(quick)
                 self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
+            finally:
+                if self.st.ren is not None:
+                    self.st.ren.surface_async = False
+            self._make_part_surfaces()
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
             if self.selected_part not in {p["id"] for p in self.spec["shots"]}:
@@ -1271,6 +1393,29 @@ def build_gui(args):
             self.editor.refresh_buttons()
             if any(v == "working out the path ..." for v in plan.problems.values()):
                 self._compute_paths(spec)
+
+        def _make_part_surfaces(self):
+            """Smoother membranes of a part (its own level) are made in a worker thread the first time; the preview
+            shows the usual surfaces meanwhile and is drawn again when they are ready."""
+            ren = self.st.ren
+            if ren is None or not ren.surfaces_pending or (self._surf_worker is not None and self._surf_worker.isRunning()):
+                return
+            todo = sorted(ren.surfaces_pending); ren.surfaces_pending = set(); ds = self.st.ds
+
+            def work(log):
+                for k, lvl in todo:
+                    if k in ds.classes:
+                        ds.make_surface(k, lvl)
+                return True
+            self.prev.set_note("Making smoother membranes for this part ...")
+            self._surf_worker = Worker(work)
+            self._surf_worker.done.connect(lambda _r: (self._clear_surface_note(), self.schedule(0)))
+            self._surf_worker.failed.connect(lambda msg: (self._clear_surface_note(), self.say(msg, "err")))
+            self._surf_worker.start()
+
+        def _clear_surface_note(self):
+            if self.prev.note.text().startswith("Making smoother membranes"):
+                self.prev.set_note("")
 
         def _compute_paths(self, spec):
             """Centre lines of camera paths are worked out in a worker thread (a large membrane can take seconds)."""
@@ -1566,7 +1711,20 @@ def build_gui(args):
             if not (pid and self.spec and plan) or not (0 <= self.frame < len(plan.frames)) or plan.frames[self.frame].get("part") != pid:
                 return None
             part = self.parts_panel.part(pid)
-            return part if part and part["type"] == "overview" and part.get("view") else None
+            return part if part and part["type"] in ("overview", "slide", "hold") and part.get("view") and not part.get("locked") else None
+
+        def locked_part(self, say=True):
+            """The part at the playhead when its view is locked (3.5): moving around in the preview leaves it alone."""
+            plan = self.timeline.canvas.plan if hasattr(self, "timeline") else None
+            if not (self.spec and plan) or not (0 <= self.frame < len(plan.frames)):
+                return None
+            pid = plan.frames[self.frame].get("part"); part = self.parts_panel.part(pid) if pid else None
+            if part is None or not part.get("locked"):
+                return None
+            if say:
+                n = self.spec["shots"].index(part) + 1
+                self.prev.set_note(f"Part {n} has a locked view. Untick 'Lock the view of this part' (Movie tab) to change it.")
+            return part
 
         def set_part_view(self, part, quick=False, **kw):
             vw = dict(part["view"])
@@ -1578,7 +1736,7 @@ def build_gui(args):
                 self.schedule()
 
         def on_drag(self, dx, dy):
-            if self.pick_mode or not self.spec or self.gen is not None or self.busy:
+            if self.pick_mode or not self.spec or self.gen is not None or self.busy or self.locked_part():
                 return
             part = self.view_part()
             if self._drag0 is None:
@@ -1594,7 +1752,7 @@ def build_gui(args):
             self._drag0 = None; self.schedule(0)
 
         def on_wheel(self, delta):
-            if self.spec and self.gen is None:
+            if self.spec and self.gen is None and not self.locked_part():
                 part = self.view_part()
                 z = (part["view"] if part else self.spec["view"]).get("zoom", 1.0)
                 z = min(3.0, max(0.5, float(z) * 1.1 ** (delta / 120.0)))
@@ -1726,6 +1884,15 @@ def build_gui(args):
                     except (RuntimeError, TypeError):  # nothing connected
                         pass
                 self.hide(); self.worker.wait()
+            self.param_timer.stop()
+            for wk in (self._surf_worker, self._path_worker):  # surfaces and camera paths being worked out: let them end
+                if wk is not None and wk.isRunning():
+                    for sig in (wk.done, wk.failed, wk.log):
+                        try:
+                            sig.disconnect()
+                        except (RuntimeError, TypeError):
+                            pass
+                    self.hide(); wk.wait()
             self.project.clean_exit(); self.st._drop_renderer(); e.accept()
 
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])

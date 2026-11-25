@@ -12,7 +12,7 @@ from .gui_theme import DIM
 from .transitions import ease_curve, transition_of
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
-               ("Overview", "overview"), ("View from here", "view"), ("Hold (pause)", "hold"))
+               ("Overview", "overview"), ("View from here", "view"), ("One slice, zoomed in", "slice_close"), ("Hold (pause)", "hold"))
 CARD_ENTRIES = (("Title card", "title_card"), ("End card (thank you)", "end_card"), ("Blank card", "card"))
 
 
@@ -146,6 +146,16 @@ class MovieEditor(QtC.QObject):
         elif kind == "view":  # the camera position of the main view as it is now
             v = self.spec["view"]
             self.insert(sb.new_part("view", view=dict(tilt=float(v["tilt"]), az=float(v["az"]), zoom=float(v["zoom"]))), after)
+        elif kind == "slice_close":  # the slice at the playhead, seen from the top, as a view of its own (3.5)
+            v = self.spec["view"]; plan = self.win.timeline.canvas.plan; f = self.win.frame
+            k = int(plan.frames[f]["k"]) if plan is not None and 0 <= f < len(plan.frames) else "current"
+            p = sb.new_part("slide_up", seconds=4, pause_before=0.0, pause_after=0.0, structures="none", caption="",
+                            view=dict(tilt=0.0, az=float(v["az"]), zoom=max(1.5, float(v.get("zoom", 1.0)))))
+            p["from"] = p["to"] = k; p["tomogram"] = dict(p["tomogram"], mode="shown")
+            self.insert(p, after)
+            self.win.say("Added one slice seen from the top. With this part selected, scroll to zoom and right-drag to move "
+                         "to the area you want; tick 'Lock the view of this part' when it looks right. Add arrows with a "
+                         "right-click.", "ok")
         else:
             self.insert(sb.new_part(kind), after)
 
@@ -264,6 +274,10 @@ class MovieEditor(QtC.QObject):
             a = menu.addAction(text, lambda kind=kind: self.add(kind, after))
             need = "needs a tomogram" if kind == "slide_up" and not has_t else "needs a segmentation" if kind == "reveal" and not has_s else ""
             a.setEnabled(not need); a.setToolTip(need)
+            if kind == "slice_close":
+                a.setToolTip("The slice at the playhead on its own, seen from the top and zoomed in, with a view of its own. "
+                             "Zoom and move to the area you want to show, lock the view, and add arrows and text.")
+                a.setEnabled(has_t)
             if kind == "view":
                 a.setToolTip("A still view with its own camera position; drag in the preview to change it. "
                              "Two of them in a row make the camera fly from one to the other.")
@@ -556,19 +570,29 @@ class PartsPanel(QtW.QWidget):
         t = p["type"]
         if t == "slide":
             self._slide_rows(pid, p, form)
+            self._view_rows(pid, p, form)
         elif t == "overview":
             add("Camera movement", _combo(MOTIONS, p.get("motion", "rock"), lambda v: self.set(pid, "motion", v, rebuild=True)))
             if p.get("motion", "rock") == "rock":
                 add("Rock angle", _spin(5, 90, float(p.get("angle", 25)), lambda v: self.set(pid, "angle", v), step=5, suffix="\u00b0", decimals=0))
+            if p.get("motion", "rock") in ("rock", "spin"):
+                ax = _combo(sb.SPIN_AXES, p.get("spin_axis", "z"), lambda v: self.set(pid, "spin_axis", None if v == "z" else v))
+                ax.setToolTip("The axis of the volume the camera turns around: Z (as seen from above, the usual turn), or X or Y "
+                              "(the volume tumbles, showing its top, side and bottom)")
+                add("Turn around", ax)
+            self._view_rows(pid, p, form)
+        elif t == "hold":
             self._view_rows(pid, p, form)
         elif t == "focus":
             self._focus_rows(pid, p, form)
+            self._lock_row(pid, p, form)
         elif t == "card":
             from .gui_cards import card_rows
             card_rows(self, pid, p, form)
         elif t == "path":
             from .gui_paths import path_rows
             path_rows(self, pid, p, form)
+            self._lock_row(pid, p, form)
         add("Duration", _spin(0.2, 120, float(p.get("seconds", 5)), lambda v: self.set(pid, "seconds", v)))
         cap = QtW.QLineEdit(p.get("caption", "")); cap.setPlaceholderText("text shown at the bottom while this part plays")
         cap.textChanged.connect(lambda txt: self.set(pid, "caption", txt)); add("Caption", cap); r["caption"] = cap
@@ -585,7 +609,7 @@ class PartsPanel(QtW.QWidget):
         self._transition_rows(pid, p, form)
 
     EFFECT_ROWS = (("Look", "style"), ("Soft shadows", "shadow"), ("Outlines", "outline"), ("Depth fade", "depth_fade"), ("Membranes", "membranes"),
-                   ("Shadows on the slice", "tomo_shadow"))
+                   ("Smoother membranes", "soften"), ("Shadows on the slice", "tomo_shadow"))
 
     def _effects_rows(self, pid, p, form):
         """Effects in this part only (3.5): shadows, outlines, depth fade, membranes. "As in the Look tab" = the whole movie."""
@@ -617,6 +641,8 @@ class PartsPanel(QtW.QWidget):
             cb.activated.connect(lambda j, name=name, choices=choices: choose(name, choices[j][1]))
             cb.setToolTip("A whole look for this part only (the background stays the movie's); the rows below can still "
                           "change single effects" if name == "style" else
+                          "Smoother surfaces of the membranes (structures ticked 'Treat as membrane') in this part only. "
+                          "Thin parts are kept. The first time, the smoother surfaces take a few seconds to make" if name == "soften" else
                           f"{label} in this part: as in the Look tab (the whole movie), or its own choice")
             fd.form.addRow(label, cb)
         form.addRow(fd)
@@ -670,18 +696,50 @@ class PartsPanel(QtW.QWidget):
         form.addRow("Flight path", path)
         r["transition_rows"] = (head, kind, secs, leave, arrive, op, on, path)
 
+    def _lock_row(self, pid, p, form):
+        """Lock the view of this part: it keeps its camera however the preview is moved, and the preview cannot move it."""
+        cb = QtW.QCheckBox("Lock the view of this part"); cb.setChecked(bool(p.get("locked")))
+        cb.setToolTip("The part keeps the camera position it has now, whatever happens to the main view, and moving around in "
+                      "the preview cannot change it by accident while the playhead is in this part. Untick to change it again.")
+        cb.toggled.connect(lambda on: self.lock(pid, on))
+        form.addRow("", cb)
+
+    def lock(self, pid, on):
+        """Lock: a part that follows the main view gets that view as its own first, so it stays as it looks now."""
+        p = self.part(pid)
+        if p is None:
+            return
+        main = self.win.spec["view"]
+        if on:
+            if p["type"] in ("overview", "slide", "hold") and not p.get("view"):
+                p["view"] = dict(tilt=float(main["tilt"]), az=float(main["az"]), zoom=float(main.get("zoom", 1.0)),
+                                 **({"pan": list(main["pan"])} if main.get("pan") else {}))
+            elif p["type"] == "focus":
+                v = p.get("view") if isinstance(p.get("view"), dict) else {}
+                p["view"] = dict(v, az=float(v.get("az", main["az"])))  # the angle it is seen from stays
+                if p.get("tilt") is None:
+                    p["tilt"] = float(max(float(main.get("tilt", 42)), 50))
+            p["locked"] = True
+        else:
+            p.pop("locked", None)
+        self.win.editor.commit(select=pid); self.fill_details(pid)
+        self.win.say("The view of this part is locked." if on else "The view of this part can be changed again.", "ok")
+
     def _view_rows(self, pid, p, form):
-        """View: the main view, or this part's own camera position (Tilt, Rotate, Zoom)."""
-        own = bool(p.get("view"))
+        """View: the main view, or this part's own camera position (Tilt, Rotate, Zoom), and the lock."""
+        own = bool(p.get("view")); locked = bool(p.get("locked"))
         main = self.win.spec["view"]
 
         def choose(v):
             self.set(pid, "view", dict(tilt=float(main["tilt"]), az=float(main["az"]), zoom=float(main["zoom"])) if v == "own" else None,
                      rebuild=True)
         vc = _combo((("main view", "main"), ("own view", "own")), "own" if own else "main", choose)
-        vc.setToolTip("The main view, or a camera position of this part's own. With its own view, you can also drag in the "
-                      "preview while this part is selected and the playhead is in it.")
+        vc.setToolTip("The main view, or a camera position of this part's own (for example one slice seen from the top and "
+                      "zoomed in). With its own view, dragging, scrolling and right-dragging in the preview change it while "
+                      "this part is selected and the playhead is in it.")
+        vc.setEnabled(not locked)
         form.addRow("View", vc)
+        self._lock_row(pid, p, form)
         if not own:
             return
         vw = p["view"]; self.view_sliders = {}
@@ -699,7 +757,9 @@ class PartsPanel(QtW.QWidget):
             return row
         form.addRow("Tilt", slider("tilt", 0, 85, 1, lambda x: f"{x}\u00b0"))
         form.addRow("Rotate", slider("az", -180, 180, 1, lambda x: f"{x}\u00b0"))
-        form.addRow("Zoom", slider("zoom", 50, 300, 100, lambda x: f"{x / 100:.2f}x"))
+        form.addRow("Zoom", slider("zoom", 30, 800, 100, lambda x: f"{x / 100:.2f}x"))
+        for s, val, _, _ in self.view_sliders.values():
+            s.setEnabled(not locked)
 
     def show_view(self, pid):
         """The part's view was changed by dragging in the preview: move its sliders along (without changing it again)."""

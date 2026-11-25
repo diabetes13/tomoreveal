@@ -270,6 +270,7 @@ def load_into(st, data, resolved, log=print):
     for s in st.seg_sources:
         if s["key"] in enabled:
             s["enabled"] = bool(enabled[s["key"]])
+    st.flip = tuple(a for a in "xyz" if a in ((data.get("spec") or {}).get("flip") or ()))  # shown flipped (3.5)
     t = remap(data.get("tomogram_source"), mapping)
     if not data.get("tomogram_auto", False) and t in [c["key"] for c in st._tomogram_choices()]:
         st.tomo_source = t; st._tomo_auto = False

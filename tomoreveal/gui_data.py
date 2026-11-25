@@ -64,6 +64,15 @@ class DataPanel(QtW.QWidget):
         self.tomo_group = QtW.QButtonGroup(self); self.tomo_group.setExclusive(True)
         self.dims_lbl = dim(""); self.dims_lbl.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.dims_lbl)
         self.match_lbl = dim(""); self.match_lbl.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.match_lbl)
+        self.flip_w = QtW.QWidget(); fl = QtW.QHBoxLayout(self.flip_w); fl.setContentsMargins(8, 0, 0, 0)
+        fl.addWidget(QtW.QLabel("Flip"))
+        self.flip_cb = {}
+        for a, tip in (("x", "left and right"), ("y", "front and back"), ("z", "top and bottom: the slices in the other order")):
+            cb = QtW.QCheckBox(a.upper()); cb.setToolTip(f"Show the tomogram and the segmentation flipped in {a.upper()} ({tip}), for "
+                                                         "example when it looks mirrored compared with another program. "
+                                                         "Your files are not changed. Arrows, frames and close-ups move along.")
+            cb.clicked.connect(lambda _=False: self.flip_changed()); fl.addWidget(cb); self.flip_cb[a] = cb
+        fl.addStretch(1); lay.addWidget(self.flip_w); self.flip_w.setVisible(False)
 
         self.seg_head = QtW.QLabel("<b>SEGMENTATION</b>"); lay.addWidget(self.seg_head)
         self.seg_shared = dim("", wrap=False); self.seg_shared.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.seg_shared)
@@ -91,6 +100,14 @@ class DataPanel(QtW.QWidget):
         paths = paths or self._ask("Add a segmentation", SEGMENTATIONS)
         if paths:
             self.run(lambda log: self.st.add_files(paths, as_segmentation=paths, log=log, make_renderer=False))
+
+    def flip_changed(self):
+        axes = tuple(a for a, cb in self.flip_cb.items() if cb.isChecked())
+        w = self.window()
+        if hasattr(w, "flip_volume"):
+            w.flip_volume(axes)
+        else:
+            self.run(lambda log: self.st.set_flip(axes, log=log, make_renderer=False), "Flipping the volume ...")
 
     def choose_tomogram(self, key):
         if self.info is None or key == self.info.get("tomogram"):
@@ -206,6 +223,9 @@ class DataPanel(QtW.QWidget):
             txt = "No tomogram shown. The segmentation is drawn on its own (" + " × ".join(map(str, dims)) + " voxels)."
         self.dims_lbl.setText(txt); self.dims_lbl.setVisible(bool(txt) and loaded)
         self.match_lbl.setText(info.get("match_note") or ""); self.match_lbl.setVisible(bool(info.get("match_note")))
+        self.flip_w.setVisible(bool(dims) and loaded)
+        for a, cb in self.flip_cb.items():
+            cb.blockSignals(True); cb.setChecked(a in (info.get("flip") or ())); cb.blockSignals(False)
         # segmentation: tick boxes grouped by file
         clear_layout(self.seg_lay)
         self.seg_head.setVisible(bool(sources)); self.seg_w.setVisible(bool(sources))

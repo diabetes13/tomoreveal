@@ -3,10 +3,13 @@
 spec["annotations"] is a list; each item:
   {"id", "kind": "arrow" | "text",
    arrows:  "anchor": {"xyz": [x, y, z] voxels, "structure": key or None, "component": int or None},
+            "place": "3d" (default: the tip stays on the spot in the volume while the camera moves) | "2d" (the tip
+                     stays at "tip2d": [fx, fy], fractions of the picture, whatever the camera does),
             "tail": {"angle": degrees on screen (0 = right, counter-clockwise), "length": fraction of the frame height},
             "label": {"text", "size", "side": "auto"}, "keep_outside": bool,
    text:    "text", "pos": {"x", "y", "anchor"} (fractions of the frame, as overlay items), "pin": anchor or None,
-   both:    "style": {"shape", "color", "outline", "width", "head", "size", "box", "align", "bold", "opacity"},
+   both:    "style": {"shape", "color", "outline", "width", "head", "size", "box", "align", "bold", "opacity",
+                      "fill": "#rrggbb" (box "fill": a box in this colour), "fill_opacity"},
             "more": [anchor, ...] (3.5): more things it points at; an arrow draws a line from its label to each, a text
                     box a thin leader line from the box to each (as in figure callouts),
             "show": {"parts": "all" | [part ids], "start": s or None, "end": s or None (seconds from the start of the
@@ -23,7 +26,9 @@ import uuid
 import numpy as np
 
 SHAPES = (("Arrow", "arrow"), ("Thin arrow", "thin"), ("Pointer", "pointer"), ("Ring", "ring"), ("Bracket", "bracket"))
-BOXES = (("dark box", "dark"), ("light box", "light"), ("outline", "outline"), ("no box", "none"))
+BOXES = (("dark box", "dark"), ("light box", "light"), ("coloured box", "fill"), ("outline", "outline"), ("no box", "none"))
+PLACES = (("on the spot in 3D (moves with the camera)", "3d"), ("on the picture in 2D (stays put)", "2d"))
+SUPERSAMPLE = 3  # arrows and boxes are drawn this many times larger and scaled down: smooth edges
 APPEAR = (("fade in", "fade"), ("grow", "grow"), ("pop", "pop"))
 BEHIND = (("draw normally", "normal"), ("draw faintly", "faint"), ("hide", "hide"))
 GROW = 0.4  # seconds for the shaft to draw from tail to tip
@@ -143,7 +148,7 @@ def plan_annotations(spec, ds, frames, segments, fr, fps, aspect):
                 grown[j] = _ramp((t - s0) / GROW); ain = 1.0
             aout = 1.0 if fade <= 0 else _ramp((s1 - t) / fade) if sh.get("end") is not None else 1.0
             alpha[j] = min(ain, aout)
-        anchor = (a.get("anchor") or {}).get("xyz") if a["kind"] == "arrow" else ((a.get("pin") or {}).get("xyz"))
+        anchor = anchor_xyz(a)
         if anchor is not None:  # fade out (over the fade time) while the point is outside the picture
             on = np.array([(lambda p: p[2] and -0.02 <= p[0] <= 1.02 and -0.02 <= p[1] <= 1.02)(project(fr, f["pose"], anchor, aspect))
                            for f in frames], bool)
@@ -226,14 +231,83 @@ def _visible_here(a, s, spec, ds, xyz, anc=None):
     return 1.0
 
 
+def is_2d(a):
+    return a.get("kind") == "arrow" and a.get("place") == "2d" and a.get("tip2d") is not None
+
+
+def anchor_xyz(a):
+    """The 3D point an item is pinned to (None: a free text box, or an arrow placed on the picture)."""
+    if a.get("kind") == "arrow":
+        return None if is_2d(a) else (a.get("anchor") or {}).get("xyz")
+    return (a.get("pin") or {}).get("xyz")
+
+
+class _Draw:
+    """Shapes go to a layer SUPERSAMPLE times larger (scaled down afterwards, so edges are smooth); text goes to a
+    layer of its own (PIL already smooths text), drawn over the shapes."""
+    def __init__(self, size):
+        from PIL import Image, ImageDraw
+        W, H = size; self.S = S = SUPERSAMPLE; self.size = size
+        self.hi = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0)); self.g = ImageDraw.Draw(self.hi)
+        self.tl = Image.new("RGBA", (W, H), (0, 0, 0, 0)); self.t = ImageDraw.Draw(self.tl)
+
+    def _p(self, pts):
+        S = self.S
+        return [(float(x) * S, float(y) * S) for x, y in pts]
+
+    def _w(self, width):
+        return max(1, int(round(float(width) * self.S)))
+
+    def line(self, pts, fill=None, width=1, joint=None):
+        self.g.line(self._p(pts), fill=fill, width=self._w(width), joint=joint)
+
+    def polygon(self, pts, fill=None, outline=None, width=1):
+        self.g.polygon(self._p(pts), fill=fill, outline=outline, width=self._w(width) if outline else 1)
+
+    def ellipse(self, box, fill=None, outline=None, width=0):
+        self.g.ellipse([float(v) * self.S for v in box], fill=fill, outline=outline, width=self._w(width) if width else 0)
+
+    def rounded_rectangle(self, box, radius=0, fill=None, outline=None, width=0):
+        self.g.rounded_rectangle([float(v) * self.S for v in box], radius=float(radius) * self.S, fill=fill, outline=outline,
+                                 width=self._w(width) if width else 0)
+
+    def text(self, *a, **kw):
+        return self.t.text(*a, **kw)
+
+    def textbbox(self, *a, **kw):
+        return self.t.textbbox(*a, **kw)
+
+    def textlength(self, *a, **kw):
+        return self.t.textlength(*a, **kw)
+
+    def onto(self, layer):
+        """Scale the shapes down (only the part that has any), then put shapes and text over the layer."""
+        from PIL import Image
+        W, H = self.size; S = self.S; bb = self.hi.getbbox()
+        out = layer.copy()
+        if bb:
+            x0, y0 = bb[0] // S, bb[1] // S; x1, y1 = min(W, -(-bb[2] // S)), min(H, -(-bb[3] // S))
+            part = self.hi.crop((x0 * S, y0 * S, x1 * S, y1 * S)).resize((x1 - x0, y1 - y0), Image.LANCZOS)
+            sm = Image.new("RGBA", (W, H), (0, 0, 0, 0)); sm.paste(part, (x0, y0))
+            out = Image.alpha_composite(out, sm)
+        out = Image.alpha_composite(out, self.tl)
+        layer.paste(out)
+
+
 def draw(layer, P, ren, s, spec, size, zbuf=None):
     """Draw the annotations visible in frame s onto the PIL layer; their boxes go into P.rects as "ann:<id>" (whole
     item), "anntip:<id>" (an arrow's tip) and "anntail:<id>" (its tail / label)."""
-    from PIL import ImageDraw
     vis = s.get("ann") or {}
     if not vis:
         return
-    W, H = size; d = ImageDraw.Draw(layer); ds = ren.ds; dark = P.dark; px = P.px
+    W, H = size; d = _Draw(size); ds = ren.ds; dark = P.dark; px = P.px
+    try:
+        _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf)
+    finally:
+        d.onto(layer)
+
+
+def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf):
     placed = []  # label boxes already drawn (to keep labels apart)
     for a in items(spec):
         if a["id"] not in vis or not a.get("visible", True):
@@ -241,8 +315,8 @@ def draw(layer, P, ren, s, spec, size, zbuf=None):
         alpha, grown, ang = vis[a["id"]]
         st = a.get("style") or {}
         alpha *= float(st.get("opacity", 1.0))
-        anc = (a.get("anchor") or {}).get("xyz") if a["kind"] == "arrow" else ((a.get("pin") or {}).get("xyz"))
-        tip = None
+        anc = anchor_xyz(a)
+        tip = (float(a["tip2d"][0]) * W, float(a["tip2d"][1]) * H) if is_2d(a) else None
         if anc is not None:
             (fx, fy), front = ren.project(anc)
             if not front:
@@ -275,13 +349,39 @@ def draw(layer, P, ren, s, spec, size, zbuf=None):
 
 
 def _line(d, a, b, width, fill, outline, ow):
-    if outline:
-        d.line([a, b], fill=outline, width=int(round(width + 2 * ow)))
-    d.line([a, b], fill=fill, width=int(round(width)))
+    """A line with round ends (and a thin outline around it)."""
+    for col, wd in ((outline, width + 2 * ow), (fill, width)) if outline else ((fill, width),):
+        d.line([a, b], fill=col, width=wd); r = wd / 2
+        for c in (a, b):
+            d.ellipse([c[0] - r, c[1] - r, c[0] + r, c[1] + r], fill=col)
+
+
+def _solid_arrow(d, tail, tip, w, hl, hw, fill, oc, ow):
+    """The whole arrow as one shape, so its outline runs round it without seams where the head meets the shaft."""
+    pts = _arrow_shape(tail, tip, w, hl, hw)
+    if oc:
+        d.line(pts + [pts[0], pts[1]], fill=oc, width=2 * ow, joint="curve")
+    d.polygon(pts, fill=fill)
+
+
+def _arrow_shape(tail, tip, w, hl, hw):
+    """One outline of a whole arrow: a shaft with a round end, and a head swept back a little at its wings."""
+    L = max(1e-6, math.hypot(tip[0] - tail[0], tip[1] - tail[1])); ux, uy = (tip[0] - tail[0]) / L, (tip[1] - tail[1]) / L
+    nx, ny = -uy, ux; a = w / 2; hl = min(hl, L * 0.9)
+    neck = (tip[0] - ux * hl * 0.72, tip[1] - uy * hl * 0.72)  # where the shaft meets the head (the notch)
+    wing = (tip[0] - ux * hl, tip[1] - uy * hl)
+    pts = [tip, (wing[0] + nx * hw, wing[1] + ny * hw), (neck[0] + nx * a, neck[1] + ny * a)]
+    for i in range(9):  # the round end of the shaft, from one side round the back to the other
+        f = math.pi * i / 8
+        pts.append((tail[0] + a * (nx * math.cos(f) - ux * math.sin(f)), tail[1] + a * (ny * math.cos(f) - uy * math.sin(f))))
+    pts += [(neck[0] - nx * a, neck[1] - ny * a), (wing[0] - nx * hw, wing[1] - ny * hw)]
+    return pts
 
 
 def _head(d, shape, tail, tip, grown, w, hl, hw, fill, oc, ow):
     """A shaft from tail to tip (drawn to `grown` of its length) and its head."""
+    if shape == "arrow" and grown >= 0.999:
+        return _solid_arrow(d, tail, tip, w, hl, hw, fill, oc, ow)
     L = max(1e-6, math.hypot(tip[0] - tail[0], tip[1] - tail[1])); ux, uy = (tip[0] - tail[0]) / L, (tip[1] - tail[1]) / L
     end = (tail[0] + (tip[0] - tail[0]) * grown, tail[1] + (tip[1] - tail[1]) * grown)
     stop = (end[0] - ux * hl * 0.8, end[1] - uy * hl * 0.8) if shape in ("arrow", "thin") and grown >= 0.999 else end
@@ -312,7 +412,7 @@ def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extr
     fill = col + (A,); oc = outline if st.get("outline", True) else None
     ux, uy = (tip[0] - tail[0]) / max(1e-6, L), (tip[1] - tail[1]) / max(1e-6, L)
     end = (tail[0] + (tip[0] - tail[0]) * grown, tail[1] + (tip[1] - tail[1]) * grown)
-    hl = H * 0.022 * float(st.get("head", 1.0)); hw = hl * 0.55
+    hl = H * 0.024 * float(st.get("head", 1.0)); hw = max(hl * 0.5, w * 1.7)
     if shape == "ring":
         r = float(st.get("radius", 0.03)) * H
         if oc:
@@ -327,6 +427,8 @@ def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extr
         if oc:
             d.line(pts, fill=oc, width=int(round(w + 2 * ow)), joint="curve")
         d.line(pts, fill=fill, width=int(round(w)), joint="curve")
+    elif shape == "arrow" and grown >= 0.999:
+        _solid_arrow(d, tail, tip, w, hl, hw, fill, oc, ow)
     else:
         stop = (end[0] - ux * hl * 0.8, end[1] - uy * hl * 0.8) if shape in ("arrow", "thin") and grown >= 0.999 else end
         lw = max(1.0, w * (0.45 if shape == "thin" else 1.0))
@@ -397,6 +499,11 @@ def _text(d, a, tip, W, H, px, col, A, st, P, placed, dark, extra=(), outline=No
     x0, y0 = _apart(x0, y0, bw, bh, placed, H)
     box = st.get("box", "dark")
     back = {"dark": (0, 0, 0, int(A * 0.6)), "light": (255, 255, 255, int(A * 0.75))}.get(box)
+    if box == "fill":  # a box in a colour chosen from the colour wheel; automatic text: black or white, whichever reads
+        fc = _colour(st.get("fill") or "#3a6ea5", dark)
+        back = fc + (int(A * float(st.get("fill_opacity", 0.9))),)
+        if st.get("color", "auto") in (None, "auto"):
+            col = (20, 20, 20) if 0.299 * fc[0] + 0.587 * fc[1] + 0.114 * fc[2] > 150 else (255, 255, 255)
     if box == "light" and st.get("color", "auto") in (None, "auto"):
         col = (20, 20, 20)
     elif box == "dark" and st.get("color", "auto") in (None, "auto"):

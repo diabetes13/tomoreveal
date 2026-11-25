@@ -8,6 +8,7 @@ from tomoreveal import look as lk
 from tomoreveal import storyboard as sb
 from tomoreveal.volumes import surface
 from test_part_effects import two_parts
+from test_structure_settings import surfaces_made
 from test_tidy_panels import pump, window  # noqa: F401 (fixture)
 
 
@@ -68,10 +69,10 @@ def test_presets_come_before_movie_and_membranes_can_be_smoother(window):
     assert names[win.TAB_PRESETS] == "Presets" and names[win.TAB_MOVIE] == "Movie" and names[win.TAB_LOOK] == "Look"
     ds = win.st.ds; mem = next(c["key"] for c in ds.classes.values() if c["name"] == "membrane")
     k = ds.id_of(mem); before = ds.meshes[k]
-    win.look35.smooth_mem.setChecked(True); win.apply_params(); pump(app)
+    win.look35.smooth_mem.setChecked(True); win.apply_params(); surfaces_made(app, win)
     assert win.spec["classes"][mem]["soften"] == 2 and ds.param(k, "soften") == 2 and ds.meshes[k] is not before
     win.look35.sync(); assert win.look35.smooth_mem.isChecked()
-    win.look35.smooth_mem.setChecked(False); win.apply_params(); pump(app)
+    win.look35.smooth_mem.setChecked(False); win.apply_params(); surfaces_made(app, win)
     assert ds.param(k, "soften") == 0 and not errs
 
 

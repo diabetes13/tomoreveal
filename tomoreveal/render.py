@@ -70,6 +70,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self.glow_actors, self.cut_actors, self._cut_cache, self._fx_meshes = {}, {}, {}, {}  # close-up animations
         self._markers, self._path_actors, self.preview_part, self._path3d, self.path_view = [], [], None, None, None
         self._slice_grey, self._shadow_key = None, None
+        self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -100,10 +101,38 @@ class Renderer(PreviewPicking, PictureLooks):
             a.mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(-2.0, -2.0)
         return a
 
+    def _use_surfaces(self, spec, level):
+        """The surfaces this frame needs: a part may smooth its membranes more or less than the Structures tab (3.5).
+        In the window (surface_async) a surface not made yet is asked for (surfaces_pending) and the usual one is drawn
+        meanwhile; in a movie it is made at once."""
+        ds = self.ds; now = {}
+        for kk, act in self.actors.items():
+            lvl = None
+            if level is not None and self._membrane(spec, kk) and int(level) != ds.param(kk, "soften"):
+                lvl = int(level)
+                if self.surface_async and not ds.surface_ready(kk, lvl):
+                    self.surfaces_pending.add((kk, lvl)); lvl = None
+            if lvl is not None:
+                now[kk] = lvl
+            ck = ds._cache_key(kk, lvl)
+            if getattr(act, "_surf_key", None) == ck and ds.meshes.get(kk) is getattr(act, "_surf_mesh", None):
+                continue
+            mesh = ds.make_surface(kk, lvl) if (lvl is not None or ds.surface_ready(kk)) else ds.meshes.get(kk)
+            if mesh is None:
+                continue
+            if ds.meshes.get(kk) is not mesh or getattr(act, "_surf_mesh", None) is not mesh:
+                ds.meshes[kk] = mesh; act.mapper.SetInputData(mesh); act._shown_mesh = mesh; act._ao_key = None
+                for key in [key for key in self.comp_actors if key[0] == kk]:  # objects in focus: made again with this level
+                    c = self.comp_actors.pop(key)
+                    if c is not None:
+                        self.pl.remove_actor(c)
+            act._surf_key, act._surf_mesh = ck, mesh
+        self._soften_now = now
+
     def _comp_actor(self, k, cid):
         key = (k, cid)
         if key not in self.comp_actors:
-            m = self.ds.comp_mesh(k, cid)
+            m = self.ds.comp_mesh(k, cid, self._soften_now.get(k))
             self.comp_actors[key] = self._add(m, front=True) if m is not None else None
         return self.comp_actors[key]
 
@@ -189,11 +218,12 @@ class Renderer(PreviewPicking, PictureLooks):
                 L35 = {**STYLE35_DEFAULTS, **LOOK_PRESETS[own["style"]], "background": L35["background"], "preset": own["style"]}
             L35 = dict(L35, **{k: v for k, v in own.items() if k in ("shadow", "outline", "depth_fade")})
             if "membranes" in own:
-                from .look import CREAM
-                L35.update(glass=own["membranes"] == "glass", membrane_colour=CREAM if own["membranes"] == "cream" else None)
+                from .look import solid_colour
+                L35.update(glass=own["membranes"] == "glass", membrane_colour=solid_colour(spec) if own["membranes"] == "cream" else None)
             if "tomo_shadow" in own:
                 lk["shadows"]["slice"]["on"] = bool(own["tomo_shadow"])
         self._l35 = L35
+        self._use_surfaces(spec, own.get("soften"))
         bg = style.get("bg", "#000000"); bgkey = (bg, L35["background"] == "gradient")
         if bgkey != self.bg:
             if bgkey[1]:  # light grey at the top to white at the bottom
@@ -432,28 +462,28 @@ class Renderer(PreviewPicking, PictureLooks):
     def _fx_mesh(self, k, cid, kind="item"):
         """Surfaces used by the effects, cached: the item itself, the item with outward-facing polygons (for capped
         clipping), and the rest of a structure without one of its objects."""
-        key = (k, cid, kind, id(self.ds.meshes.get(k)))
-        if key not in self._fx_meshes:
+        src = self.ds.meshes.get(k); key = (k, cid, kind, id(src), tuple(sorted(self._soften_now.items())))
+        if key not in self._fx_meshes or self._fx_meshes[key][0] is not src:
             ds = self.ds
             if kind == "rest":
                 from .volumes import surface
                 lbl, _, _ = ds.components(k); sl = ds.bbox[k]
                 m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step,
-                            ds.param(k, "soften"), ds.shape)
+                            self._soften_now.get(k, ds.param(k, "soften")), ds.shape)
             else:
-                m = ds.meshes.get(k) if cid is None else ds.comp_mesh(k, int(cid))
+                m = ds.meshes.get(k) if cid is None else ds.comp_mesh(k, int(cid), self._soften_now.get(k))
                 if m is not None and kind == "outward":
                     m = m.compute_normals(flip_normals=True, split_vertices=False)  # our surfaces are wound inwards
-            self._fx_meshes[key] = m
-        return self._fx_meshes[key]
+            self._fx_meshes[key] = (src, m)
+        return self._fx_meshes[key][1]
 
     def _clipped(self, k, cid, normal, origin):
         """(body, cap) of an item cut by a plane on the CPU (the six OpenGL clipping planes are all in use); cached by the
         plane's position rounded to 0.5 voxel."""
         n = np.asarray(normal, float); o = np.round(np.asarray(origin, float) * 2) / 2
-        key = (k, cid, tuple(np.round(n, 3)), tuple(o), id(self.ds.meshes.get(k)))
-        if key in self._cut_cache:
-            return self._cut_cache[key]
+        src = self.ds.meshes.get(k); key = (k, cid, tuple(np.round(n, 3)), tuple(o), id(src))
+        if key in self._cut_cache and self._cut_cache[key][2] is src:
+            return self._cut_cache[key][:2]
         vtk, pv = self.vtk, self.pv
         m = self._fx_mesh(k, cid, "outward")
         body = cap = None
@@ -467,7 +497,7 @@ class Renderer(PreviewPicking, PictureLooks):
                 cap = out.extract_cells(np.nonzero(lab == 1)[0]).extract_surface(algorithm="dataset_surface") if (lab == 1).any() else None
         if len(self._cut_cache) > 96:
             self._cut_cache.pop(next(iter(self._cut_cache)))
-        self._cut_cache[key] = (body, cap)
+        self._cut_cache[key] = (body, cap, src)
         return body, cap
 
     def _cut_actor(self, key, part):
@@ -638,10 +668,10 @@ class Renderer(PreviewPicking, PictureLooks):
     def _dots_mesh(self, k, mesh, size):
         """The surface thinned out so that dots of this size stay apart."""
         key = (k, round(size, 1), id(mesh))
-        if self._dots.get(k, (None,))[0] != key:
+        if self._dots.get(k, (None,))[0] != key or self._dots[k][2] is not mesh:
             target = max(0.0, min(0.95, 1.0 - 1.0 / max(1.0, size * 0.6) ** 2))
             m = mesh.decimate(target) if target > 0.05 and mesh.n_cells > 2000 else mesh
-            self._dots[k] = (key, m)
+            self._dots[k] = (key, m, mesh)
         return self._dots[k][1]
 
     def _silhouette(self, k, mesh):
@@ -692,7 +722,7 @@ class Renderer(PreviewPicking, PictureLooks):
             vis = self._visible_points()
             key = (int(s["k"]), tuple(np.round(v, 3)), tuple((kk, id(m)) for kk, m in vis), round(float(sh["strength"]), 3),
                    round(float(sh["softness"]), 2), cb, self._slice_key)
-        if key == self._shadow_key:
+        if key == self._shadow_key and (not on or all(a is b for a, b in zip(getattr(self, "_shadow_src", []), [m for _, m in vis]))):
             return
         g = self._slice_grey
         if on:
@@ -700,7 +730,7 @@ class Renderer(PreviewPicking, PictureLooks):
             m = shadow_mask([mm.points for _, mm in vis], int(s["k"]), v, self.shape, float(sh["softness"]), clip=cb)
             if m is not None:
                 g = (g.astype(np.float32) * (1.0 - float(sh["strength"]) * m)).astype(np.uint8)
-        self.img.point_data["I"] = g.ravel(); self._shadow_key = key
+        self.img.point_data["I"] = g.ravel(); self._shadow_key = key; self._shadow_src = [m for _, m in vis] if on else []
 
     def annotate(self, fr_img, s, spec, size, show_slice, transparent=False):
         """Draw the overlay items (legend, slice number, scale bar, title, caption) on a rendered frame.

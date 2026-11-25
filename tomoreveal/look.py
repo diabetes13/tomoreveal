@@ -145,7 +145,7 @@ LOOK_NOTES = {
 GLASS_OUTLINES = (("all edges", "all"), ("outer edge only", "outer"), ("none", "none"))
 MATERIALS = (("normal", "normal"), ("ceramic (matte, soft sheen)", "ceramic"), ("X-ray (see-through, glowing)", "xray"))
 XRAY_OPACITY = 0.3  # every structure with the X-ray material: see-through, so what lies behind and inside shows
-MEMBRANE_LOOKS = (("their own colour", "own"), ("see-through (glass)", "glass"), ("solid cream (ceramic)", "cream"))
+MEMBRANE_LOOKS = (("their own colour", "own"), ("see-through (glass)", "glass"), ("solid colour (ceramic)", "cream"))
 CREAM = "#efe7d4"
 BACKGROUNDS = (("black", "black"), ("white", "white"), ("light grey", "lightgrey"), ("gradient (light grey to white)", "gradient"),
                ("the tomogram slice", "tomogram"))
@@ -196,10 +196,18 @@ def style35(spec):
     return out
 
 
+def solid_colour(spec):
+    """The colour chosen for solid membranes ("solid colour"; cream unless another was chosen from the colour wheel)."""
+    return ((spec.get("look") or {}).get("style35") or {}).get("solid_colour") or CREAM
+
+
 def apply_look(spec, name):
-    """Choose a look preset: it sets several settings at once (each can still be changed; the look then shows Custom)."""
-    st = spec.setdefault("look", {}).setdefault("style35", {})
+    """Choose a look preset: it sets several settings at once (each can still be changed; the look then shows Custom).
+    The colour chosen for solid membranes is remembered for the next time "solid colour" is chosen."""
+    st = spec.setdefault("look", {}).setdefault("style35", {}); keep = st.get("solid_colour")
     st.clear(); st.update(STYLE35_DEFAULTS); st.update(LOOK_PRESETS[name]); st["preset"] = name
+    if keep:
+        st["solid_colour"] = keep
     set_background(spec, st["background"])
     return spec
 
@@ -264,8 +272,15 @@ class BakedShadows:
 
     KEEP_SETS = 3
 
+    @staticmethod
+    def _occ_key(ds, k):
+        """What the occupancy of a structure depends on: its voxels (threshold, small specks left out), not how its
+        surface is smoothed, so changing the smoothing or a part's own smoothing does not work it out again."""
+        c = ds.classes.get(k) or {}
+        return (k, id(ds), c.get("threshold"), ds.param(k, "min_object_voxels") if k in ds.classes else 0, k in ds.meshes)
+
     def _coarse_of(self, ds, k):
-        key = (k, id(ds), id(ds.meshes.get(k)))
+        key = self._occ_key(ds, k)
         hit = self._coarse.get(k)
         if hit is not None and hit[0] == key:
             return hit[1]
@@ -284,7 +299,7 @@ class BakedShadows:
     def prepare(self, ds, ks, reach):
         """Blurred occupancy fields for the structures ks (cached until they or the reach change). The last few sets are
         kept, so a close-up that hides a structure and shows it again afterwards does not work them out again."""
-        key = (tuple(sorted(ks)), reach, id(ds), tuple(id(ds.meshes.get(k)) for k in sorted(ks)))
+        key = (tuple(sorted(ks)), reach, id(ds), tuple(self._occ_key(ds, k) for k in sorted(ks)))
         if key == self.key:
             return
         for i, (k0, val) in enumerate(self._sets):
@@ -312,8 +327,9 @@ class BakedShadows:
     def factor(self, mesh, darkest):
         """Brightness 0..1 of each vertex of a mesh (1: open, `darkest`: deep in a crease)."""
         key = (id(mesh), round(darkest, 3), self.key)
-        if key in self._factor:
-            return self._factor[key]
+        hit = self._factor.get(key)
+        if hit is not None and hit[0] is mesh:  # the same surface (an id can be reused once a surface is let go)
+            return hit[1]
         from scipy import ndimage
         p = np.asarray(mesh.points, np.float32); q = self.Q
         n = mesh.point_data.get("Normals")
@@ -329,8 +345,8 @@ class BakedShadows:
             n = -n
         occ = sum(w * sample(f, p + n * r * self.reach) for f, w, r in zip(self.fields, self.WEIGHTS, self.RADII))
         f = 1.0 - (1.0 - darkest) * np.clip((occ - 0.16) / 0.34, 0.0, 1.0)
-        self._factor[key] = f.astype(np.float32)
-        return self._factor[key]
+        self._factor[key] = (mesh, f.astype(np.float32))
+        return self._factor[key][1]
 
 
 def outline_edges(lin, bg, ids=None, thr=0.02):

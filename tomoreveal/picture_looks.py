@@ -36,9 +36,9 @@ class PictureLooks:
             f = self._ao.factor(mesh, dark)
             col = np.array(act.GetProperty().GetColor(), np.float32)
             key = (id(mesh), tuple(np.round(col, 4)), id(f))
-            if getattr(act, "_ao_key", None) != key:
+            if getattr(act, "_ao_key", None) != key or getattr(act, "_ao_mesh", None) is not mesh:
                 rgb = np.clip(f[:, None] * col[None, :] * 255.0, 0, 255).astype(np.uint8)
-                mesh.point_data["ao_rgb"] = rgb; act._ao_key = key
+                mesh.point_data["ao_rgb"] = rgb; act._ao_key = key; act._ao_mesh = mesh
                 m = act.mapper; m.SetInputData(mesh); m.SetScalarModeToUsePointFieldData(); m.SelectColorArray("ao_rgb")
                 m.SetColorModeToDirectScalars()
             act.mapper.ScalarVisibilityOn()

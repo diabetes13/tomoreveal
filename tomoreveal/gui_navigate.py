@@ -70,7 +70,10 @@ class Navigator:
         return v
 
     def apply(self, v, quick=True):
-        w = self.win; part = w.view_part()
+        w = self.win
+        if w.locked_part():  # a part with a locked view (3.5): nothing moves it
+            self._anim = None; return
+        part = w.view_part()
         pan = [float(x) for x in v.get("pan") or [0, 0, 0]]
         target = part["view"] if part else w.spec["view"]
         if any(abs(x) > 1e-9 for x in pan):
@@ -350,7 +353,7 @@ class Navigator:
         sel = w.parts_panel.part(w.selected_part) if w.selected_part else None
         if sel is not None and sel.get("type") == "path" and (sel.get("source") or {}).get("kind") == "points":
             act("Add path point here", lambda: self.add_path_point(sel["id"], P), P is not None)
-        act("Use this view for the selected part", lambda: self.use_view(sel), sel is not None and sel.get("type") in ("overview", "focus", "path"),
+        act("Use this view for the selected part", lambda: self.use_view(sel), sel is not None and sel.get("type") in ("overview", "slide", "hold", "focus", "path") and not sel.get("locked"),
             "Store this camera view in the selected overview, close-up or camera path")
         for extra in getattr(w, "preview_menu_extras", []):  # arrows and text boxes (phase 6) add their entries here
             extra(m, f, P)
@@ -381,12 +384,14 @@ class Navigator:
         w = self.win
         if part is None:
             return
+        if part.get("locked"):
+            w.say("The view of this part is locked. Untick 'Lock the view of this part' in the Movie tab first.", "err"); return
         v = self.view(); pos, foc, _, _, _ = w.st.ren.camera_frame()
-        if part["type"] == "overview":
+        if part["type"] in ("overview", "slide", "hold"):
             part["view"] = dict(tilt=float(v["tilt"]), az=float(v["az"]), zoom=float(v["zoom"]),
                                 **({"pan": v["pan"]} if any(abs(x) > 1e-9 for x in v["pan"]) else {}))
-        elif part["type"] == "focus":
-            part["tilt"] = float(v["tilt"])
+        elif part["type"] == "focus":  # the angle it is seen from (3.5: also the turn, which used to follow the main view)
+            part["tilt"] = float(v["tilt"]); part["view"] = dict(az=float(v["az"]))
         elif part["type"] == "path":
             ws = list(part.get("waypoints") or []); ws.append(dict(pos=[float(x) for x in pos], focal=[float(x) for x in foc], pause=0.0))
             part["waypoints"] = ws; part["source"] = dict(part.get("source") or {}, kind="points")

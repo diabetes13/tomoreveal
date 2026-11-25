@@ -313,7 +313,10 @@ class Look35Controls(QtC.QObject):
         self.membranes.activated.connect(lambda j: self.set_membranes(self.membranes.itemData(j)))
         self.glass_op = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set(glass_opacity=v / 100))
         self.glass_op.s.setToolTip("How solid the see-through membranes look")
-        f.addRow("Membranes", _row(self.membranes, self.glass_op))
+        self.mem_col = QtW.QPushButton(); self.mem_col.setFixedSize(30, 22)
+        self.mem_col.setToolTip("Choose the colour of the membranes from a colour wheel (solid or see-through)")
+        self.mem_col.clicked.connect(self.pick_membrane_colour)
+        f.addRow("Membranes", _row(self.membranes, self.mem_col, self.glass_op))
         self.glass_line = combo(lk.GLASS_OUTLINES, "glass_outline", "Outlines of see-through membranes: every edge, only their outer "
                                 "edge (no lines across them where they fold or where something lies behind), or none")
         f.addRow("See-through edges", self.glass_line)
@@ -353,7 +356,21 @@ class Look35Controls(QtC.QObject):
         f.addRow(_row(self.richer, self.matte))
 
     def set_membranes(self, how):
-        self.set(glass=how == "glass", membrane_colour=lk.CREAM if how == "cream" else None)
+        self.set(glass=how == "glass", membrane_colour=lk.solid_colour(self.win.spec) if how == "cream" else None)
+
+    def pick_membrane_colour(self):
+        w = self.win
+        if w.spec is None:
+            return
+        L = lk.style35(w.spec); glass = bool(L["glass"])
+        cur = L["glass_colour"] if glass else (L["membrane_colour"] or lk.solid_colour(w.spec))
+        c = QtW.QColorDialog.getColor(QtG.QColor(cur), w, "Colour of the membranes")
+        if not c.isValid():
+            return
+        if glass:
+            self.set(glass_colour=c.name())
+        else:
+            self.set(membrane_colour=c.name(), solid_colour=c.name())
 
     def choose(self, name):
         w = self.win
@@ -404,6 +421,9 @@ class Look35Controls(QtC.QObject):
         for cb, v in ((self.between, L["between"]), (self.pastel, L["pastel"]), (self.richer, L["richer"]), (self.matte, L["lighting"])):
             _quiet(cb, lambda cb=cb, v=v: cb.setChecked(bool(v)))
         _setv(self.glass_op, 100 * float(L["glass_opacity"])); self.glass_op.setVisible(bool(L["glass"]))
+        mode = lk.membrane_look(L); self.mem_col.setVisible(mode != "own")
+        col = L["glass_colour"] if mode == "glass" else (L["membrane_colour"] or lk.solid_colour(w.spec))
+        self.mem_col.setStyleSheet(f"background:{col}; border:1px solid palette(mid); border-radius:3px")
         self.glass_line.setEnabled(bool(L["glass"]))
         self.reach.setEnabled(L["shadow"] != "none"); self.ocol.setEnabled(L["outline"] != "off"); self.between.setEnabled(L["outline"] != "off")
 
@@ -423,6 +443,8 @@ def membrane_row(win, form, key, name):
 
     def put(on):
         win.spec["classes"].setdefault(key, {})["membrane"] = bool(on); win.schedule()
+        if hasattr(win, "look35"):
+            win.look35.sync()  # "smoother membrane surfaces" counts the membranes
     cb.toggled.connect(put)
     c = win.spec["classes"].get(key, {})
     sh = QtW.QCheckBox("soft shadows"); sh.setChecked(not c.get("no_shadow"))

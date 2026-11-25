@@ -293,13 +293,14 @@ class Studio:
             elif src.startswith("file:"):
                 fpath = src[5:]; f = self.tomo_files[fpath]; m = self._match(fpath, lambda *a: None) if self.sessions else None
                 if m is not None and m["error"] is None:
-                    self.ds.set_tomogram(m["v"], m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"]), os.path.basename(fpath))
+                    self.ds.set_tomogram(self._flipped(m["v"]), m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"]),
+                                         os.path.basename(fpath))
                 else:
-                    self.ds.set_tomogram(f["arr"], f["vox"], os.path.basename(fpath))
+                    self.ds.set_tomogram(self._flipped(f["arr"]), f["vox"], os.path.basename(fpath))
             else:
                 p, i = src[8:].rsplit(":", 1); im = self.sessions[p].images()[int(i)]
                 log(f"reading image '{im['title']}' from the session ...")
-                self.ds.set_tomogram(self.sessions[p].read_image(im), im["voxel"], im["title"])
+                self.ds.set_tomogram(self._flipped(self.sessions[p].read_image(im)), im["voxel"], im["title"])
             self._tomo_loaded = src
         return tf
 
@@ -366,18 +367,20 @@ class Studio:
         for s in self.seg_sources:
             self._place(s, ref, ref_name, tf, log)
         use = [s for s in self.seg_sources if s["enabled"] and s["usable"]]
-        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background)
+        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background, self.flip)
         if sig != self._seg_loaded:
             parts = []
             for s in use:
-                if s["kind"] == "scores":
+                if self.flip:  # shown flipped: a copy of the source's settings with the flipped volume (statistics of its own)
+                    parts.append(dict(s, arr=self._flipped(s["arr"]), _stats=None, **({} if s["kind"] in ("labels", "scores") else {"kind": "labels"})))
+                elif s["kind"] == "scores":
                     parts.append(s)  # the source itself carries arr, scale and thr, so a threshold change persists
                 else:
                     parts.append(s if s["kind"] == "labels" else dict(s, kind="labels"))
             self.ds.set_segmentation(parts, vox=next((s["vox"] for s in use if s.get("vox")), None),
                                      keep_background=self.keep_background, shape=ref)
             for s, part in zip(use, parts):  # keep label statistics for the next rebuild
-                if part is not s:
+                if part is not s and not self.flip:
                     s["_stats"] = part.get("_stats")
             self._seg_loaded = sig; self._stale = True
         if self.has_segmentation and any(k not in self.ds.meshes and self.ds.bbox.get(k) is not None and not c["background"]
@@ -439,6 +442,24 @@ class Studio:
         self.sessions = {}; self.tomo_files = {}; self.seg_sources = []; self.hidden = {}
         self.tomo_source = None; self._tomo_auto = True; self._tomo_loaded = None; self._seg_loaded = None
         self._matches = {}; self._stale = False; self.match_note = ""
+        self.flip = ()  # axes of the volume shown flipped (3.5): a subset of "x", "y", "z"
+
+    FLIP_AXES = {"z": 0, "y": 1, "x": 2}  # numpy axis of each (arrays are z, y, x)
+
+    def _flipped(self, arr):
+        """The volume as shown: flipped in the chosen axes (a view, nothing is copied and the files are not changed)."""
+        ax = tuple(sorted(self.FLIP_AXES[a] for a in self.flip))
+        return np.flip(arr, ax) if ax and arr is not None else arr
+
+    def set_flip(self, axes, log=print, make_renderer=True):
+        """Show the tomogram and every segmentation flipped in these axes ("x", "y", "z"); surfaces are made again."""
+        axes = tuple(a for a in "xyz" if a in (axes or ()))
+        if axes == self.flip:
+            return self.info()
+        self.flip = axes; self.ds._mesh_cache.clear(); self.ds.meshes = {}; self._tomo_loaded = None; self._seg_loaded = None
+        self._drop_renderer()
+        log("flipping the volume and building 3D surfaces ...")
+        return self._update(log, make_renderer)
 
     def reset(self):
         self._drop_renderer(); self._init_sources()
@@ -449,6 +470,9 @@ class Studio:
         if k not in self.ds.scores:
             raise UserError("only structures loaded from score volumes have a threshold")
         self.ds.set_threshold(k, value)
+        src = self._source(self.ds.scores[k].get("key"))
+        if src is not None and src is not self.ds.scores[k]:  # a flipped copy (3.5): the source keeps the threshold too
+            src["thr"] = self.ds.scores[k]["thr"]
         if self.ren is not None:
             self.ren.update_class(k)
         return dict(voxels=self.ds.classes[k]["voxels"], mesh=k in self.ds.meshes, threshold=self.ds.classes[k]["threshold"])
@@ -466,7 +490,7 @@ class Studio:
     def info(self):
         d = dict(can_show=self.can_show, has_tomogram=self.has_tomogram, has_segmentation=self.has_segmentation,
                  outdir=self.outdir, views=VIEWS, version=__version__, match_note=self.match_note,
-                 tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(),
+                 tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(), flip=list(self.flip),
                  sessions=[dict(key=f"session:{p}", label=os.path.basename(p), **self.hidden.get(p, {})) for p in self.sessions],
                  segmentation_sources=[dict(key=s["key"], kind=s["kind"], label=s["label"], group=s["group"], path=s["path"],
                                             session=(f"session:{s['path']}" if s["kind"] == "dragonfly" else None),

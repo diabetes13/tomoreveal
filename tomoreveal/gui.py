@@ -54,6 +54,7 @@ def build_gui(args):
     from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
     from .look import look_settings, AA_MOVIE, ensure as ensure_look
     from .gui_look import LookControls, style_rows
+    from .gui_numbers import ClipNumbers, NumberEdit
     from .gui_export import ExportControls
     from .encode import output_paths
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
@@ -193,8 +194,8 @@ def build_gui(args):
                     p = QtG.QPainter(self); paint_path(p, self, ren.path_view, sel, hov); p.end()
                 from .gui_annotations import paint_selection
                 p = QtG.QPainter(self); paint_selection(p, self, w); p.end()
-                from .gui_navigate import paint_marker
-                p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_marker(p, self, self.nav); p.end()
+                from .gui_navigate import paint_axis, paint_marker
+                p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_axis(p, self, self.nav); paint_marker(p, self, self.nav); p.end()
 
         def mousePressEvent(self, e):
             if self.box_mode and e.button() == QtC.Qt.LeftButton:
@@ -386,8 +387,8 @@ def build_gui(args):
 
         def _slider(self, parent, label, lo, hi, on_change, fmt):
             row = QtW.QHBoxLayout(); lab = QtW.QLabel(label); lab.setFixedWidth(52)
-            s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); val = QtW.QLabel(""); val.setFixedWidth(52)
-            s.valueChanged.connect(lambda v: (val.setText(fmt(v)), on_change(v)))
+            s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); val = NumberEdit(s, fmt, 52)  # type a value (3.6)
+            s.valueChanged.connect(lambda v: (val.show_value(v), on_change(v)))
             row.addWidget(lab); row.addWidget(s, 1); row.addWidget(val); parent.addLayout(row)
             s._val, s._fmt = val, fmt
             return s
@@ -400,7 +401,7 @@ def build_gui(args):
                 s.setValue(v if isinstance(s, QtW.QDoubleSpinBox) else int(round(v)))
             s.blockSignals(False)
             if hasattr(s, "_val"):
-                s._val.setText(s._fmt(int(round(v))))
+                s._val.show_value(v) if hasattr(s._val, "show_value") else s._val.setText(s._fmt(int(round(v))))
 
         def _menus(self):
             view = self.menuBar().addMenu("View"); tm = view.addMenu("Theme")
@@ -414,6 +415,10 @@ def build_gui(args):
                 a = QtG.QAction(text, self, checkable=True); a.setChecked(self.settings.value(key, False, type=bool))
                 a.toggled.connect(lambda on, key=key: self.settings.setValue(key, bool(on))); nm.addAction(a)
             nm.addSeparator(); nm.addAction("Undo view change", lambda: self.nav.undo()); nm.addAction("Redo view change", lambda: self.nav.redo())
+            a = QtG.QAction("Show rotation axis", self, checkable=True); a.setChecked(self.settings.value("nav/show_axis", False, type=bool))
+            a.setToolTip("Draw the axis a spin or rock turns around in the preview (never in the movie)")
+            a.toggled.connect(lambda on: (self.settings.setValue("nav/show_axis", bool(on)), self.prev.update())); view.addAction(a)
+            self.axis_act = a
 
         @property
         def theme(self):
@@ -504,7 +509,8 @@ def build_gui(args):
             self.clip_s = {}
             for ax, text in (("x", "X"), ("y", "Y"), ("z", "Z (slices)")):
                 row = QtW.QHBoxLayout(); lab = QtW.QLabel(text); lab.setFixedWidth(64)
-                bar = RangeSlider(); val = QtW.QLabel(""); val.setFixedWidth(84); bar._val = val
+                bar = RangeSlider()
+                val = ClipNumbers(lambda lo, hi, ax=ax: self._clip_typed(ax, lo, hi), self._nm_per_voxel); bar._val = val  # typed (3.6)
                 bar.changed.connect(lambda lo, hi, ax=ax: self._clip_changed(ax, lo, hi))
                 row.addWidget(lab); row.addWidget(bar, 1); row.addWidget(val); cl.addLayout(row); self.clip_s[ax] = bar
             row = QtW.QHBoxLayout(); self.clipfit_cb = QtW.QCheckBox("Fit the view to the kept part")
@@ -1233,6 +1239,18 @@ def build_gui(args):
                 lo, hi = c.get(a) or (0, dims[a] - 1)
                 self.clip_s[a].set_range(0, dims[a] - 1, lo, hi); self.clip_s[a]._val.setText(f"{self.clip_s[a].lo} - {self.clip_s[a].hi}")
             self._setv(self.clipfit_cb, c.get("fit", True))
+
+        def _nm_per_voxel(self):
+            from .overlays import voxel_size
+            v = voxel_size(self.spec, self.st.ds) if self.spec is not None and self.st.ds is not None else None
+            return v / 10.0 if v else None
+
+        def _clip_typed(self, ax, lo, hi):
+            """From and to typed beside a clip bar (3.6): clamped to the volume, then as if the bar was dragged."""
+            bar = self.clip_s[ax]; lo = max(bar.mn, min(bar.mx, int(lo))); hi = max(bar.mn, min(bar.mx, int(hi)))
+            if hi <= lo:
+                hi = min(bar.mx, lo + 1); lo = hi - 1
+            bar.set_range(bar.mn, bar.mx, lo, hi); self._clip_changed(ax, lo, hi)
 
         def _clip_changed(self, ax, lo, hi):
             if not self.spec:

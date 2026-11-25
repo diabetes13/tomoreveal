@@ -7,6 +7,7 @@ import numpy as np
 
 from .common import hex2rgb
 from .picking import PreviewPicking
+from .camera import pose_camera
 from .picture_looks import PictureLooks
 from .shadows import restore_unlit, unlit_to_ambient
 from .storyboard import Framer, class_spec, clip_box, others_of, state_key, target_items
@@ -136,6 +137,19 @@ class Renderer(PreviewPicking, PictureLooks):
             m = self.ds.comp_mesh(k, cid, self._soften_now.get(k))
             self.comp_actors[key] = self._add(m, front=True) if m is not None else None
         return self.comp_actors[key]
+
+    def _framer(self, spec, size):
+        """The Framer of a picture of this size with the movie's field of view and projection."""
+        style = spec.get("style", {})
+        return Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
+
+    def _set_camera(self, pos, focal, up, angle, scale):
+        cam = self.pl.camera
+        cam.focal_point = tuple(focal); cam.position = tuple(pos); cam.up = tuple(up)
+        if scale is not None:
+            cam.parallel_projection = True; cam.parallel_scale = scale
+        else:
+            cam.parallel_projection = False; cam.view_angle = angle
 
     def _font(self, px, bold=False):
         if (px, bold) not in self._fonts:
@@ -323,16 +337,8 @@ class Renderer(PreviewPicking, PictureLooks):
         translucent = translucent and not (show_slice and float(s["slice"]) < 0.999)
         self._set_peeling(translucent)
         # camera
-        p = s["pose"]; fr = Framer(self.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
-        d, up = fr.axes(p["tilt"], p["az"]); cam = self.pl.camera
-        if p.get("pos") is not None:  # camera paths give the position and the up direction themselves
-            cam.focal_point = tuple(p["c"]); cam.position = tuple(np.asarray(p["pos"], float)); cam.up = tuple(np.asarray(p["up"], float))
-        else:
-            cam.focal_point = tuple(p["c"]); cam.position = tuple(p["c"] + p["dist"] * d); cam.up = tuple(up)
-        if fr.ortho:
-            cam.parallel_projection = True; cam.parallel_scale = p["scale"]
-        else:
-            cam.parallel_projection = False; cam.view_angle = float(p.get("fov", fr.fov))  # 3.5: per point of a camera path
+        fr = self._framer(spec, size)
+        self._set_camera(*pose_camera(fr, s["pose"]))  # the one writer of the VTK camera (3.6, camera.pose_camera)
         self._show_path(s, spec, preview)
         self._apply_lighting(lk)
         self._apply_slice_texture(s, spec, lk, show_slice, cb)
@@ -403,7 +409,7 @@ class Renderer(PreviewPicking, PictureLooks):
                 if line is not None and part.get("reverse"):
                     line = line[::-1]
                 if line is not None and part.get("steadiness") is not None:
-                    v = spec.get("view", {}); fr = Framer(self.shape, 16 / 9, 30.0)
+                    v = spec.get("view", {}); fr = self._framer(spec, spec.get("output", {}).get("size", [1920, 1080]))  # the movie's shape (3.6; was 16/9)
                     md, _ = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
                     crail, look = follow_rails(part, line, dict(PATH_CAMERA, **(part.get("camera") or {}), _main_dir=list(md)))
                     lines = [("rail", crail), ("look", look)]
@@ -411,7 +417,7 @@ class Renderer(PreviewPicking, PictureLooks):
                     lines = [("path", line)]
             else:
                 wps = part.get("waypoints") or []
-                v = spec.get("view", {}); fr = Framer(self.shape, 16 / 9, 30.0)
+                v = spec.get("view", {}); fr = self._framer(spec, spec.get("output", {}).get("size", [1920, 1080]))  # the movie's shape (3.6; was 16/9)
                 md, _ = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
                 D = 60.0 * float(dict(PATH_CAMERA, **(part.get("camera") or {}))["distance"])
                 zooms, _ = point_values(part, "zoom", 1.0) if part.get("interp") == 2 else ([1.0] * len(wps), None)

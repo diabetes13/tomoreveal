@@ -3,6 +3,7 @@ resizing items in the preview, and the voxel size in the Data tab."""
 import numpy as np
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
+from .gui_numbers import NumberEdit
 from . import overlays as ov
 from .gui_fold import Section
 from .gui_theme import DIM
@@ -16,15 +17,15 @@ PART_ITEMS = (("legend", "legend"), ("slice_label", "slice number"), ("scale_bar
 
 def _slider(lo, hi, value, on_change, fmt):
     w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
-    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(value)); lab = QtW.QLabel(fmt(int(value))); lab.setFixedWidth(44)
-    s.valueChanged.connect(lambda v: (lab.setText(fmt(v)), on_change(v)))
+    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(value)); lab = NumberEdit(s, fmt, 44)  # type a value (3.6)
+    s.valueChanged.connect(lambda v: (lab.show_value(v), on_change(v)))
     h.addWidget(s, 1); h.addWidget(lab); w.slider, w.label, w.fmt = s, lab, fmt
     w.setToolTip = lambda t, s=s, f=w.setToolTip: (f(t), s.setToolTip(t))  # the tooltip goes to the slider too
     return w
 
 
 def _set_slider(w, v):
-    w.slider.blockSignals(True); w.slider.setValue(int(round(v))); w.slider.blockSignals(False); w.label.setText(w.fmt(int(round(v))))
+    w.slider.blockSignals(True); w.slider.setValue(int(round(v))); w.slider.blockSignals(False); w.label.show_value(v)
 
 
 def _quiet(widget, fn):

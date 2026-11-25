@@ -99,21 +99,8 @@ def _ramp(x):
 
 def project(fr, pose, P, aspect):
     """(fx, fy, in front) of a 3D point for a frame's camera pose (the same camera the renderer sets up)."""
-    P = np.asarray(P, float)
-    if pose.get("pos") is not None:
-        cam = np.asarray(pose["pos"], float); d = np.asarray(pose["c"], float) - cam; d /= np.linalg.norm(d) or 1.0
-        up = np.asarray(pose["up"], float); up = up - d * float(up @ d); up /= np.linalg.norm(up) or 1.0
-    else:
-        dd, up = fr.axes(pose["tilt"], pose["az"]); dd = np.asarray(dd); up = np.asarray(up)
-        cam = np.asarray(pose["c"], float) + pose["dist"] * dd; d = -dd
-    right = np.cross(d, up); v = P - cam; z = float(v @ d)
-    if fr.ortho:
-        h = pose["scale"]
-        return 0.5 + float(v @ right) / (2 * h * aspect), 0.5 - float(v @ up) / (2 * h), True
-    if z <= 1e-6:
-        return 0.5, 0.5, False
-    t = math.tan(math.radians(float(pose.get("fov", fr.fov))) / 2)
-    return 0.5 + float(v @ right) / (z * t * aspect) / 2, 0.5 - float(v @ up) / (z * t) / 2, True
+    from .camera import project as _project
+    return _project(fr, pose, P, aspect)
 
 
 def plan_annotations(spec, ds, frames, segments, fr, fps, aspect):

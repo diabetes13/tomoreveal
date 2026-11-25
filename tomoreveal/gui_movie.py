@@ -577,9 +577,23 @@ class PartsPanel(QtW.QWidget):
                 add("Rock angle", _spin(5, 90, float(p.get("angle", 25)), lambda v: self.set(pid, "angle", v), step=5, suffix="\u00b0", decimals=0))
             if p.get("motion", "rock") in ("rock", "spin"):
                 ax = _combo(sb.SPIN_AXES, p.get("spin_axis", "z"), lambda v: self.set(pid, "spin_axis", None if v == "z" else v))
-                ax.setToolTip("The axis of the volume the camera turns around: Z (as seen from above, the usual turn), or X or Y "
-                              "(the volume tumbles, showing its top, side and bottom)")
+                ax.setToolTip("The axis the camera turns around: Z (as seen from above, the usual turn), X or Y (the volume "
+                              "tumbles, showing its top, side and bottom), or the screen's up-down line through the centre "
+                              "(the volume turns around itself however the view is tilted or rotated)")
                 add("Turn around", ax)
+                cen = _combo(sb.CENTRES, p.get("centre") or "volume", lambda v: self.set(pid, "centre", None if v == "volume" else v))
+                cen.setToolTip("Spin turns the camera around this axis. If the centre is far from what is shown, things seem "
+                               "to circle around an empty point. 'Middle of what is shown' is the middle of the clip box "
+                               "(also when the view is not fitted to it).")
+                add("Centre of the turn", cen)
+                steady = QtW.QCheckBox("Keep the size steady during the turn"); steady.setChecked(bool(p.get("steady_zoom")))
+                steady.setToolTip("The camera keeps one distance for the whole turn, so the tomogram does not swing closer "
+                                  "and further away (it is a little smaller, so no corner leaves the picture)")
+                steady.toggled.connect(lambda on: self.set(pid, "steady_zoom", bool(on) or None))
+                gentle = QtW.QCheckBox("Start gently"); gentle.setChecked(p.get("ease_start") in ("gentle", "very_gentle"))
+                gentle.setToolTip("The turn starts slowly instead of at full speed")
+                gentle.toggled.connect(lambda on: self.set(pid, "ease_start", "gentle" if on else None))
+                add("", _hrow(steady, gentle))
             self._view_rows(pid, p, form)
         elif t == "hold":
             self._view_rows(pid, p, form)

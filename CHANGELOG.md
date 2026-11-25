@@ -2,6 +2,12 @@
 
 ## 3.6.0 (in progress)
 
+- **Spins and rocks keep one size.** A turning overview no longer swings closer and further away (the distance changed by up to 62 % during a full spin): Movie tab ▸ overview ▸ **Keep the size steady during the turn** (on for new parts).
+- **Turn around what is shown.** **Centre of the turn: middle of what is shown** (new parts) turns around the middle of the clip box even when the view is not fitted to it; before, a clipped tomogram could circle around an empty point. Right-click a structure ▸ **Rotate around this** makes it the centre. View ▸ **Show rotation axis** draws the axis in the preview (never in the movie).
+- **Turn around the screen's up-down line:** a new choice for spins and rocks: the volume turns around itself however the view is tilted or rotated.
+- **Gentle starts and longer flights.** A rock or spin starts slowly (**Start gently**, on for new parts), and the flight into an overview takes longer when the camera has to turn far (up to 2 s; it was always 0.5 s).
+- **Type numbers.** The value beside every slider is a box: type 30 for Tilt and press Enter (Esc cancels, the arrow keys step, Shift ten at a time). The clip box has from and to boxes beside each bar, in voxels or nanometres ("120 nm").
+- **Fixed: the camera path drawn in the preview** of a portrait or square movie was drawn for a 16:9 picture.
 - **Fixed: a spin around X or Y after a top view swung the picture round first.** Seen from straight above with the view rotated (for example Rotate 90°), the flight into the spin turned the picture 90° and it snapped back when the spin began. Also changes old projects that have this combination (bug fix).
 - **Fixed: captions and the legend changed size while the preview played.** Playback draws smaller pictures, and text there was drawn up to half as big again. Movies are unchanged.
 

@@ -44,16 +44,18 @@ class Framer:
         R = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
         return R @ p, R @ up
 
-    def fit(self, lo, hi, tilt, az, margin=1.07):
-        """Pose that just frames the box lo..hi."""
+    def fit(self, lo, hi, tilt, az, margin=1.07, centre=None):
+        """Pose that just frames the box lo..hi (around `centre` when given, 3.6; else around the box's middle)."""
         p, up = self.axes(tilt, az)
-        c, dist, scale = self.fit_dir(lo, hi, p, up, margin)
+        c, dist, scale = self.fit_dir(lo, hi, p, up, margin, centre)
         return dict(c=c, tilt=float(tilt), az=float(az), dist=dist, scale=scale)
 
-    def fit_dir(self, lo, hi, p, up, margin=1.07):
-        """(centre, distance, scale) that just frame the box lo..hi seen along p (centre -> camera) with this up."""
+    def fit_dir(self, lo, hi, p, up, margin=1.07, centre=None):
+        """(centre, distance, scale) that just frame the box lo..hi seen along p (centre -> camera) with this up.
+        centre (3.6): the rotation centre to look at; the corners are measured from it, so the box still fits."""
         lo, hi = np.asarray(lo, float), np.asarray(hi, float)
-        hi = np.maximum(hi, lo + 1.0); c = (lo + hi) / 2  # at least one voxel wide: a zero-size box has no distance
+        hi = np.maximum(hi, lo + 1.0)  # at least one voxel wide: a zero-size box has no distance
+        c = (lo + hi) / 2 if centre is None else np.asarray(centre, float)
         corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]) - c
         th = math.tan(math.radians(self.fov) / 2)
         right = np.cross(up, p)
@@ -63,24 +65,34 @@ class Framer:
         return c, dist, scale
 
 
-SPIN_AXES = (("around Z (up and down through the slices)", "z"), ("around X", "x"), ("around Y", "y"))
+SPIN_AXES = (("around Z (up and down through the slices)", "z"), ("around X", "x"), ("around Y", "y"),
+             ("around the screen's up-down line", "screen"))
 
 
 def _turn(axis, deg):
-    """Rotation matrix of deg degrees around the x, y or z axis of the volume."""
+    """Rotation matrix of deg degrees around the x, y or z axis of the volume, or around any vector (3.6, Rodrigues)."""
     a = math.radians(deg); c, s = math.cos(a), math.sin(a)
-    return {"x": np.array([[1, 0, 0], [0, c, -s], [0, s, c]]), "y": np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
-            "z": np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+    if isinstance(axis, str):
+        return {"x": np.array([[1, 0, 0], [0, c, -s], [0, s, c]]), "y": np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
+                "z": np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+    k = np.asarray(axis, float); k = k / (np.linalg.norm(k) or 1.0)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + s * K + (1 - c) * (K @ K)
 
 
-def axis_turn_poses(fr, p0, axis, angles, lo, hi):
+CENTRES = (("middle of what is shown", "shown"), ("middle of the whole tomogram", "volume"))  # overview "centre" (3.6)
+
+
+def axis_turn_poses(fr, p0, axis, angles, lo, hi, centre=None):
     """Camera poses turned around the volume's x or y axis (through the rotation centre of p0) by each angle. The
     distance is the one that frames lo..hi at every angle reached, so nothing leaves the picture on the way round."""
     from .paths import _pose
     d0, up0 = fr.axes(p0["tilt"], p0["az"]); c = np.asarray(p0["c"], float)
-    zoom = p0["dist"] / max(1e-9, fr.fit(lo, hi, p0["tilt"], p0["az"], 1.07)["dist"])  # the view's own zoom (and pan)
+    if isinstance(axis, str) and axis == "screen":  # the screen's vertical through the centre: turns "around itself" (3.6)
+        axis = np.asarray(up0, float)
+    zoom = p0["dist"] / max(1e-9, fr.fit(lo, hi, p0["tilt"], p0["az"], 1.07, centre)["dist"])  # the view's own zoom (and pan)
     samples = np.linspace(min(angles), max(angles), 25) if len(angles) else [0.0]
-    D = max(fr.fit_dir(lo, hi, _turn(axis, a) @ d0, _turn(axis, a) @ up0)[1] for a in samples) * zoom
+    D = max(fr.fit_dir(lo, hi, _turn(axis, a) @ d0, _turn(axis, a) @ up0, 1.07, centre)[1] for a in samples) * zoom
     out = []
     for a in angles:
         R = _turn(axis, a); pos = c + D * (R @ d0)
@@ -329,6 +341,22 @@ def image_block(path, height=0.12, x=0.97, y=0.95, anchor="bottom-right"):
 VIEW_TRANSITION = 1.5  # seconds of camera flight into a "View from here" part
 CLOSEUP_TRANSITION = 1.3  # seconds of camera flight into and out of a close-up
 OTHER_TRANSITION = 0.5
+FLIGHT_PER_DEGREE = 0.7 / 90  # 3.6 auto_flight: seconds added per degree the camera turns (90° -> about 1.2 s)
+FLIGHT_MAX = 2.0
+
+
+def auto_flight_seconds(a, b):
+    """Seconds of the automatic flight between two poses (3.6): longer when the camera turns more."""
+    d_az = abs(((b["az"] - a["az"] + 180.0) % 360.0) - 180.0); d_t = abs(b["tilt"] - a["tilt"])
+    return min(FLIGHT_MAX, OTHER_TRANSITION + FLIGHT_PER_DEGREE * math.hypot(d_az, d_t))
+
+
+def with_start_ease(fn, part):
+    """A part's own motion starting gently (3.6 "ease_start"): speed 0 at its first frame; unchanged without it."""
+    how = (part or {}).get("ease_start", "sudden")
+    if how not in ("gentle", "very_gentle"):
+        return fn
+    return lambda u, fn=fn, how=how: fn(ease_curve(u, how, "sudden"))
 
 
 def new_id():
@@ -379,6 +407,8 @@ def new_part(kind, **fields):
         raise ValueError(f"unknown kind of part: {kind}")
     if p["type"] in ("slide", "overview", "focus"):
         p["ease_end"] = "gentle"  # 3.5: new parts slow down at their end; older parts (no key) stop as before
+    if p["type"] == "overview":  # 3.6
+        p.update(steady_zoom=True, centre="shown", ease_start="gentle", auto_flight=True)
     p.update(fields)
     return p
 
@@ -386,13 +416,16 @@ def new_part(kind, **fields):
 # Settings that 3.5 gives new parts, and that parts saved before 3.5 lack (missing = the old behaviour).
 NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle", "each"), "slide": ("ease_end",), "overview": ("ease_end",),
               "path": ("steadiness", "interp")}
+# 3.6 (PLAN-3.6 phase 1): overviews keep one size while turning, turn around the middle of what is shown, start gently,
+# and fly longer into a large turn. Missing = the 3.5 behaviour.
+NEW_IN_3_6 = {"overview": ("steady_zoom", "centre", "ease_start", "auto_flight")}
 WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
 
 def as_legacy(part):
     """A part as a project saved before 3.5 would have it: the 3.5 settings of new parts removed (tests, golden data)."""
     p = copy.deepcopy(part)
-    for k in NEW_IN_3_5.get(p.get("type"), ()):
+    for k in NEW_IN_3_5.get(p.get("type"), ()) + NEW_IN_3_6.get(p.get("type"), ()):
         p.pop(k, None)
     return p
 
@@ -400,7 +433,12 @@ def as_legacy(part):
 def default_parts(rock=True):
     """Slide up, slide back revealing the segmentation, overview: the default movie. The command line keeps the
     rocking overview of every earlier version; the window asks for a still one (rock=False)."""
-    return [new_part("slide_up"), new_part("reveal"), new_part("overview", motion="rock" if rock else "none")]
+    parts = [new_part("slide_up"), new_part("reveal"), new_part("overview", motion="rock" if rock else "none")]
+    if rock:  # the command line's default movie stays as in 3.5 (PLAN-3.6: default_spec unchanged)
+        for p in parts:
+            for k in NEW_IN_3_6.get(p["type"], ()):
+                p.pop(k, None)
+    return parts
 
 
 def focus_shot(target, caption, **kw):
@@ -586,10 +624,17 @@ def build_plan(spec, ds):
         p = dict(p); p["dist"] /= z; p["scale"] /= z
         return p
 
-    def ov(d=0.0, view=None):
+    shown_c = (np.array(cb[0], float) + np.array(cb[1], float)) / 2 if cb else None  # middle of the kept part
+
+    def ov(d=0.0, view=None, centre=None, steady=None):
+        """Overview pose. centre (3.6): rotation centre instead of the framing box's middle; steady: (dist, scale)
+        kept at every angle of a turn instead of refitting each frame."""
         t, a, zm = (tilt, az, zoom) if not view else (float(view.get("tilt", tilt)), float(view.get("az", az)),
                                                        max(0.05, float(view.get("zoom", zoom))))
-        p = zoomed(fr.fit(lo, hi, t, a + d, 1.07), zm)
+        p = fr.fit(lo, hi, t, a + d, 1.07, centre)
+        if steady is not None:
+            p["dist"], p["scale"] = steady
+        p = zoomed(p, zm)
         pan = view_pan(view if view else v)  # the rotation centre moved in the preview (3.5)
         if pan is not None:
             p["c"] = p["c"] + pan
@@ -785,19 +830,31 @@ def build_plan(spec, ds):
             vw = part.get("view") or None
             t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
             back = st["e"] > 0
+            auto_t = part.get("transition") is None and part.get("auto_flight") and not back
             m, ang = part.get("motion", "rock"), float(part.get("angle", 25))
             turn = (lambda u, m=m, ang=ang: ang * math.sin(2 * math.pi * u) if m == "rock" else 360.0 * u if m == "spin" else 0.0)
             axis = part.get("spin_axis", "z") if m in ("rock", "spin") else "z"
-            if axis in ("x", "y"):  # turning around another axis of the volume (3.5): poses worked out once, in steps of 1/n
+            # 3.6: turn around the middle of what is shown (also when the view is not fitted to the clip box)
+            oc = shown_c if part.get("centre") == "shown" and shown_c is not None else None
+            if axis in ("x", "y", "screen"):  # turning around another axis (3.5; the screen's vertical 3.6): poses worked out once
                 uu = [i / (n - 1) if n > 1 else 1.0 for i in range(n)]
-                tp = axis_turn_poses(fr, ov(0.0, vw), axis, [turn(u) for u in uu], lo, hi)
+                tp = axis_turn_poses(fr, ov(0.0, vw, oc), axis, [turn(u) for u in uu], lo, hi, oc)
                 main = (lambda u, tp=tp, n=n: dict(pose=tp[int(round(min(1.0, max(0.0, u)) * (n - 1)))]))
                 start_pose = tp[0]
             else:
-                main = (lambda u, turn=turn, vw=vw: dict(pose=ov(turn(u), vw)))
-                start_pose = ov(0.0, vw)
+                steady = None
+                if part.get("steady_zoom") and m in ("rock", "spin"):  # 3.6: one size for every angle of the turn
+                    vt = float((vw or {}).get("tilt", tilt)); va = float((vw or {}).get("az", az))
+                    angles = [va + turn(k / 72) for k in range(73)]
+                    fits = [fr.fit(lo, hi, vt, a2, 1.07, oc) for a2 in angles]
+                    steady = (max(f["dist"] for f in fits), max(f["scale"] for f in fits))
+                main = (lambda u, turn=turn, vw=vw, oc=oc, steady=steady: dict(pose=ov(turn(u), vw, oc, steady)))
+                start_pose = ov(0.0, vw, oc, steady)
+            main = with_start_ease(main, part)  # 3.6: a rock or spin starts gently
             ep = part if m == "spin" else None  # "slow down at the end" suits a spin, not a rock (it already ends at rest)
             main_w = with_end_ease(main, ep)
+            if auto_t:  # 3.6: a larger turn gets a longer flight (it was always 0.5 s)
+                t = auto_flight_seconds(pose[0], start_pose)
             skip = go_to(start_pose, st["k"], t, slice_to=ramp["s1"] if back else None, tr=tr,
                          nxt=lambda j, f=main_w, n=n: f(j / (n - 1) if n > 1 else 1.0), nn=n)
             if back:

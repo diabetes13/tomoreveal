@@ -344,6 +344,9 @@ class Navigator:
                 pass
             act(f"Zoom to this {name} object" if hit.get("component") is not None else f"Zoom to {name}",
                 lambda: (self.push(force=True), self.glide(self.fit_box(*lo_hi), GLIDE)), lo_hi is not None)
+            act(f"Rotate around this {name}" if hit.get("component") is not None else f"Rotate around {name}",
+                lambda: (self.push(force=True), self.glide(self.centre_on((np.asarray(lo_hi[0], float) + np.asarray(lo_hi[1], float)) / 2), GLIDE)),
+                lo_hi is not None, "Make the middle of this the rotation centre: spins and rocks then turn around it")
             act(f"Hide {name}", lambda: self.set_shown(key, False))
             act(f"Show only {name}", lambda: self.show_only(key))
             tgt = {"class": key, "component": hit["component"]} if hit.get("component") is not None else {"class": key}
@@ -408,3 +411,46 @@ def paint_marker(p, prev, nav):
     for col, wd in ((QtG.QColor(0, 0, 0, int(140 * a)), 3.5), (QtG.QColor(255, 255, 255, int(200 * a)), 1.5)):
         p.setPen(QtG.QPen(col, wd)); p.drawLine(QtC.QPointF(c.x() - r, c.y()), QtC.QPointF(c.x() + r, c.y()))
         p.drawLine(QtC.QPointF(c.x(), c.y() - r), QtC.QPointF(c.x(), c.y() + r))
+
+
+def rotation_axis(win):
+    """(centre, unit axis, part) of the spin or rock shown or selected in the preview, or None (3.6)."""
+    ren, plan = win.st.ren, win.timeline.canvas.plan
+    if ren is None or plan is None or win.spec is None:
+        return None
+    pid = sb.part_at_frame(plan, win.frame)
+    part = win.parts_panel.part(pid) if pid else None
+    if part is None or part.get("type") != "overview" or part.get("motion") not in ("rock", "spin"):
+        sel = win.parts_panel.part(win.selected_part) if win.selected_part else None
+        part = sel if sel is not None and sel.get("type") == "overview" and sel.get("motion") in ("rock", "spin") else None
+    if part is None:
+        return None
+    _, c, _, up, _ = ren.camera_frame()
+    axis = {"x": np.array([1.0, 0, 0]), "y": np.array([0, 1.0, 0])}.get(part.get("spin_axis") or "z", np.array([0, 0, 1.0]))
+    if part.get("spin_axis") == "screen":
+        axis = np.asarray(up, float)
+    return np.asarray(c, float), axis, part
+
+
+def paint_axis(p, prev, nav):
+    """The axis a spin or rock turns around (View ▸ Show rotation axis, and briefly after the centre moves): a dashed
+    line through the centre with a dot. Preview only, never in a movie (3.6)."""
+    if nav is None or not prev.image_px():
+        return
+    w = nav.win
+    show = w.settings.value("nav/show_axis", False, type=bool) or nav.marker() is not None
+    found = rotation_axis(w) if show else None
+    if found is None:
+        return
+    c, axis, _ = found
+    ren = w.st.ren; L = 0.6 * float(np.linalg.norm(np.asarray(w.st.ds.shape, float)))
+    (fa, oka), (fb, okb), (fc, okc) = ren.project(c - L * axis), ren.project(c + L * axis), ren.project(c)
+    if not okc:
+        return
+    A, B, C = prev.to_widget(*fa), prev.to_widget(*fb), prev.to_widget(*fc)
+    for col, wd, style in ((QtG.QColor(0, 0, 0, 150), 3.5, QtC.Qt.SolidLine), (QtG.QColor(255, 210, 63, 230), 1.6, QtC.Qt.DashLine)):
+        p.setPen(QtG.QPen(col, wd, style))
+        if oka and okb:
+            p.drawLine(A, B)
+    p.setPen(QtG.QPen(QtG.QColor(0, 0, 0, 160), 1.5)); p.setBrush(QtG.QColor(255, 210, 63))
+    p.drawEllipse(C, 4.5, 4.5); p.setBrush(QtC.Qt.NoBrush)

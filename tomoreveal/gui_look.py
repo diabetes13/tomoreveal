@@ -3,6 +3,7 @@ import math
 
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
+from .gui_numbers import NumberEdit
 from . import look as lk
 from .gui_fold import Fold, Section
 from .gui_theme import DIM
@@ -54,14 +55,14 @@ class LightBall(QtW.QWidget):
 
 def _slider(lo, hi, fmt, fn):
     w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
-    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); lab = QtW.QLabel(""); lab.setFixedWidth(44)
-    s.valueChanged.connect(lambda v: (lab.setText(fmt(v)), fn(v))); h.addWidget(s, 1); h.addWidget(lab)
+    s = QtW.QSlider(QtC.Qt.Horizontal); s.setRange(lo, hi); lab = NumberEdit(s, fmt, 44)  # type a value (3.6)
+    s.valueChanged.connect(lambda v: (lab.show_value(v), fn(v))); h.addWidget(s, 1); h.addWidget(lab)
     w.s, w.lab, w.fmt = s, lab, fmt
     return w
 
 
 def _setv(w, v):
-    _quiet(w.s, lambda: w.s.setValue(int(round(v)))); w.lab.setText(w.fmt(int(round(v))))
+    _quiet(w.s, lambda: w.s.setValue(int(round(v)))); w.lab.show_value(v)
 
 
 class LookControls(QtC.QObject):

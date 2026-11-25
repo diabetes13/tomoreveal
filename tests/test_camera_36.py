@@ -85,3 +85,129 @@ def test_an_edit_does_not_rebuild_the_panels(window):
     QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)  # widgets given to deleteLater go now
     gone = [w for w in before if not shiboken6.isValid(w) or w.parent() is None]
     assert not gone, f"{len(gone)} of {len(before)} controls were thrown away and made again"
+
+
+# ---- phase 1: steady spins, rotation centre, screen axis, gentle start, longer flights ----
+
+def _framer(spec, ds):
+    w, h = spec["output"]["size"]
+    return sb.Framer(ds.shape, w / h, float(spec["style"].get("fov", 30)), bool(spec["style"].get("ortho", False)))
+
+
+def _main(plan, part):
+    lo, n = sb.main_range(plan, part["id"])
+    return plan.frames[lo:lo + n]
+
+
+def test_new_overviews_keep_one_size_while_they_turn(studio):
+    ds = studio.ds
+    for motion in ("spin", "rock"):
+        spec = tr.default_spec(ds); p = sb.new_part("overview", motion=motion, seconds=4); spec["shots"] = [p]
+        d = [f["pose"]["dist"] for f in _main(sb.build_plan(spec, ds), p)]
+        assert max(d) / min(d) - 1 < 1e-4, motion
+        spec["shots"] = [sb.as_legacy(p)]  # saved before 3.6: refitted every frame, as before
+        d = [f["pose"]["dist"] for f in _main(sb.build_plan(spec, ds), spec["shots"][0])]
+        assert max(d) / min(d) - 1 > 0.05, motion
+
+
+def test_turning_around_the_middle_of_what_is_shown(studio):
+    ds = studio.ds; nz, ny, nx = ds.shape
+    spec = tr.default_spec(ds)
+    spec["clip"] = dict(on=True, x=[10, nx // 3], y=[20, ny // 2], z=[0, nz - 1], fit=False)
+    cb = sb.clip_box(spec, ds.shape); mid = (np.array(cb[0], float) + np.array(cb[1], float)) / 2
+    p = sb.new_part("overview", motion="spin", seconds=2); spec["shots"] = [p]
+    assert all(np.allclose(f["pose"]["c"], mid) for f in _main(sb.build_plan(spec, ds), p))
+    spec["shots"] = [sb.as_legacy(p)]  # old parts: the whole volume's middle
+    vol = np.array([nx - 1, ny - 1, nz - 1], float) / 2
+    assert all(np.allclose(f["pose"]["c"], vol) for f in _main(sb.build_plan(spec, ds), spec["shots"][0]))
+
+
+def test_spin_around_the_screens_vertical_after_a_drag(studio):
+    ds = studio.ds
+    spec = tr.default_spec(ds); spec["view"].update(tilt=55.0, az=40.0)  # as after dragging the view
+    p = sb.new_part("overview", motion="spin", spin_axis="screen", seconds=3); spec["shots"] = [p]
+    fr = _framer(spec, ds); main = _main(sb.build_plan(spec, ds), p)
+    ax = [view_axes(fr, f["pose"]) for f in main]
+    up0 = ax[0][1]
+    assert all(angle(up, up0) < 0.5 for _, up in ax)  # the screen's vertical does not move
+    assert all(np.allclose(f["pose"]["c"], main[0]["pose"]["c"]) for f in main)
+    assert angle(ax[0][0], ax[-1][0]) < 1.0  # ends where it began
+    assert max(angle(ax[0][0], d) for d, _ in ax) > 170  # and really went round
+
+
+def test_rocks_and_spins_start_gently(studio):
+    ds = studio.ds
+    spec = tr.default_spec(ds); p = sb.new_part("overview", motion="rock", angle=30, seconds=4); spec["shots"] = [p]
+    az = [f["pose"]["az"] for f in _main(sb.build_plan(spec, ds), p)]
+    speed = np.abs(np.diff(az))
+    assert speed[0] < 0.1 * speed.max()
+
+
+def test_a_large_turn_gets_a_longer_flight(studio):
+    ds = studio.ds
+    spec = tr.default_spec(ds)
+    a = sb.new_part("overview", motion="none", seconds=1, view=dict(tilt=42.0, az=0.0, zoom=1.0))
+    b = sb.new_part("overview", motion="none", seconds=1, view=dict(tilt=42.0, az=170.0, zoom=1.0))
+    spec["shots"] = [a, b]; plan = sb.build_plan(spec, ds); fps = plan.fps
+    n = sum(1 for f in plan.frames if f.get("part") == b["id"] and f["phase"] == "transition")
+    assert abs(n - round(fps * sb.auto_flight_seconds(dict(az=0.0, tilt=42.0), dict(az=170.0, tilt=42.0)))) <= 1
+    assert n > fps * 1.5
+    spec["shots"] = [a, sb.as_legacy(b)]; plan = sb.build_plan(spec, ds)
+    assert sum(1 for f in plan.frames if f.get("part") == b["id"] and f["phase"] == "transition") == round(fps * sb.OTHER_TRANSITION)
+
+
+def test_one_writer_of_the_camera():
+    """camera.pose_camera is the only way the VTK camera is set (render._set_camera; the shadow self-test has its own)."""
+    import re
+    from pathlib import Path
+    pkg = Path(tr.__file__).parent
+    hits = []
+    for f in pkg.glob("*.py"):
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if re.search(r"(cam|camera)\.(position|focal_point|parallel_scale|view_angle)\s*=(?!=)|camera_position\s*=", line):
+                hits.append(f"{f.name}:{i}")
+    assert all(h.startswith(("render.py", "shadows.py")) for h in hits), hits
+    assert sum(h.startswith("render.py") for h in hits) <= 3  # position, focal point and up on one line; scale; angle
+
+
+def test_the_preview_path_line_uses_the_movies_shape(studio):
+    """The camera path drawn in the preview used a fixed 16:9 framer: wrong for portrait movies (audit, phase 0.3)."""
+    from tomoreveal.paths import PATH_CAMERA
+    ds, ren = studio.ds, studio.ren
+    spec = tr.default_spec(ds); spec["output"]["size"] = [1080, 1920]
+    nz, ny, nx = ds.shape
+    p = sb.new_part("path", seconds=3, source=dict(kind="points"),
+                    waypoints=[dict(point=[nx * 0.3, ny * 0.3, nz / 2]), dict(point=[nx * 0.7, ny * 0.6, nz / 2])])
+    spec["shots"] = [p]; f = sb.build_plan(spec, ds).frames[3]
+    ren.preview_part = p["id"]
+    try:
+        ren.draw(f, spec, (270, 480), preview=True)
+        raws = ren._path3d["raw"]
+    finally:
+        ren.preview_part = None
+    md, _ = _framer(spec, ds).axes(float(spec["view"]["tilt"]), float(spec["view"]["az"]))
+    D = 60.0 * float(PATH_CAMERA["distance"])
+    for w, P in zip(p["waypoints"], raws):
+        assert np.allclose(P, np.asarray(w["point"], float) + D * np.asarray(md)), "path line not in the movie's framing"
+
+
+def test_typed_numbers_move_the_sliders(window):
+    """R10: every slider's value can be typed; clip boxes take voxels or nm."""
+    from PySide6 import QtWidgets
+    from tomoreveal.gui_numbers import ClipNumbers, NumberEdit, nearest_step, to_voxels
+    app, win, errs = window
+    edit = win.tilt_s._val
+    assert isinstance(edit, NumberEdit)
+    edit.setText("30"); edit.apply(); pump(app)
+    assert win.tilt_s.value() == 30 and abs(float(win.spec["view"]["tilt"]) - 30) < 1e-6
+    edit.setText("500°"); edit.apply(); pump(app)
+    assert win.tilt_s.value() == win.tilt_s.maximum()  # clamped
+    zoom = win.zoom_s._val; zoom.setText("2.5x"); zoom.apply(); pump(app)
+    assert abs(float(win.spec["view"]["zoom"]) - 2.5) < 0.02
+    assert to_voxels("120 nm", 4.11) == 29 and to_voxels("120", 4.11) == 120
+    clip = win.clip_s["x"]._val; assert isinstance(clip, ClipNumbers)
+    clip.lo.setText("20"); clip.hi.setText("100"); clip._typed(); pump(app)
+    assert win.spec["clip"]["x"] == [20, 100]
+    s = QtWidgets.QSlider(); s.setRange(0, 100)
+    assert nearest_step(s, lambda v: f"{v / 100:.2f}x", 0.333) == 33
+    assert not errs

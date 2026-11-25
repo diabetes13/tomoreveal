@@ -7,8 +7,10 @@ is exactly where TomoReveal 3.3 drew it. Each part may override show / hide: par
 import copy
 import math
 
-NAMES = ("legend", "slice_label", "scale_bar", "title", "caption")
-LABELS = {"legend": "Legend", "slice_label": "Slice number", "scale_bar": "Scale bar", "title": "Title", "caption": "Captions"}
+NAMES = ("legend", "slice_label", "scale_bar", "title", "caption", "axes")
+LABELS = {"legend": "Legend", "slice_label": "Slice number", "scale_bar": "Scale bar", "title": "Title", "caption": "Captions",
+          "axes": "Orientation (X Y Z)"}
+AXIS_COLOURS = {"x": (230, 75, 60), "y": (80, 190, 80), "z": (70, 130, 235)}  # red, green, blue
 ANCHORS = tuple(f"{v}-{h}" for v in ("top", "middle", "bottom") for h in ("left", "center", "right"))
 DEFAULTS = {
     "legend": dict(show=True, x=None, y=None, anchor="top-right", size=1.0, box=True, box_opacity=0.47, columns=1, title="",
@@ -17,9 +19,13 @@ DEFAULTS = {
     "scale_bar": dict(show=False, x=0.97, y=0.95, anchor="bottom-right", size=1.0, length_nm="auto", thickness=1.0, color="auto",
                       label=True, mode="screen"),
     "title": dict(show=True, x=None, y=None, anchor="bottom-left", size=1.0),
-    "caption": dict(show=True, x=None, y=None, anchor="bottom-center", size=1.4, box="dark", color="auto", bold=False, fade=0.0),
+    "caption": dict(show=True, x=None, y=None, anchor="bottom-center", size=1.4, box="dark", color="auto", bold=False, fade=0.0,
+                    fill="#3a6ea5"),  # fill: colour of a "coloured box" (3.6)
+    # 3.6: three arrows showing the tomogram's X, Y and Z as the camera sees them; in the preview only unless in_movie
+    "axes": dict(show=False, x=None, y=None, anchor="bottom-left", size=1.0, in_movie=False, labels=None),
 }
-CAPTION_BOXES = (("see-through box", "dark"), ("light box", "light"), ("outline", "outline"), ("no box (text with a shadow)", "none"))
+CAPTION_BOXES = (("see-through box", "dark"), ("light box", "light"), ("coloured box", "fill"), ("outline", "outline"),
+                 ("no box (text with a shadow)", "none"))
 CAPTION_COLOURS = (("automatic", "auto"), ("white", "#ffffff"), ("black", "#000000"), ("yellow", "#ffd23f"), ("cyan", "#45b9e8"))
 SIZE_RANGE = (0.5, 3.0)
 NICE = (1, 2, 5)
@@ -224,8 +230,12 @@ class Painter:
         if shown and text and alpha > 0.002:
             box = item.get("box", "dark"); A = max(0.0, min(1.0, float(alpha)))
             light = box == "light" or (box == "dark" and not self.dark)  # the box is light: dark text
+            if box == "fill":  # a box in any colour (3.6): black or white text, whichever reads
+                from .common import hex2rgb
+                fc = tuple(int(round(255 * v)) for v in hex2rgb(item.get("fill") or "#3a6ea5"))
+                light = 0.299 * fc[0] + 0.587 * fc[1] + 0.114 * fc[2] > 150
             if item.get("color", "auto") in (None, "auto"):
-                fg = (0, 0, 0) if (light if box in ("dark", "light") else not self.dark) else (255, 255, 255)
+                fg = (0, 0, 0) if (light if box in ("dark", "light", "fill") else not self.dark) else (255, 255, 255)
             else:
                 from .common import hex2rgb
                 fg = tuple(int(round(255 * v)) for v in hex2rgb(item["color"]))
@@ -233,6 +243,8 @@ class Painter:
                 b = self._back(0.47); self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=b[:3] + (round(b[3] * A),))
             elif box == "light":
                 self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=(255, 255, 255, round(220 * A)))
+            elif box == "fill":
+                self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=fc + (round(235 * A),))
             elif box == "outline":
                 self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, outline=fg + (round(255 * A),),
                                          width=max(1, round(px * 0.12)))
@@ -314,6 +326,36 @@ class Painter:
         d.text((dx + px * 1.5, dy), name, fill=fg, font=f, **kw)
         al = sub.getchannel("A").point(lambda v: int(round(v * a))); sub.putalpha(al)
         region = self.layer.crop((X, Y, X + w, Y + h)); self.layer.paste(Image.alpha_composite(region, sub), (X, Y))
+
+    def axes(self, item, dirs, shown):
+        """The orientation marker (3.6): dirs = {"x"|"y"|"z": (right, up, towards the viewer)} of the tomogram's axes as
+        the camera sees them (unit vectors). Arrows from one origin, the nearest drawn last, each with its label."""
+        import math as _m
+        s = _size(item); px = self.px * s; L = px * 2.6; f = self._font_exact(px * 0.95)
+        pad = px * 1.1; bw = bh = 2 * (L + pad)
+        x0, y0 = place(item, bw, bh, self.W, self.H, (px * 1.2, self.H - bh - px * 1.2))
+        cx, cy = x0 + bw / 2, y0 + bh / 2
+        labels = item.get("labels") or {}
+        if shown:
+            fg = self.fg
+            for ax in sorted(dirs, key=lambda a: dirs[a][2]):  # far ones first
+                r, u, _ = dirs[ax]; col = AXIS_COLOURS[ax] + (255,)
+                ex, ey = cx + r * L, cy - u * L; n = _m.hypot(ex - cx, ey - cy)
+                w = max(2, round(px * 0.16))
+                self.d.line([(cx, cy), (ex, ey)], fill=col, width=w)
+                if n > px * 0.4:  # a head, unless it points straight at the viewer
+                    ux, uy = (ex - cx) / n, (ey - cy) / n; hl = min(px * 0.7, n * 0.5); hw = hl * 0.55
+                    bx, by = ex - ux * hl, ey - uy * hl
+                    self.d.polygon([(ex + ux * w * 0.5, ey + uy * w * 0.5), (bx - uy * hw, by + ux * hw), (bx + uy * hw, by - ux * hw)], fill=col)
+                text = str(labels.get(ax) or ax.upper())
+                tw = self.d.textlength(text, font=f); k = 1.0 + (px * 0.7) / max(n, 1e-6)
+                lx, ly = cx + (ex - cx) * k, cy + (ey - cy) * k
+                if n < 1e-6:
+                    lx, ly = cx + px * 0.5, cy - px * 0.5
+                self.d.text((lx - tw / 2, ly - px * 0.55), text, fill=col, font=f,
+                            stroke_width=max(1, round(px * 0.08)), stroke_fill=(0, 0, 0, 200) if fg[0] > 128 else (255, 255, 255, 220))
+            self.d.ellipse([cx - px * 0.18, cy - px * 0.18, cx + px * 0.18, cy + px * 0.18], fill=self.fg)
+        self._record("axes", x0, y0, bw, bh, shown)
 
     def scale_bar(self, item, length_px, text, shown, color=None, at=None):
         """A bar of length_px pixels with its label above. at: (x, y) centre of an on-slice bar's label instead of

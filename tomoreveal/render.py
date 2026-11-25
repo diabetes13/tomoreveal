@@ -80,7 +80,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self._slice_grey, self._shadow_key = None, None
         self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
         self.text_ref_h = None  # the window's preview: text sized for a picture this high, also in smaller quick frames (3.6)
-        self.hide_overlay = None; self.last_layer = None  # 3.6: an overlay item being dragged (drawn by the window meanwhile)
+        self.hide_overlay = None; self.last_layer = None; self._preview_draw = False  # 3.6: an overlay item being dragged (drawn by the window meanwhile)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -197,6 +197,7 @@ class Renderer(PreviewPicking, PictureLooks):
 
     def draw(self, s, spec, size, aa=False, transparent=False, annotate=True, preview=False):
         """One frame. preview=True also shows helpers that never go into a movie (the path of a camera path part)."""
+        self._preview_draw = bool(preview)  # 3.6: the orientation marker shows in the preview, in movies only if asked
         ds, style = self.ds, spec.get("style", {})
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
         if s.get("blend"):  # a dissolve or a fade through black / white between two parts (3.5)
@@ -808,6 +809,15 @@ class Renderer(PreviewPicking, PictureLooks):
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True), float(s.get("cap_a", 1.0)))
+        ax_item = items["axes"]
+        in_window = self._preview_draw or self.text_ref_h is not None  # the preview, also while it plays (text_ref_h is set then)
+        if shown("axes", True) and (in_window or ax_item.get("in_movie")):  # orientation marker (3.6)
+            from .camera import frame_axes
+            _, dvec, up, right = frame_axes(self._framer(spec, size), s["pose"])
+            P.axes(ax_item, {a: (float(e @ right), float(e @ up), float(-(e @ dvec))) for a, e in
+                             (("x", np.array([1.0, 0, 0])), ("y", np.array([0, 1.0, 0])), ("z", np.array([0, 0, 1.0])))}, True)
+        else:
+            P.axes(ax_item, {}, False)
         if s.get("ann"):  # arrows and text boxes (3.5), on top of everything
             from vtkmodules.util.numpy_support import vtk_to_numpy
             from .annotations import draw as draw_annotations

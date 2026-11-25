@@ -11,7 +11,8 @@ from .gui_theme import DIM
 SNAP = 0.015      # fraction of the frame within which an item snaps to an edge, a corner or a centre line
 MARGIN = 0.02     # the edges an item snaps to sit this far inside the frame
 HANDLE = 12       # resize handle size in screen pixels
-SHORT = {"legend": "Legend", "slice_label": "Slice no.", "scale_bar": "Scale bar", "title": "Title", "caption": "Captions"}
+SHORT = {"legend": "Legend", "slice_label": "Slice no.", "scale_bar": "Scale bar", "title": "Title", "caption": "Captions",
+         "axes": "Axes"}
 PART_ITEMS = (("legend", "legend"), ("slice_label", "slice number"), ("scale_bar", "scale bar"))
 
 
@@ -95,8 +96,25 @@ class OverlayControls(QtC.QObject):
         self.cap_bold.toggled.connect(lambda v: self.set("caption", bold=bool(v)))
         self.cap_fade = QtW.QCheckBox("fade in and out"); self.cap_fade.setToolTip("Each caption fades in at the start of its part and out at its end")
         self.cap_fade.toggled.connect(lambda v: self.set("caption", fade=0.4 if v else 0.0))
-        cr.addWidget(QtW.QLabel("Captions:")); cr.addWidget(self.cap_box); cr.addWidget(self.cap_col); cr.addWidget(self.cap_bold)
-        cr.addWidget(self.cap_fade); cr.addStretch(1)
+        self.cap_fill = QtW.QToolButton(); self.cap_fill.setFixedSize(26, 22)
+        self.cap_fill.setToolTip("Colour of the caption's box, from a colour wheel (the text turns black or white, whichever reads)")
+        self.cap_fill.clicked.connect(self.pick_caption_fill)
+        cr.addWidget(QtW.QLabel("Captions:")); cr.addWidget(self.cap_box); cr.addWidget(self.cap_fill); cr.addWidget(self.cap_col)
+        cr.addStretch(1)
+        cr2 = QtW.QHBoxLayout(); cr2.setContentsMargins(64, 0, 0, 0); grid.addLayout(cr2, r, 0, 1, 3); r += 1
+        cr2.addWidget(self.cap_bold); cr2.addWidget(self.cap_fade); cr2.addStretch(1)
+        # orientation marker (3.6)
+        ar = QtW.QHBoxLayout(); grid.addLayout(ar, r, 0, 1, 3); r += 1
+        self.ax_movie = QtW.QCheckBox("also in the movie")
+        self.ax_movie.setToolTip("The orientation arrows show in the preview only, unless this is ticked")
+        self.ax_movie.toggled.connect(lambda v: self.set("axes", in_movie=bool(v)))
+        self.ax_labels = {}
+        ar.addWidget(QtW.QLabel("Orientation:")); ar.addWidget(self.ax_movie)
+        for a in "xyz":
+            le = QtW.QLineEdit(); le.setPlaceholderText(a.upper()); le.setMaximumWidth(70)
+            le.setToolTip(f"Label of the {a.upper()} arrow, for example 'beam' or 'tilt axis' (empty: {a.upper()})")
+            le.textChanged.connect(lambda t, a=a: self.set_axis_label(a, t)); ar.addWidget(le); self.ax_labels[a] = le
+        ar.addStretch(1)
         g.setToolTip("Drag an item in the preview to move it; drag its corner handle to change its size (hold Shift for steps "
                      "of 0.1). Right-click an item for more.")
 
@@ -111,6 +129,23 @@ class OverlayControls(QtC.QObject):
     def set(self, n, **kw):
         if self._ok():
             ov.set_item(self.win.spec, n, **kw); self.win.schedule()
+
+    def set_axis_label(self, a, text):
+        if self._ok():
+            labels = dict(ov.overlay_settings(self.win.spec)["axes"].get("labels") or {})
+            if text.strip():
+                labels[a] = text.strip()
+            else:
+                labels.pop(a, None)
+            self.set("axes", labels=labels or None)
+
+    def pick_caption_fill(self):
+        if not self._ok():
+            return
+        cur = ov.overlay_settings(self.win.spec)["caption"].get("fill") or "#3a6ea5"
+        c = QtW.QColorDialog.getColor(QtG.QColor(cur), self.win, "Colour of the caption box")
+        if c.isValid():
+            self.set("caption", fill=c.name(), box="fill"); self.sync(); self.win.editor.record()
 
     def reset(self, n):
         if self._ok():
@@ -144,6 +179,13 @@ class OverlayControls(QtC.QObject):
         self.cap_col.setCurrentIndex(max(0, self.cap_col.findData(c.get("color", "auto"))))
         _quiet(self.cap_bold, lambda: self.cap_bold.setChecked(bool(c.get("bold"))))
         _quiet(self.cap_fade, lambda: self.cap_fade.setChecked(float(c.get("fade") or 0) > 0))
+        self.cap_fill.setStyleSheet(f"background:{c.get('fill') or '#3a6ea5'}; border:1px solid palette(mid); border-radius:3px")
+        axi = items["axes"]
+        _quiet(self.ax_movie, lambda: self.ax_movie.setChecked(bool(axi.get("in_movie"))))
+        for a, le in self.ax_labels.items():
+            want = (axi.get("labels") or {}).get(a, "")
+            if le.text() != want and not le.hasFocus():
+                _quiet(le, lambda le=le, want=want: le.setText(want))
         vox = ov.voxel_size(self.win.spec, self.win.st.ds)
         ortho = bool(self.win.spec.get("style", {}).get("ortho"))
         self.bar_note.setText("" if vox else "The scale bar needs the voxel size (Data tab).")
@@ -258,7 +300,7 @@ class OverlayDrag(QtC.QObject):
         show_all = self.win.toolbar.boxes.isChecked(); rects = self.rects()
         blocks = sorted((n for n in rects if n.startswith("block:")), key=lambda n: -int(n[6:])) if self.card() else []
         markers = [n for n in rects if n.startswith(("marker:", "look:"))] if self.path_part() else []
-        for n in markers + blocks + ["caption", "scale_bar", "title", "slice_label", "legend"]:
+        for n in markers + blocks + ["caption", "scale_bar", "title", "slice_label", "legend", "axes"]:
             r = rects.get(n)
             if r and (r[1] or show_all):
                 x0, y0, x1, y1 = r[0]

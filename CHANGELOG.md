@@ -17,6 +17,10 @@
 - **Fixed: the camera path drawn in the preview** of a portrait or square movie was drawn for a 16:9 picture.
 - **Fixed: a spin around X or Y after a top view swung the picture round first.** Seen from straight above with the view rotated (for example Rotate 90°), the flight into the spin turned the picture 90° and it snapped back when the spin began. Also changes old projects that have this combination (bug fix).
 - **Fixed: captions and the legend changed size while the preview played.** Playback draws smaller pictures, and text there was drawn up to half as big again. Movies are unchanged.
+- **No more flickering panels.** Ticking a part, locking a view, dragging on the timeline, undo or changing an arrow used to empty and refill the Structures list, the arrows list and the open part's settings. Now only the controls whose values changed are updated; the lists are made again only when parts or structures are added or removed. Ticking a part no longer opens it.
+- **A steady legend** (new projects): the box keeps one size for the whole movie, and in a close-up the rows of the other structures fade to faint (or out, if the others are hidden) instead of vanishing and shrinking the box. Text keeps its size in the smaller frames of preview playback.
+- **Moving the legend, caption, title, slice number or scale bar** moves a picture of it with the mouse, with the same snapping; the frame is drawn again once when you let go (before, every mouse move drew the whole 3D frame, so it lagged and jumped).
+- **Parts have their timeline colour in the Movie tab:** a stripe on each part's line (blue slides, green overviews, red close-ups, purple cards, orange camera paths, grey holds), and in menus that list parts.
 
 ## 3.5.0
 

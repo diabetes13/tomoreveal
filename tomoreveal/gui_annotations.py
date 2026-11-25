@@ -276,7 +276,8 @@ def item_menu(win, aid, gpos, pointer=None):
         if p.get("type") == "card":
             continue
         from .storyboard import part_name
-        cp.addAction(f"{i + 1}. {part_name(p, win.spec, win.st.ds)}", lambda pid=p["id"]: copy_to(win, aid, pid))
+        from .gui_theme import part_icon
+        cp.addAction(part_icon(p), f"{i + 1}. {part_name(p, win.spec, win.st.ds)}", lambda pid=p["id"]: copy_to(win, aid, pid))
     sel = [x for x in win.ann_mouse.selected if an.find(win.spec, x) and an.find(win.spec, x)["kind"] == "text"]
     if len(sel) >= 2:
         al = m.addMenu("Align")
@@ -295,10 +296,18 @@ def commit(win):
         win.ann_panel.rebuild()
 
 
-def change(win, aid, fn):
+def change(win, aid, fn, from_row=False):
     a = an.find(win.spec, aid)
     if a is not None:
-        fn(a); commit(win)
+        fn(a)
+        if from_row and hasattr(win, "ann_panel"):
+            win.ann_panel.mark(aid)  # its own row already shows the change: the row is not made again
+        commit(win)
+
+
+def change_here(win, aid, fn):
+    """A change made in the item's row of the Arrows and text list."""
+    change(win, aid, fn, from_row=True)
 
 
 def delete(win, aid):
@@ -470,16 +479,36 @@ class AnnotationPanel(QtC.QObject):
         self.rows = QtW.QVBoxLayout(); v.addLayout(self.rows)
         self.note = QtW.QLabel(""); self.note.setVisible(False)  # (3.5: the help text is the group's tooltip)
 
+    @staticmethod
+    def _snap(a):
+        import json
+        return json.dumps(a, sort_keys=True, default=str)
+
+    def mark(self, aid):
+        """Item aid was changed from its own row: that row already shows the change, so it is not made again."""
+        a = an.find(self.win.spec, aid) if self.win.spec is not None else None
+        if a is not None and aid in self._shown:
+            self._shown[aid] = self._snap(a)
+
     def rebuild(self):
+        """3.6: the list is made again only when the items listed change; an item changed elsewhere (undo, a drag in
+        the preview, a menu) gets a new row of its own, and the other rows stay as they are (no flicker)."""
         from .gui_data import clear_layout
-        clear_layout(self.rows); w = self.win
+        w = self.win; shown = getattr(self, "_shown", None)
         if w.spec is None:
-            return
+            clear_layout(self.rows); self._shown = {}; self._row_w = {}; return
         pid = w.selected_part
-        for a in an.items(w.spec):
-            if self.only_part.isChecked() and pid and not an.shown_in(a, pid):
-                continue
-            self.rows.addWidget(self._row(a))
+        want = [a for a in an.items(w.spec) if not (self.only_part.isChecked() and pid and not an.shown_in(a, pid))]
+        if shown is not None and [a["id"] for a in want] == list(shown) and getattr(self, "_spec_id", None) == id(w.spec):
+            for i, a in enumerate(want):
+                snap = self._snap(a)
+                if shown[a["id"]] != snap:
+                    old = self._row_w[a["id"]]; new = self._row(a); self.rows.insertWidget(i, new)
+                    old.setParent(None); old.deleteLater(); self._row_w[a["id"]] = new; shown[a["id"]] = snap
+            return
+        clear_layout(self.rows); self._shown = {}; self._row_w = {}; self._spec_id = id(w.spec)
+        for a in want:
+            r = self._row(a); self.rows.addWidget(r); self._row_w[a["id"]] = r; self._shown[a["id"]] = self._snap(a)
 
     def _row(self, a):
         """One item: [shown] [arrow / text] [label] [shape or box] [colour] [x], and under it when it shows and what it
@@ -489,7 +518,7 @@ class AnnotationPanel(QtC.QObject):
         v = QtW.QVBoxLayout(row); v.setContentsMargins(4, 3, 4, 3); v.setSpacing(2)
         h = QtW.QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); v.addLayout(h)
         vis = QtW.QCheckBox(); vis.setChecked(a.get("visible", True)); vis.setToolTip("Show or hide this item")
-        vis.toggled.connect(lambda on: change(w, aid, lambda b: b.__setitem__("visible", bool(on))))
+        vis.toggled.connect(lambda on: change_here(w, aid, lambda b: b.__setitem__("visible", bool(on))))
         kind = QtW.QLabel("→" if arrow else "T"); kind.setToolTip("An arrow" if arrow else "A text box")
         txt = QtW.QLineEdit((a.get("label") or {}).get("text", "") if arrow else a.get("text", ""))
         txt.setToolTip("The label of the arrow, or the text"); txt.setMinimumWidth(80)
@@ -501,7 +530,7 @@ class AnnotationPanel(QtC.QObject):
                     b.setdefault("label", {})["text"] = t
                 else:
                     b["text"] = t
-            change(w, aid, fn)
+            change_here(w, aid, fn)
         txt.editingFinished.connect(set_text)
         st = a.get("style") or {}
 
@@ -510,7 +539,7 @@ class AnnotationPanel(QtC.QObject):
             for t, d in items:
                 cb.addItem(t, d)
             cb.setCurrentIndex(max(0, cb.findData(cur))); cb.setToolTip(tip)
-            cb.activated.connect(lambda j: change(w, aid, lambda b: b.setdefault("style", {}).__setitem__(key, cb.itemData(j))))
+            cb.activated.connect(lambda j: change_here(w, aid, lambda b: b.setdefault("style", {}).__setitem__(key, cb.itemData(j))))
             return cb
         look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
             combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
@@ -539,8 +568,8 @@ class AnnotationPanel(QtC.QObject):
         en = QtW.QDoubleSpinBox(); en.setRange(-0.1, 600); en.setDecimals(1); en.setSingleStep(0.5); en.setSpecialValueText("end")
         en.setPrefix("to "); en.setSuffix(" s"); en.setValue(-0.1 if sh.get("end") is None else float(sh["end"]))
         en.setToolTip("When it disappears ('end': at the end of the part)")
-        stt.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("start", None if x < 0 else float(x))))
-        en.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("end", None if x < 0 else float(x))))
+        stt.valueChanged.connect(lambda x: change_here(w, aid, lambda b: b["show"].__setitem__("start", None if x < 0 else float(x))))
+        en.valueChanged.connect(lambda x: change_here(w, aid, lambda b: b["show"].__setitem__("end", None if x < 0 else float(x))))
         here = QtW.QToolButton(); here.setText("⏵"); here.setToolTip("Start here: it appears at the playhead")
         here.clicked.connect(lambda: self.at_playhead(aid, "start"))
         there = QtW.QToolButton(); there.setText("⏹"); there.setToolTip("End here: it disappears at the playhead")

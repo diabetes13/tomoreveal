@@ -67,7 +67,6 @@ import pytest  # noqa: E402
 from test_tidy_panels import pump, window  # noqa: E402,F401 (fixture)
 
 
-@pytest.mark.xfail(strict=True, reason="PLAN-3.6 phase 3.2 fixes this: every edit rebuilds the Structures list and the open part")
 def test_an_edit_does_not_rebuild_the_panels(window):
     """User report (2026-11-25): the Movie tab's parts and the Structures tab flicker and are jittery. Every edit that
     ends in MovieEditor.commit (ticking a part, locking a view, a timeline drag, undo, any arrow change) threw away and
@@ -85,6 +84,29 @@ def test_an_edit_does_not_rebuild_the_panels(window):
     QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)  # widgets given to deleteLater go now
     gone = [w for w in before if not shiboken6.isValid(w) or w.parent() is None]
     assert not gone, f"{len(gone)} of {len(before)} controls were thrown away and made again"
+    assert win.parts_panel.open_id == pid  # ticking another part leaves the open one open
+    win.editor.commit(); pump(app); QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert all(shiboken6.isValid(w) and w.parent() is not None for w in before)  # a plain commit (an arrow edit, a drag)
+
+
+def test_undo_still_shows_in_the_panels(window):
+    """Controls are updated in place now: undo must still put the old values into them."""
+    from PySide6 import QtCore, QtWidgets
+    app, win, errs = window
+    k = next(iter(win._grid_rows)); row = win._grid_rows[k]
+    old = win.spec["classes"][k]["name"]
+    row["ne"].setText("Renamed"); win.editor.record(); pump(app)
+    assert win.spec["classes"][k]["name"] == "Renamed"
+    win.spec["classes"][k]["color"] = "#123456"; win.editor.commit(); pump(app)
+    win.editor.undo(); pump(app)
+    assert win._grid_rows[k]["ne"].text() == "Renamed" and win.spec["classes"][k]["color"] != "#123456"
+    assert "#123456" not in win._grid_rows[k]["colb"].styleSheet()
+    win.editor.undo(); pump(app); QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert win._grid_rows[k]["ne"].text() == old
+    pid = win.spec["shots"][0]["id"]; win.select_part(pid); pump(app)
+    secs = win.spec["shots"][0]["seconds"]; win.editor.resized(pid, secs + 2); pump(app)  # a timeline drag
+    spins = [s for s in win.parts_panel.rows[pid]["details"].findChildren(QtWidgets.QDoubleSpinBox) if abs(s.value() - (secs + 2)) < 1e-6]
+    assert spins, "the open part's length box shows the new length"
 
 
 # ---- phase 1: steady spins, rotation centre, screen axis, gentle start, longer flights ----

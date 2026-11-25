@@ -12,7 +12,7 @@ LABELS = {"legend": "Legend", "slice_label": "Slice number", "scale_bar": "Scale
 ANCHORS = tuple(f"{v}-{h}" for v in ("top", "middle", "bottom") for h in ("left", "center", "right"))
 DEFAULTS = {
     "legend": dict(show=True, x=None, y=None, anchor="top-right", size=1.0, box=True, box_opacity=0.47, columns=1, title="",
-                   text_color="auto"),
+                   text_color="auto", fixed=False),  # fixed (3.6, new projects): every row laid out, rows that leave fade
     "slice_label": dict(show=True, x=None, y=None, anchor="top-left", size=1.0, format="slice {k}/{n}", show_depth=False),
     "scale_bar": dict(show=False, x=0.97, y=0.95, anchor="bottom-right", size=1.0, length_nm="auto", thickness=1.0, color="auto",
                       label=True, mode="screen"),
@@ -242,15 +242,36 @@ class Painter:
             self.d.text((x0 + px, y0 + px * 0.4), text, fill=fg + (round(255 * A),), font=big, **kw)
         self._record("caption", x0, y0, bw, bh, shown and bool(text))
 
+    def _font_exact(self, px):
+        """3.6: a font of a fractional size (to 1/4 px), so text keeps its proportion in smaller quick frames."""
+        q = round(px * 4) / 4
+        try:
+            return self.font(q if q != int(q) else int(q))
+        except (TypeError, ValueError):  # Pillow before 10.1: whole pixels only
+            return self.font(int(round(px)))
+
     def legend(self, item, rows, shown):
-        """rows: [(name, colour)]."""
-        s = _size(item); px = round(self.px * s) if s != 1.0 else round(self.px); f = self.font(px)
-        title = (item.get("title") or "").strip(); step = round(px * 1.45)
+        """rows: [(name, colour)] or [(name, colour, alpha)] (3.6 'fixed': every row keeps its place, leaving rows fade)."""
+        s = _size(item); fixed = bool(item.get("fixed"))
+        if fixed:
+            px = self.px * s; f = self._font_exact(px)
+        else:
+            px = round(self.px * s) if s != 1.0 else round(self.px); f = self.font(px)
+        rows = [(r[0], r[1], r[2] if len(r) > 2 else 1.0) for r in rows]
+        title = (item.get("title") or "").strip(); step = px * 1.45 if fixed else round(px * 1.45)
         cols = 2 if int(item.get("columns", 1)) == 2 and len(rows) > 1 else 1
         per = math.ceil(len(rows) / cols) if rows else 0
         groups = [rows[i * per:(i + 1) * per] for i in range(cols)] if rows else [[]]
-        widths = [max([self.d.textlength(n, font=f) for n, _ in g] or [px * 4]) + px * 1.5 for g in groups]
-        tw = self.d.textlength(title, font=f) if title else 0
+        if fixed:  # measured at 48 px and scaled: small fonts are hinted to whole pixels, which changes the width
+            big = self._font_exact(48.0); k = px / 48.0
+
+            def tl(t):
+                return self.d.textlength(t, font=big) * k
+        else:
+            def tl(t):
+                return self.d.textlength(t, font=f)
+        widths = [max([tl(n) for n, _, _ in g] or [px * 4]) + px * 1.5 for g in groups]
+        tw = tl(title) if title else 0
         gap = px * 1.6
         inner_w = max(sum(widths) + gap * (cols - 1), tw)
         bw = inner_w + px * 1.9; bh = step * (per + (1 if title else 0)) + px * 0.7
@@ -260,7 +281,7 @@ class Painter:
         if item.get("text_color", "auto") not in ("auto", None, ""):
             from PIL import ImageColor
             fg = ImageColor.getrgb(item["text_color"])[:3] + (255,)
-        if shown and rows:
+        if shown and rows and any(a > 0.002 for _, _, a in rows):
             box = bool(item.get("box", True))
             if box:
                 self.d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=px * 0.5, fill=self._back(item.get("box_opacity", 0.47)))
@@ -271,12 +292,28 @@ class Painter:
                 self.d.text((x, y), title, fill=fg, font=f, **kw); y += step
             for g, gw in zip(groups, widths):
                 yy = y
-                for n, c in g:
-                    self.d.rectangle([x, yy + px * 0.15, x + px * 0.95, yy + px * 1.1], fill=c,
-                                     outline=None if box else ((0, 0, 0) if light else (255, 255, 255)))
-                    self.d.text((x + px * 1.5, yy), n, fill=fg, font=f, **kw); yy += step
+                for n, c, a in g:
+                    if a >= 0.999:
+                        self.d.rectangle([x, yy + px * 0.15, x + px * 0.95, yy + px * 1.1], fill=c,
+                                         outline=None if box else ((0, 0, 0) if light else (255, 255, 255)))
+                        self.d.text((x + px * 1.5, yy), n, fill=fg, font=f, **kw)
+                    elif a > 0.002:  # fading: drawn on a layer of its own, then blended in
+                        self._faded_row(x, yy, px, n, c, a, fg, f, box, light, kw)
+                    yy += step
                 x += gw + gap
         self._record("legend", x0, y0, bw, bh, shown and bool(rows))
+
+    def _faded_row(self, x, y, px, name, colour, a, fg, f, box, light, kw):
+        from PIL import Image, ImageColor, ImageDraw
+        c = ImageColor.getrgb(colour)[:3] if isinstance(colour, str) else tuple(colour)[:3]
+        X, Y = int(math.floor(x)) - 2, int(math.floor(y)) - 2; dx, dy = x - X, y - Y  # same sub-pixel place as a full row
+        w = int(dx + px * 1.5 + self.d.textlength(name, font=f) + px + 4); h = int(dy + px * 1.6 + 4)
+        sub = Image.new("RGBA", (w, h), (0, 0, 0, 0)); d = ImageDraw.Draw(sub)
+        d.rectangle([dx, dy + px * 0.15, dx + px * 0.95, dy + px * 1.1], fill=c + (255,),
+                    outline=None if box else ((0, 0, 0) if light else (255, 255, 255)))
+        d.text((dx + px * 1.5, dy), name, fill=fg, font=f, **kw)
+        al = sub.getchannel("A").point(lambda v: int(round(v * a))); sub.putalpha(al)
+        region = self.layer.crop((X, Y, X + w, Y + h)); self.layer.paste(Image.alpha_composite(region, sub), (X, Y))
 
     def scale_bar(self, item, length_px, text, shown, color=None, at=None):
         """A bar of length_px pixels with its label above. at: (x, y) centre of an on-slice bar's label instead of

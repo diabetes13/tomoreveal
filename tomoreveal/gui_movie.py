@@ -8,8 +8,10 @@ from .animations import fx_settings
 from .common import UserError
 from .gui_data import clear_layout
 from .gui_fold import Fold, fold_rows
-from .gui_theme import DIM
+from .gui_theme import DIM, part_colour
 from .transitions import ease_curve, transition_of
+
+TYPE_NAMES = {"slide": "slides", "overview": "overviews", "focus": "close-ups", "hold": "holds", "card": "cards", "path": "camera paths"}
 
 ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, revealing the segmentation", "reveal"),
                ("Overview", "overview"), ("View from here", "view"), ("One slice, zoomed in", "slice_close"), ("Hold (pause)", "hold"))
@@ -411,7 +413,7 @@ class PartsPanel(QtW.QWidget):
     The open line is the part selected on the timeline. Widgets look parts up by id, never by position."""
 
     def __init__(self, win):
-        super().__init__(); self.win = win; self.rows = {}; self.open_id = None; self._sig = None
+        super().__init__(); self.win = win; self.rows = {}; self.open_id = None; self._sig = None; self._filled = None
         self.lay = QtW.QVBoxLayout(self); self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(3)
 
     # ---- helpers ----
@@ -450,7 +452,9 @@ class PartsPanel(QtW.QWidget):
             self._sig = sig; self.rebuild()
         else:
             self.refresh_lines()
-            if self.open_id in self.rows:  # its boxes may show values that a timeline drag, undo or threshold changed
+            # its boxes may show values that a timeline drag, undo or threshold changed; 3.6: made again only then, so
+            # an edit elsewhere (ticking another part, an arrow) does not empty and refill them
+            if self.open_id in self.rows and self._filled != (self.open_id, self._detail_key(self.open_id)):
                 self.fill_details(self.open_id)
         sel = self.win.selected_part
         if sel in self.rows and sel != self.open_id:
@@ -458,8 +462,15 @@ class PartsPanel(QtW.QWidget):
         elif sel not in self.rows and self.open_id is not None:
             self.close_open()
 
+    def _detail_key(self, pid):
+        """What the open part's settings show: the part, the structures' names and settings, the main view."""
+        import json
+        w = self.win; info = w.info or {}
+        return json.dumps([self.part(pid), w.spec.get("classes"), w.spec.get("view"), [p["id"] for p in w.spec["shots"]],
+                           bool(info.get("has_tomogram")), getattr(w, "multi_pick", None)], sort_keys=True, default=str)
+
     def rebuild(self):
-        clear_layout(self.lay); self.rows = {}; keep = self.open_id; self.open_id = None
+        clear_layout(self.lay); self.rows = {}; keep = self.open_id; self.open_id = None; self._filled = None
         for i, p in enumerate(self.win.spec["shots"]):
             box = QtW.QFrame(); box.setFrameShape(QtW.QFrame.StyledPanel); box.setObjectName("part")
             v = QtW.QVBoxLayout(box); v.setContentsMargins(4, 2, 4, 2); v.setSpacing(2)
@@ -478,7 +489,10 @@ class PartsPanel(QtW.QWidget):
             if p["type"] == "focus" and len(sb.target_items(p.get("target"))) > 1:
                 menu.addAction("Make a close-up for each", lambda pid=pid: self.win.editor.split_closeup(pid))
             menu.addSeparator(); menu.addAction("Delete", lambda pid=pid: self.win.editor.delete(pid))
-            for w, stretch in ((arrow, 0), (tick, 0), (num, 0), (name, 1), (dur, 0), (more, 0)):
+            stripe = QtW.QFrame(); stripe.setFixedWidth(5); stripe.setObjectName("stripe")  # 3.6: as on the timeline
+            stripe.setStyleSheet(f"QFrame#stripe {{ background: {part_colour(p)}; border-radius: 2px }}")
+            stripe.setToolTip(f"All {TYPE_NAMES.get(p['type'], 'parts of this kind')} have this colour, here and on the timeline")
+            for w, stretch in ((stripe, 0), (arrow, 0), (tick, 0), (num, 0), (name, 1), (dur, 0), (more, 0)):
                 h.addWidget(w, stretch)
             arrow.clicked.connect(lambda _=False, pid=pid: self.toggle(pid)); head.clicked.connect(lambda pid=pid: self.toggle(pid))
             tick.toggled.connect(lambda on, pid=pid: self.set_on(pid, on))
@@ -486,7 +500,7 @@ class PartsPanel(QtW.QWidget):
             details = QtW.QWidget(); details.setVisible(False); dl = QtW.QFormLayout(details); dl.setContentsMargins(24, 2, 0, 4)
             v.addWidget(head); v.addWidget(note); v.addWidget(details)
             self.lay.addWidget(box)
-            self.rows[pid] = dict(box=box, head=head, arrow=arrow, on=tick, num=num, name=name, dur=dur, note=note,
+            self.rows[pid] = dict(box=box, head=head, stripe=stripe, arrow=arrow, on=tick, num=num, name=name, dur=dur, note=note,
                                   details=details, form=dl)
             self.refresh_line(pid)
         if not self.win.spec["shots"]:
@@ -518,6 +532,7 @@ class PartsPanel(QtW.QWidget):
             self.open(pid)
 
     def close_open(self):
+        self._filled = None
         r = self.rows.get(self.open_id)
         if r:
             clear_layout(r["form"]); r["details"].setVisible(False); r["arrow"].setArrowType(QtC.Qt.RightArrow)
@@ -548,7 +563,8 @@ class PartsPanel(QtW.QWidget):
 
     # ---- settings ----
     def set_on(self, pid, on):
-        edits.set_part(self.win.spec, pid, on=bool(on)); self.win.editor.commit(select=pid)
+        # 3.6: ticking a part no longer opens it (the open part's settings stayed put only when it was that part)
+        edits.set_part(self.win.spec, pid, on=bool(on)); self.win.editor.commit()
 
     def set(self, pid, key, value, rebuild=False):
         p = self.part(pid)
@@ -561,8 +577,16 @@ class PartsPanel(QtW.QWidget):
         self.refresh_line(pid); self.win.editor.changed(); self.win._sweep_hint(); self.win.schedule()
         if rebuild:
             self.fill_details(pid)
+        elif self._filled is not None and self._filled[0] == pid:
+            self._filled = (pid, self._detail_key(pid))  # the box that changed already shows the new value
 
     def fill_details(self, pid):
+        """Make the settings of one part (again)."""
+        self._fill_details(pid)
+        if self.part(pid) is not None:
+            self._filled = (pid, self._detail_key(pid))  # after the rows: making them may tidy the part
+
+    def _fill_details(self, pid):
         r, p = self.rows[pid], self.part(pid)
         form = r["form"]; clear_layout(form)
         QtC.QTimer.singleShot(0, self.win.apply_help)  # tooltips for the new rows
@@ -802,7 +826,7 @@ class PartsPanel(QtW.QWidget):
             p["locked"] = True
         else:
             p.pop("locked", None)
-        self.win.editor.commit(select=pid); self.fill_details(pid)
+        self.win.editor.commit(select=pid)  # (its settings are made again by sync: the part changed)
         self.win.say("The view of this part is locked." if on else "The view of this part can be changed again.", "ok")
 
     def _view_rows(self, pid, p, form):
@@ -906,7 +930,7 @@ class PartsPanel(QtW.QWidget):
         p["target"] = {"class": key}
         if not p.get("caption") or p.get("caption") == old_name:
             p["caption"] = new_name
-        self.win.editor.commit(select=pid); self.fill_details(pid)
+        self.win.editor.commit(select=pid)  # (its settings are made again by sync: the part changed)
 
     def _focus_rows(self, pid, p, form):
         win = self.win; ds = win.st.ds
@@ -1072,8 +1096,6 @@ class PartsPanel(QtW.QWidget):
         if not p.get("caption") or p.get("caption") == old:
             p["caption"] = sb.closeup_caption(items, self._name)
         self.win.editor.commit(select=pid)
-        if self.open_id == pid:
-            self.fill_details(pid)
 
     def _items_list(self, pid, p):
         ds = self.win.st.ds; w = QtW.QWidget(); v = QtW.QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(1)
@@ -1150,7 +1172,7 @@ class PartsPanel(QtW.QWidget):
             v = obj.itemData(j)
             if v == "whole":
                 t = dict(p.get("target") or {}); t.pop("component", None); p["target"] = t
-                self.win.editor.commit(select=pid); self.fill_details(pid)
+                self.win.editor.commit(select=pid)  # (its settings are made again by sync: the part changed)
             elif v == "pick":
                 obj.setCurrentIndex(1 if tgt.get("component") is not None else 0)
                 win.start_object_pick(pid, ds.key_of(k))

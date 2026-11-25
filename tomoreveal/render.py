@@ -80,6 +80,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self._slice_grey, self._shadow_key = None, None
         self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
         self.text_ref_h = None  # the window's preview: text sized for a picture this high, also in smaller quick frames (3.6)
+        self.hide_overlay = None; self.last_layer = None  # 3.6: an overlay item being dragged (drawn by the window meanwhile)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -755,6 +756,8 @@ class Renderer(PreviewPicking, PictureLooks):
         items = ov.overlay_settings(spec); pid = s.get("part")
 
         def shown(name, base):
+            if name == self.hide_overlay:  # being dragged in the window: its picture moves over the preview (3.6)
+                return False
             c = ov.part_choice(spec, pid, name)
             return items[name]["show"] and base if c == "default" else (c == "show")
         im = Image.fromarray(fr_img).convert("RGBA"); layer = Image.new("RGBA", im.size, (0, 0, 0, 0))
@@ -776,10 +779,24 @@ class Renderer(PreviewPicking, PictureLooks):
             c = getattr(self, "_legend_col", {}).get(kk)
             return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c) if c is not None else \
                 class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"])
-        rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk))
-                for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
-                and not (focused and e > 0.5 and not keep and kk not in focused)
-                and not (e > 0.5 and isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide")]
+        def leaves(kk):  # in a close-up, the rows of the structures that are greyed or hidden
+            hid = isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide"
+            return hid or bool(focused and not keep and kk not in focused), hid
+        if items["legend"].get("fixed"):  # 3.6: every row keeps its place; leaving rows fade (to faint, or out if hidden)
+            q = min(1.0, max(0.0, (e - 0.25) / 0.5)); q = q * q * (3 - 2 * q)
+            rows = []
+            for kk in sorted(self.actors):
+                if not class_spec(spec, ds, kk).get("show", True):
+                    continue
+                go, hid = leaves(kk)
+                hidden = hid or others_of(mode)[1] <= 0.0
+                rows.append((class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk),
+                             1.0 - q * (1.0 if hidden else 0.7) if go else 1.0))
+        else:
+            rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk))
+                    for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
+                    and not (focused and e > 0.5 and not keep and kk not in focused)
+                    and not (e > 0.5 and isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide")]
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True), float(s.get("cap_a", 1.0)))
@@ -788,7 +805,7 @@ class Renderer(PreviewPicking, PictureLooks):
             from .annotations import draw as draw_annotations
             arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
             draw_annotations(layer, P, self, s, spec, size, vtk_to_numpy(arr).reshape(H, W))  # rows from the bottom
-        self.last_rects = P.rects
+        self.last_rects = P.rects; self.last_layer = layer  # the text and marks alone (a dragged item's picture)
         im = Image.alpha_composite(im, layer)
         return np.asarray(im if transparent else im.convert("RGB"))
 

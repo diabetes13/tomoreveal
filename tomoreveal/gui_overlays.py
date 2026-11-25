@@ -202,6 +202,7 @@ class OverlayDrag(QtC.QObject):
 
     def __init__(self, win):
         super().__init__(win); self.win = win; self.drag = None; self.hover_name = None; self.guides = []
+        self.ghost = None  # 3.6: (QImage, box fractions) of the item being moved, drawn over the preview during the drag
 
     # ---- items: overlay items, and the text / picture blocks of the card under the playhead ----
     def card(self):
@@ -317,7 +318,35 @@ class OverlayDrag(QtC.QObject):
         item = self.item(name); fld = self.size_field(item)
         self.drag = dict(name=name, mode=mode, f0=f, box0=box, size0=float(item.get(fld, 1.0)), field=fld,
                          anchor_pt=(float(item["x"]), float(item["y"])))
+        if mode == "move" and name in ov.NAMES:
+            self._start_ghost(name, box)
         return True
+
+    def _start_ghost(self, name, box):
+        """3.6: moving the legend, caption, title, slice number or scale bar moves a picture of it over the preview; the
+        frame is drawn once without it now and once more on release (not on every mouse move, which made it jump)."""
+        ren = self.win.st.ren; layer = getattr(ren, "last_layer", None) if ren is not None else None
+        if layer is None:
+            return
+        W, H = layer.size
+        x0, y0, x1, y1 = (int(round(box[0] * W)), int(round(box[1] * H)), int(round(box[2] * W)), int(round(box[3] * H)))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return
+        pad = 2  # anti-aliased edges and outlines just outside the box
+        x0, y0, x1, y1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
+        crop = layer.crop((x0, y0, x1, y1)).convert("RGBA")
+        img = QtG.QImage(crop.tobytes("raw", "RGBA"), crop.width, crop.height, 4 * crop.width, QtG.QImage.Format_RGBA8888).copy()
+        self.ghost = dict(img=img, off=((x0 / W) - box[0], (y0 / H) - box[1]), size=(crop.width / W, crop.height / H),
+                          at=(box[0], box[1]))
+        ren.hide_overlay = name
+        w = self.win; w.req = {"frame": w.frame}; w.do_preview(quick=True); w.prev.update()
+
+    def _end_ghost(self):
+        ren = self.win.st.ren
+        if ren is not None:
+            ren.hide_overlay = None
+        had = self.ghost is not None; self.ghost = None
+        return had
 
     def move(self, f, mods):
         d = self.drag; w = self.win
@@ -361,6 +390,8 @@ class OverlayDrag(QtC.QObject):
             sz = self.image_size()
             anchor, ax, ay = ov.anchor_for([nx0 * sz[0], ny0 * sz[1], (nx0 + bw) * sz[0], (ny0 + bh) * sz[1]], *sz)
             self.update(d["name"], x=ax, y=ay, anchor=anchor)
+            if self.ghost is not None:  # only the picture moves: 1:1 with the mouse, no new frame
+                self.ghost["at"] = (nx0, ny0); w.prev.update(); return
         else:
             ax, ay = d["anchor_pt"]; sz = self.image_size()
             d0 = max(1e-6, ((d["f0"][0] - ax) * sz[0]) ** 2 + ((d["f0"][1] - ay) * sz[1]) ** 2) ** 0.5
@@ -392,6 +423,8 @@ class OverlayDrag(QtC.QObject):
         if self.drag is None:
             return
         d = self.drag; name = d["name"]; self.drag = None; self.guides = []
+        if self._end_ghost():
+            w = self.win; w.req = {"frame": w.frame}; w.do_preview(); w.prev.update()  # drawn in its new place, at once
         if d["mode"] == "ann":
             self.win.ann_mouse.release(self); return
         if name.startswith(("marker:", "look:")):
@@ -481,6 +514,13 @@ class OverlayDrag(QtC.QObject):
         """Dashed boxes (hovered item, or all items with Layout boxes), the resize handle and snap guides."""
         rects = self.rects(); show_all = self.win.toolbar.boxes.isChecked()
         pal = self.win.prev.palette()
+        g = self.ghost
+        if g is not None:
+            a = to_widget(g["at"][0] + g["off"][0], g["at"][1] + g["off"][1])
+            b = to_widget(g["at"][0] + g["off"][0] + g["size"][0], g["at"][1] + g["off"][1] + g["size"][1])
+            p.setRenderHint(QtG.QPainter.SmoothPixmapTransform); p.drawImage(QtC.QRectF(a, b), g["img"])
+            x0, y0, x1, y1 = self.drag["box0"] if self.drag else (0, 0, 0, 0)
+            rects = dict(rects); rects[self.drag["name"] if self.drag else ""] = ((g["at"][0], g["at"][1], g["at"][0] + x1 - x0, g["at"][1] + y1 - y0), True)
         for n, (box, shown) in rects.items():
             if n.startswith(("marker:", "look:", "ann:", "anntip:", "anntail:")):
                 continue  # path points and arrows draw their own marks

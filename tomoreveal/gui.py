@@ -981,7 +981,9 @@ def build_gui(args):
                 self.spec = info["spec"]; self.req = self._main_req()
                 if self.project.pending is None:  # a new project (not one being opened): the Soft look (3.5, the user's choice)
                     from .look import apply_look
+                    from .overlays import set_item
                     apply_look(self.spec, "soft")
+                    set_item(self.spec, "legend", fixed=True)  # 3.6: one box size; rows that leave fade (legend_fixed)
                     for part in self.spec.get("shots", []):  # and still overviews (3.5: the user's choice)
                         if part.get("type") == "overview" and part.get("motion") == "rock" and part.get("view") is None:
                             part["motion"] = "none"
@@ -1125,9 +1127,58 @@ def build_gui(args):
                 self.param_timer.start(0)
             return changed
 
-        def build_controls(self):
-            sp = self.spec
-            self._sync_params(ready_only=True)
+        # ---- the Structures list (3.6: built again only when the list of structures changes) ----
+        def _grid_sig(self):
+            structs = self.info.get("structures", []) if self.info else []
+            return (id(self.info),) + tuple((c["key"], c["source"], bool(c["mesh"]), c["background"], c["hidden"], c["named"], c["kind"])
+                         for c in structs)
+
+        def _class_snap(self, k):
+            import json
+            return json.dumps(self.spec["classes"].get(k, {}), sort_keys=True, default=str)
+
+        def _watch(self, k, root):
+            """After any control of structure k's row changes the settings, remember them: those controls already show
+            the new values, so the next build_controls leaves them alone."""
+            def mark(*_):
+                if self.spec is not None and k in self.spec["classes"]:
+                    self._grid_snap[k] = self._class_snap(k)
+            ws = [root] + root.findChildren(QtW.QWidget) if isinstance(root, QtW.QWidget) else list(root)
+            for w in ws:
+                for sig in ("toggled", "valueChanged", "activated", "textChanged", "clicked"):
+                    if hasattr(w, sig) and not (sig == "clicked" and isinstance(w, QtW.QAbstractButton) and w.isCheckable()):
+                        try:
+                            getattr(w, sig).connect(mark)
+                        except (TypeError, RuntimeError, AttributeError):
+                            pass
+
+        def _struct_rows(self):
+            sig = self._grid_sig()
+            if sig != getattr(self, "_grid_built", None) or not getattr(self, "_grid_rows", None) and sig:
+                self._grid_built = sig; self._build_struct_grid(); return
+            for c in self.info.get("structures", []):
+                k = c["key"]; row = self._grid_rows.get(k)
+                if row is None or self._grid_snap.get(k) == self._class_snap(k):
+                    continue
+                self._sync_struct_row(c, row)
+
+        def _sync_struct_row(self, c, row):
+            """Settings of one structure changed outside its row (undo, a preset, the Look tab): set the row's controls
+            in place and remake only its settings panel (one panel, not the whole list)."""
+            k = c["key"]; sc = self.spec["classes"][k]
+            row["cb"].blockSignals(True); row["cb"].setChecked(bool(sc["show"])); row["cb"].blockSignals(False)
+            self._paint(row["colb"], sc["color"])
+            if row["ne"].text() != sc["name"] and not row["ne"].hasFocus():
+                row["ne"].blockSignals(True); row["ne"].setText(sc["name"]); row["ne"].blockSignals(False)
+            row["zb"].setEnabled(bool(c["mesh"]))
+            if row.get("lab") is not None:
+                row["lab"].setText(f"{row['why']}, so not drawn at first" if not sc["show"] else row["why"])
+            old = row["det"]; det = self._struct_details(c, sc); det.setVisible(k in self._struct_open)
+            self.struct_grid.addWidget(det, row["r"], 2, 1, 4); old.setParent(None); old.deleteLater(); row["det"] = det
+            self._watch(k, det); self._grid_snap[k] = self._class_snap(k)
+
+        def _build_struct_grid(self):
+            sp = self.spec; self._grid_rows = {}; self._grid_snap = {}
             grid = self.struct_grid
             while grid.count():
                 it = grid.takeAt(0); w = it.widget()  # store it first: after setParent(None), it.widget() is None
@@ -1168,10 +1219,17 @@ def build_gui(args):
                     grid.addWidget(w, r, col)
                 r += 1
                 det = self._struct_details(c, sc); det.setVisible(k in self._struct_open); grid.addWidget(det, r, 2, 1, 4); r += 1
-                more.toggled.connect(lambda on, k=k, det=det: (det.setVisible(on), self._struct_open.add(k) if on else self._struct_open.discard(k)))
+                row = dict(cb=cb, colb=colb, ne=ne, zb=zb, det=det, r=r - 1, why=why, lab=None); self._grid_rows[k] = row
+                more.toggled.connect(lambda on, row=row, k=k: (row["det"].setVisible(on), self._struct_open.add(k) if on else self._struct_open.discard(k)))
                 if why and why != "no name in the session":
                     lab = QtW.QLabel(f"{why}, so not drawn at first" if not sc["show"] else why); lab.setStyleSheet(DIM)
-                    grid.addWidget(lab, r, 2, 1, 3); r += 1
+                    grid.addWidget(lab, r, 2, 1, 3); r += 1; row["lab"] = lab
+                self._watch(k, [cb, colb, ne]); self._watch(k, det); self._grid_snap[k] = self._class_snap(k)
+
+        def build_controls(self):
+            sp = self.spec
+            self._sync_params(ready_only=True)
+            self._struct_rows()
             v = sp["view"]
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()

@@ -5,7 +5,7 @@ from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from .storyboard import part_name
 
-TYPE_COLOURS = {"slide": "#4e79a7", "overview": "#59a14f", "focus": "#d1495b", "hold": "#8a8f98", "card": "#9c6ade", "path": "#e0a030"}  # readable in both themes
+from .gui_theme import TYPE_COLOURS  # noqa: E402 (readable in both themes; also used by the Movie tab)
 PLAYHEAD = "#ff9f1c"
 RULER_H, ROW_TOP, ROW_H, MARGIN = 18, 22, 36, 8
 COMPACT_H = 20      # row height with "Compact" on

@@ -3,6 +3,19 @@ from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 CHOICES = (("System", "system"), ("Light", "light"), ("Dark", "dark"))
 DIM = "color: palette(placeholder-text)"  # grey notes that follow the theme
+# colour of each kind of movie part: timeline blocks, the Movie tab's stripes and menus that list parts (3.6: one table)
+TYPE_COLOURS = {"slide": "#4e79a7", "overview": "#59a14f", "focus": "#d1495b", "hold": "#8a8f98", "card": "#9c6ade", "path": "#e0a030"}
+
+
+def part_colour(part):
+    """The colour of a movie part (by its type), as on the timeline."""
+    return TYPE_COLOURS.get((part or {}).get("type", ""), "#888888")
+
+
+def part_icon(part, size=12):
+    """A small square of the part's colour, for menus that list parts."""
+    pm = QtG.QPixmap(size, size); pm.fill(QtG.QColor(part_colour(part)))
+    return QtG.QIcon(pm)
 
 _MESSAGE = {False: {"err": "#c62828", "ok": "#2e7d32"},   # readable on a light window
             True: {"err": "#ff7b72", "ok": "#56d364"}}    # readable on a dark window

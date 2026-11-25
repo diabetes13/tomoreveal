@@ -68,7 +68,7 @@ def turned_pose(fr, base, dx, dy):
     d = d0 * math.cos(a) * math.cos(b) + right * math.sin(a) * math.cos(b) + up0 * math.sin(b)
     d /= np.linalg.norm(d)
     up = up0 - d * float(up0 @ d); up /= np.linalg.norm(up)
-    t, az = tilt_az(d, fr.u)
+    t, az = tilt_az(d, fr.u, up)
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         t, az = base["tilt"], base["az"]
     return dict(base, tilt=float(t), az=float(az), wdir=d, pos=np.asarray(base["c"]) + base["dist"] * d, up=up)

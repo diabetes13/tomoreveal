@@ -698,13 +698,13 @@ def build_gui(args):
             step = p.get("step", 1)
             f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
             if f != p["last"]:
-                t0 = time.monotonic(); self.st.ren.surface_async = True
+                t0 = time.monotonic(); self.st.ren.surface_async = True; self.st.ren.text_ref_h = self.st._psize(p["spec"])[1]
                 try:
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
                 finally:
-                    self.st.ren.surface_async = False
+                    self.st.ren.surface_async = False; self.st.ren.text_ref_h = None
                 self._make_part_surfaces()
                 dt = time.monotonic() - t0
                 p["avg"] = dt if p.get("avg") is None else 0.7 * p["avg"] + 0.3 * dt
@@ -1356,7 +1356,7 @@ def build_gui(args):
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             self.st.ren.preview_part = self.selected_part; self.st.ds.path_async = True
             try:
-                self.st.ren.surface_async = True
+                self.st.ren.surface_async = True; self.st.ren.text_ref_h = h  # quick (2/3) frames: text as in the full one
                 img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
@@ -1367,7 +1367,7 @@ def build_gui(args):
                 self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
             finally:
                 if self.st.ren is not None:
-                    self.st.ren.surface_async = False
+                    self.st.ren.surface_async = False; self.st.ren.text_ref_h = None
             self._make_part_surfaces()
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))

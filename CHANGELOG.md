@@ -1,5 +1,10 @@
 # Change log
 
+## 3.6.0 (in progress)
+
+- **Fixed: a spin around X or Y after a top view swung the picture round first.** Seen from straight above with the view rotated (for example Rotate 90°), the flight into the spin turned the picture 90° and it snapped back when the spin began. Also changes old projects that have this combination (bug fix).
+- **Fixed: captions and the legend changed size while the preview played.** Playback draws smaller pictures, and text there was drawn up to half as big again. Movies are unchanged.
+
 ## 3.5.0
 
 - **Outlines on some structures only, part by part.** Movie tab ▸ a part ▸ Look and effects in this part ▸ **Outline these**: tick the structures to outline in that part (for example only the cone in a close-up, and everything in the overview). "Every structure" follows the outline boxes in the Structures tab. If outlines are off, picking structures turns them on (medium) in that part.

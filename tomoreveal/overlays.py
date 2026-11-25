@@ -183,10 +183,12 @@ class Painter:
     """Draws the overlay items of one frame onto a PIL RGBA layer and records each item's box (pixels):
     rects[name] = dict(box=(x0, y0, x1, y1), shown=bool)."""
 
-    def __init__(self, layer, font_fn, size, bg_rgb):
+    def __init__(self, layer, font_fn, size, bg_rgb, ref_h=None):
         from PIL import ImageDraw
         self.layer, self.d, self.font = layer, ImageDraw.Draw(layer), font_fn
         self.W, self.H = size; self.px = max(10, round(self.H * 0.024))
+        if ref_h and ref_h != self.H:  # a smaller copy of a picture ref_h high (preview playback, 3.6): text in proportion
+            self.px = max(10, round(ref_h * 0.024)) * self.H / ref_h  # (the 10 px floor made it up to half as big again)
         dark = sum(bg_rgb) < 1.5; self.dark = dark
         self.fg = (255, 255, 255, 255) if dark else (0, 0, 0, 255)
         self.rects = {}
@@ -200,7 +202,7 @@ class Painter:
 
     def text_item(self, name, item, text, default_fn, shown):
         """Plain text (slice label, title). default_fn(px) -> draw origin of the 3.3 layout."""
-        px = round(self.px * _size(item)) if _size(item) != 1.0 else self.px
+        px = round(self.px * _size(item)) if _size(item) != 1.0 else round(self.px)
         f = self.font(px); l, t, r, b = self.d.textbbox((0, 0), text or " ", font=f)
         x0, y0 = place(item, r, b, self.W, self.H, default_fn(px))
         if shown and text:
@@ -242,7 +244,7 @@ class Painter:
 
     def legend(self, item, rows, shown):
         """rows: [(name, colour)]."""
-        s = _size(item); px = round(self.px * s) if s != 1.0 else self.px; f = self.font(px)
+        s = _size(item); px = round(self.px * s) if s != 1.0 else round(self.px); f = self.font(px)
         title = (item.get("title") or "").strip(); step = round(px * 1.45)
         cols = 2 if int(item.get("columns", 1)) == 2 and len(rows) > 1 else 1
         per = math.ceil(len(rows) / cols) if rows else 0

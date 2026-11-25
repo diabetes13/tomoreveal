@@ -84,7 +84,7 @@ def axis_turn_poses(fr, p0, axis, angles, lo, hi):
     out = []
     for a in angles:
         R = _turn(axis, a); pos = c + D * (R @ d0)
-        q = _pose(fr, pos, c, R @ up0)
+        q = _pose(fr, pos, c, R @ up0, az_from_up=True)  # a top view keeps its turn (3.6, user's Y-spin report)
         if fr.ortho:
             q["scale"] = p0["scale"] * D / p0["dist"]
         out.append(q)

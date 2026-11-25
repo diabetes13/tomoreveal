@@ -71,6 +71,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self._markers, self._path_actors, self.preview_part, self._path3d, self.path_view = [], [], None, None, None
         self._slice_grey, self._shadow_key = None, None
         self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
+        self.text_ref_h = None  # the window's preview: text sized for a picture this high, also in smaller quick frames (3.6)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -744,7 +745,7 @@ class Renderer(PreviewPicking, PictureLooks):
             c = ov.part_choice(spec, pid, name)
             return items[name]["show"] and base if c == "default" else (c == "show")
         im = Image.fromarray(fr_img).convert("RGBA"); layer = Image.new("RGBA", im.size, (0, 0, 0, 0))
-        P = ov.Painter(layer, self._font, size, hex2rgb(style.get("bg", "#000000")))
+        P = ov.Painter(layer, self._font, size, hex2rgb(style.get("bg", "#000000")), ref_h=self.text_ref_h)
         sl = items["slice_label"]; nz = self.shape[0]
         txt = str(sl.get("format") or "slice {k}/{n}").replace("{k}", str(k + 1)).replace("{n}", str(nz))
         vox = ov.voxel_size(spec, ds)

@@ -170,10 +170,22 @@ def sample(curve, cum, d):
     return np.array([np.interp(d, cum, curve[:, i]) for i in range(3)])
 
 
-def tilt_az(direction, u_axis):
-    """(tilt, az) of the storyboard's Framer for a view direction (centre -> camera), so transitions can blend."""
+NEAR_TOP = 0.02  # sin(tilt) below this (about 1°): looking straight down, the direction alone gives no azimuth
+
+
+def tilt_az(direction, u_axis, up=None):
+    """(tilt, az) of the storyboard's Framer for a view direction (centre -> camera), so transitions can blend.
+    Looking (almost) straight down, the direction says nothing about how the picture is turned: then the azimuth comes
+    from the up vector (3.6; before, a top view turned 90° gave az 0 and transitions swung the picture round)."""
     p = np.asarray(direction, float); p = p / (np.linalg.norm(p) or 1.0)
     t = math.degrees(math.acos(max(-1.0, min(1.0, p[2]))))
+    st = math.sin(math.radians(t))
+    if up is not None and st < NEAR_TOP:
+        # Framer.axes: p = R(cos t z - sin t u), up = R(cos t u + sin t z), so R u = cos t up - sin t p
+        w = math.cos(math.radians(t)) * np.asarray(up, float) - st * p
+        if math.hypot(w[0], w[1]) > 1e-6:
+            a = math.atan2(-w[1], -w[0]) if u_axis[0] != 0 else math.atan2(-w[0], w[1])
+            return t, math.degrees(a)
     if u_axis[0] != 0:  # u = -x: p = (sin t cos a, sin t sin a, cos t)
         a = math.degrees(math.atan2(p[1], p[0]))
     else:  # u = +y: p = (sin t sin a, -sin t cos a, cos t)
@@ -353,10 +365,10 @@ def _ease_or_even(part, u):
     return smooth01(u) if part.get("speed") == "ease" else u
 
 
-def _pose(fr, pos, focal, up):
+def _pose(fr, pos, focal, up, az_from_up=False):
     pos, focal = np.asarray(pos, float), np.asarray(focal, float)
     d = pos - focal; dist = float(np.linalg.norm(d)) or 1.0
-    t, a = tilt_az(d, fr.u)
+    t, a = tilt_az(d, fr.u, up if az_from_up else None)  # camera paths keep their 3.5 azimuth (golden motion)
     return dict(c=focal, tilt=float(t), az=float(a), dist=dist, scale=dist * math.tan(math.radians(fr.fov) / 2),
                 pos=pos, up=np.asarray(up, float))
 

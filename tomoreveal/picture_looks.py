@@ -217,9 +217,9 @@ class PictureLooks:
         if own:
             cfg.update({k: v for k, v in own.items() if k != "blur"}); cfg["blur"].update(own.get("blur") or {})
         e = float(s["e"]); items = self._focus_items(s["target"]); in_close = bool(items) and e > 0
-        if own is not None:
+        if own is not None and own.get("on") != "default":
             f = e if (own.get("on", True) and in_close) else 0.0
-        elif lv["when"] == "always":
+        elif lv["when"] == "always":  # (3.6: own "on": "default" = the Look tab's vignette, with this close-up's own blur)
             f = 1.0
         elif lv["when"] == "closeups":
             f = e if in_close else 0.0
@@ -240,6 +240,8 @@ class PictureLooks:
                 pass
         col = (0, 0, 0) if cfg.get("colour", "black") == "black" else tuple(255 * v for v in hex2rgb(spec.get("style", {}).get("bg", "#000000")))
         blur = float(cfg["blur"].get("strength", 0.5)) * fb
+        if getattr(self, "blur_cap", None) is not None:  # preview playback: the lightest level (3.6)
+            blur = min(blur, float(self.blur_cap) * fb)
         return dict(a=float(cfg["strength"]) * max(0.0, f), cx=cx, cy=cy, size=float(cfg["size"]), soft=float(cfg["softness"]),
                     shape=cfg.get("shape", "round"), colour=col, blur=blur, target=s["target"])
 

@@ -978,6 +978,7 @@ class PartsPanel(QtW.QWidget):
         steady.setToolTip("The camera keeps the same distance while it moves, so the object does not grow and shrink")
         steady.toggled.connect(lambda on: self.set(pid, "steady_zoom", bool(on) or None))
         form.addRow("", steady)
+        form.addRow("Blur the background", self._blur_row(pid, p))
         form.addRow("Vignette", self._vignette_row(pid, p))
 
     def _fx(self, pid, key, rebuild=False, **kw):
@@ -1045,23 +1046,58 @@ class PartsPanel(QtW.QWidget):
         """As in the Look tab, or this close-up's own vignette (strength) and background blur."""
         v = p.get("vignette") if isinstance(p.get("vignette"), dict) else None
         w = QtW.QWidget(); h = QtW.QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+
+        def vmode(m):
+            own = dict(self.part(pid).get("vignette") or {})
+            if m == "default":  # the Look tab's vignette; this close-up's own blur (3.6 row) stays
+                own = dict(on="default", blur=own["blur"]) if "blur" in own else None
+            else:
+                own["on"] = m == "on"
+            self.set(pid, "vignette", own, rebuild=True)
         mode = _combo((("as in the Look tab", "default"), ("on", "on"), ("off", "off")),
-                      "default" if v is None else ("on" if v.get("on", True) else "off"),
-                      lambda m: self.set(pid, "vignette", None if m == "default" else dict(self.part(pid).get("vignette") or {}, on=m == "on"),
-                                         rebuild=True))
+                      "default" if v is None or v.get("on") == "default" else ("on" if v.get("on", True) else "off"), vmode)
         mode.setToolTip("Darkens the edges of the picture around the objects in focus")
         h.addWidget(mode)
-        if v is not None and v.get("on", True):
+        if v is not None and v.get("on", True) and v.get("on") != "default":
             st = QtW.QSpinBox(); st.setRange(0, 100); st.setSuffix(" %"); st.setPrefix("strength "); st.setValue(round(100 * float(v.get("strength", 0.6))))
             st.valueChanged.connect(lambda x: self.set(pid, "vignette", dict(self.part(pid)["vignette"], strength=x / 100)))
-            bl = QtW.QCheckBox("blur"); bl.setChecked(bool((v.get("blur") or {}).get("on")))
-            bl.setToolTip("Blur the background: the objects in focus stay sharp, things in front of them and behind them are blurred "
-                          "(amount: Look tab ▸ Vignette)")
-            bl.toggled.connect(lambda on: self.set(pid, "vignette", dict(self.part(pid)["vignette"],
-                                                                         blur=dict((self.part(pid)["vignette"].get("blur") or {}), on=bool(on)))))
-            h.addWidget(st); h.addWidget(bl)
+            h.addWidget(st)
         h.addStretch(1)
         return w
+
+    def _blur_row(self, pid, p):
+        """3.6 (R13): Blur the background: as in the Look tab / off / light / medium / strong. Sets the close-up's own
+        part["vignette"]["blur"] (the same values as before); the vignette itself is not changed."""
+        from .look import BLUR_LEVELS
+        v = p.get("vignette") if isinstance(p.get("vignette"), dict) else None
+        b = (v or {}).get("blur") if v is not None and "blur" in v else None
+        items = [("as in the Look tab", "default"), ("off", "off")] + [(t, t) for t, _ in BLUR_LEVELS]
+        if b is None:
+            cur = "default"
+        elif not b.get("on"):
+            cur = "off"
+        else:
+            x = float(b.get("strength", 0.5)); cur = next((t for t, val in BLUR_LEVELS if abs(val - x) < 0.01), None)
+            if cur is None:
+                cur = "own"; items.append((f"own ({round(100 * x)} %)", "own"))
+
+        def chose(m):
+            if m == "own":
+                return
+            own = dict(self.part(pid).get("vignette") or {})
+            if m == "default":
+                own.pop("blur", None)
+                own = None if own.get("on") == "default" or not own else own
+            else:
+                if not own:
+                    own = dict(on="default")  # the vignette stays as in the Look tab
+                own["blur"] = dict(on=False) if m == "off" else dict(on=True, strength=dict(BLUR_LEVELS)[m])
+            self.set(pid, "vignette", own, rebuild=True)
+        cb = _combo(items, cur, chose)
+        cb.setToolTip("The objects in focus stay sharp; the tomogram and the other structures in front of them and behind them "
+                      "are blurred, more the further away they are. While the preview plays it is shown at the light level "
+                      "(the movie uses the level chosen here).")
+        return cb
 
     def _each_rows(self, pid, p):
         """Each structure in this close-up (3.5): as set above, see-through or hidden, for this part only."""

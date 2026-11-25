@@ -23,6 +23,7 @@ DEFAULTS = {
     "vignette": dict(when="never", strength=0.6, size=0.55, softness=0.35, colour="black", shape="round",
                      blur=dict(on=False, strength=0.5)),
 }
+BLUR_LEVELS = (("light", 0.25), ("medium", 0.5), ("strong", 0.85))  # 3.6: background blur levels (strength values)
 VIGNETTE_WHEN = (("never", "never"), ("in close-ups", "closeups"), ("always", "always"))
 STYLE_DEFAULTS = dict(kind="normal", outline_width=2, outline_color="black", point_size=4, gloss="shiny")
 

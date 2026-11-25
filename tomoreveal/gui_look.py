@@ -114,7 +114,7 @@ class LookControls(QtC.QObject):
         self.real_strength = _slider(0, 100, lambda v: f"{v} %", lambda v: self.set_shadow("real", strength=v / 100))
         f.addRow("Strength", self.real_strength)
         # vignette
-        g = Section("Vignette (darker edges)", "vignette", False); self.vig_group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
+        g = Section("Vignette and background blur", "vignette", False); self.vig_group = g; layout.addWidget(g); f = QtW.QFormLayout(g.body)
         self.vig_when = QtW.QComboBox()
         for t, d in lk.VIGNETTE_WHEN:
             self.vig_when.addItem(t, d)

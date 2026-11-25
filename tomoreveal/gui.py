@@ -741,12 +741,13 @@ def build_gui(args):
             f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
             if f != p["last"]:
                 t0 = time.monotonic(); self.st.ren.surface_async = True; self.st.ren.text_ref_h = self.st._psize(p["spec"])[1]
+                self.st.ren.blur_cap = 0.25  # 3.6: playback shows the background blur at the light level
                 try:
                     img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
                 finally:
-                    self.st.ren.surface_async = False; self.st.ren.text_ref_h = None
+                    self.st.ren.surface_async = False; self.st.ren.text_ref_h = None; self.st.ren.blur_cap = None
                 self._make_part_surfaces()
                 dt = time.monotonic() - t0
                 p["avg"] = dt if p.get("avg") is None else 0.7 * p["avg"] + 0.3 * dt

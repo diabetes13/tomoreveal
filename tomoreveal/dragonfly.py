@@ -55,15 +55,63 @@ class OrsSession:
         # No file stays open between reads, so Dragonfly can save over the session while it is loaded here.
         with open(path, "rb") as f:
             st = os.fstat(f.fileno()); self._stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
-            head = f.read(12)
-            if head[:4] != b"ORSZ":
-                raise UserError(f"{os.path.basename(path)} is not a compressed Dragonfly session (no 'ORSZ' header). "
-                                "Export the ROI from Dragonfly as a TIFF stack and use that instead.")
-            f.seek(struct.unpack_from("<Q", head, 4)[0]); xml = f.read().decode("utf-8", "replace")
+            head = f.read(20)
+            if head[:4] == b"ORSZ":  # Dragonfly 2022: data records first, then the XML index pointing at them
+                f.seek(struct.unpack_from("<Q", head, 4)[0]); xml = f.read().decode("utf-8", "replace")
+            elif head[:8] == b"CAIFZ\0\0\0" and len(head) == 20:  # Dragonfly 2025: XML first, then the records in order
+                xml = self._caifz_index(f, st.st_size, struct.unpack_from("<Q", head, 12)[0])
+            else:
+                raise UserError(f"{os.path.basename(path)} is not a compressed Dragonfly session (no 'ORSZ' or 'CAIFZ' "
+                                "header). Export the ROI from Dragonfly as a TIFF stack and use that instead.")
             xml = re.sub(r"<(/?)([\w.\-]+):([\w.\-]+)", r"<\1\2_\3", xml)  # tags with ':' are not valid XML names
             self.root = ET.fromstring(xml)
             self.version = self.root.attrib.get("Version", "?")
             self._images = self._find_images(f)
+
+    def _caifz_index(self, f, size, n):
+        """The XML index of a Dragonfly 2025 ('CAIFZ') session, with each record offset filled in.
+
+        The index (n bytes from byte 20, padded with zeros) gives every offset as 2**64 - 1; the records follow it one after
+        another, in the order their offset fields appear in the index. The record walk must end exactly at the end of the
+        file and give one record per offset field, or the file is refused."""
+        f.seek(20); raw = f.read(n)
+        if len(raw) != n:
+            raise ValueError("the index runs past the end of the file")
+        xml = raw.rstrip(b"\0").decode("utf-8", "replace")
+        fields = list(_UNSET_OFFSET.finditer(xml))
+        starts, pos = [], 20 + n
+        while pos < size:
+            starts.append(pos); pos = self._skip_record(f, pos)
+        if pos != size or len(starts) != len(fields):
+            raise UserError(f"{os.path.basename(self.path)}: this Dragonfly 2025 session has {len(starts)} data records "
+                            f"for {len(fields)} entries in its index. Its layout differs from what the reader understands; "
+                            "export the ROI from Dragonfly as a TIFF stack and use that instead.")
+        it = iter(starts)
+        return _UNSET_OFFSET.sub(lambda m: m.group(1) + str(next(it)), xml)
+
+    def _skip_record(self, f, off):
+        """Byte just after the record at off (decompresses it, keeping nothing: chunks do not say where a record ends)."""
+        f.seek(off); total = struct.unpack("<Q", f.read(8))[0]; p, got, dob, carry = off + 8, 0, None, b""
+        while got < total:
+            cs = struct.unpack("<Q", f.read(8))[0]; p += 8 + cs
+            while cs:  # the chunk, read in pieces of at most 16 MB
+                data = f.read(min(cs, 1 << 24))
+                if not data:
+                    raise ValueError(f"the record at byte {off} runs past the end of the file")
+                cs -= len(data); data = carry + data; carry = b""
+                while data:  # one piece may end one zstd frame and start the next
+                    if dob is None:
+                        if len(data) < 4 and got < total:  # the next frame's magic number runs on into the next piece
+                            carry = data; break
+                        if data[:4] != ZMAGIC:
+                            raise ValueError(f"unexpected record layout at byte {off}")
+                        dob = self.dctx.decompressobj()
+                    got += len(dob.decompress(data)); data = b""
+                    if got > total:
+                        raise ValueError(f"the record at byte {off} holds more data than its header says")
+                    if dob.eof:
+                        data = dob.unused_data; dob = None
+        return p
 
     def _open(self):
         """The session file, opened for one read; an error if it changed since it was loaded (its offsets would be stale)."""
@@ -80,15 +128,18 @@ class OrsSession:
             return self._chunks(f, off, total)
 
     def _chunks(self, f, off, total):
-        p, out, got, dob, left = off + 8, bytearray(total), 0, None, 0  # one buffer of the size the header gives
+        p, out, got, dob, left, carry = off + 8, bytearray(total), 0, None, 0, b""  # one buffer of the size the header gives
         while got < total:
             cs = struct.unpack("<Q", f.read(8))[0]
             blob = f.read(cs)
             if len(blob) != cs:
                 raise ValueError(f"the record at byte {p} runs past the end of the file")
             p += 8 + cs
+            blob = carry + blob; carry = b""
             while blob:  # one chunk may end one zstd frame and start the next
                 if dob is None:
+                    if len(blob) < 4 and got < total:  # the next frame's magic number runs on into the next chunk
+                        carry = blob; break
                     if blob[:4] != ZMAGIC:
                         raise ValueError(f"unexpected record layout at byte {p}")
                     dob = self.dctx.decompressobj()
@@ -117,7 +168,7 @@ class OrsSession:
         return tuple(dims), float(ob["direction0Spacing"]) * 1e10  # (nx, ny, nz), voxel size in angstrom
 
     def images(self):
-        """Image volumes stored in the session (float32 only)."""
+        """Image volumes stored in the session: float32 (DataType 6) or 16-bit unsigned (DataType 2, Dragonfly 2025)."""
         return list(self._images)
 
     def _find_images(self, f):
@@ -127,15 +178,18 @@ class OrsSession:
             if off is None:
                 continue
             dims, vox = self._grid(el)
-            f.seek(int(off))
-            if struct.unpack("<Q", f.read(8))[0] == 4 * dims[0] * dims[1] * dims[2]:
-                res.append(dict(title=el.findtext("title") or "image", off=int(off), dims=dims, voxel=vox))
+            f.seek(int(off)); size = struct.unpack("<Q", f.read(8))[0]; n = dims[0] * dims[1] * dims[2]
+            kind = (el.findtext("DataType") or "").strip()
+            dtype = "<f4" if size == 4 * n and kind in ("6", "") else "<u2" if size == 2 * n and kind == "2" else None
+            if dtype:
+                res.append(dict(title=el.findtext("title") or "image", off=int(off), dims=dims, voxel=vox, dtype=dtype))
         return res
 
     @_checked
     def read_image(self, im):
         nx, ny, nz = im["dims"]
-        return np.frombuffer(self._read(im["off"]), "<f4").reshape(nz, ny, nx)
+        a = np.frombuffer(self._read(im["off"]), im.get("dtype", "<f4")).reshape(nz, ny, nx)
+        return a if a.dtype == np.float32 else a.astype(np.float32)
 
     @_checked
     def objects(self, include_undo=False):
@@ -173,16 +227,28 @@ class OrsSession:
             c = ld.find(nm)
             arr[nm] = self._array(int(c.findtext("RecordOffset")), int(c.findtext("size")))
         n_el, n_int = int(td.attrib["ElementCount"]), int(td.attrib["IntervalCount"])
-        valid = np.ones(n_el, bool); valid[0] = False
-        if n_el - n_int > 1:  # unused tree nodes are listed on a free stack
-            free = self._array(int(td.findtext("RecordOffsetFS")))
-            valid[free[:n_el - n_int]] = False
-        idx = np.flatnonzero(valid)
-        b = arr["BeginInt"][idx].astype(np.int64); e = arr["EndInt"][idx].astype(np.int64); l = arr["Labels"][idx].astype(np.int64)
-        s = np.argsort(b); b, e, l = b[s], e[s], l[s]
-        total = int((e - b + 1).sum())
-        ok = len(b) == n_int and (len(b) < 2 or bool(np.all(b[1:] > e[:-1]))) and (len(b) == 0 or e.max() < n) \
-            and total == obj["voxels"]
+
+        def free_stack():  # Dragonfly 2022: unused tree nodes are listed on a free stack
+            valid = np.ones(n_el, bool); valid[0] = False
+            if n_el - n_int > 1:
+                free = self._array(int(td.findtext("RecordOffsetFS")))
+                valid[free[:n_el - n_int]] = False
+            return np.flatnonzero(valid)
+
+        def packed():  # Dragonfly 2025, nothing ever freed: the intervals are nodes 1 .. IntervalCount
+            return np.arange(1, n_int + 1) if td.attrib.get("LastFree") == "0" and n_int < n_el else None
+
+        for rule in (free_stack, packed):
+            idx = rule()
+            if idx is None:
+                break
+            b = arr["BeginInt"][idx].astype(np.int64); e = arr["EndInt"][idx].astype(np.int64); l = arr["Labels"][idx].astype(np.int64)
+            s = np.argsort(b); b, e, l = b[s], e[s], l[s]
+            total = int((e - b + 1).sum())
+            ok = len(b) == n_int and (len(b) < 2 or bool(np.all(b[1:] > e[:-1]))) and (len(b) == 0 or e.max() < n) \
+                and total == obj["voxels"]
+            if ok:
+                break
         if not ok:
             raise UserError(f"'{obj['title']}': decoded {total} labelled voxels in {len(b)} runs, but Dragonfly records "
                             f"{obj['voxels']} voxels in {n_int} runs. This session's layout differs from what the reader "
@@ -364,6 +430,9 @@ def bgr_hex(x):
     x = int(x)
     return "#%02x%02x%02x" % (x & 255, (x >> 8) & 255, (x >> 16) & 255)
 
+
+# an offset field left unset (2**64 - 1), as every one is in a Dragonfly 2025 index
+_UNSET_OFFSET = re.compile(r"((?:RecordOffset\w*|DataOffset)(?:=\"|>))18446744073709551615\b")
 
 # DataTypesScalarValues codes seen in Dragonfly 2022.2, and the GUID suffix of each slot kind
 SLOT_TYPES = {9: "string", 8: "bool", 4: "uint32", 5: "double"}

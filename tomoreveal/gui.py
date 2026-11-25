@@ -120,6 +120,7 @@ def build_gui(args):
             self._img = None; self._press = None; self._moved = False; self.overlay = None; self._ov = False
             self.box_mode = False; self._box = None  # drawing a frame for a close-up of a region
             self.nav = None; self._nav = False  # gui_navigate.Navigator: rotate, move, zoom, menu (3.5)
+            self.pen = None; self._pen = False  # gui_drawing.Pen: drawing an arrow or shape (3.6)
             self.setMouseTracking(True); self.setFocusPolicy(QtC.Qt.ClickFocus)
             self.help_btn = QtW.QToolButton(self); self.help_btn.setText("?"); self.help_btn.setAutoRaise(True)
             self.help_btn.setToolTip("How to move around in the preview")
@@ -195,6 +196,8 @@ def build_gui(args):
                     p = QtG.QPainter(self); paint_path(p, self, ren.path_view, sel, hov); p.end()
                 from .gui_annotations import paint_selection
                 p = QtG.QPainter(self); paint_selection(p, self, w); p.end()
+                if self.pen is not None and self.pen.stroke is not None:
+                    p = QtG.QPainter(self); self.pen.paint(p, self); p.end()
                 from .gui_navigate import paint_axis, paint_marker
                 p = QtG.QPainter(self); p.setRenderHint(QtG.QPainter.Antialiasing); paint_axis(p, self, self.nav); paint_marker(p, self, self.nav); p.end()
 
@@ -205,6 +208,8 @@ def build_gui(args):
                     self._box = [f, f]; self.update()
                 return
             pos = e.position().toPoint()
+            if e.button() == QtC.Qt.LeftButton and self.pen is not None and self.pen.press(self.frac(pos), pos, e.modifiers()):
+                self._pen = True; return
             if e.button() == QtC.Qt.LeftButton:
                 self._ov = bool(self.overlay and self.overlay.press(self.frac(pos), e.modifiers()))
                 self._press = pos; self._moved = False
@@ -222,6 +227,9 @@ def build_gui(args):
                 return
             if self._nav:
                 self.nav.move(self.frac(pos, free=True), pos); self.update(); return
+            if self._pen:
+                f = self.frac(pos, free=True)
+                self.pen.move((min(max(f[0], 0.0), 1.0), min(max(f[1], 0.0), 1.0)) if f else None, pos, e.modifiers()); return
             if self._press is None:
                 if self.overlay is not None:
                     self.overlay.hover(self.frac(pos))
@@ -258,6 +266,9 @@ def build_gui(args):
             super().keyPressEvent(e)
 
         def mouseReleaseEvent(self, e):
+            if self._pen:
+                self._pen = False; pos = e.position().toPoint(); f = self.frac(pos, free=True)
+                self.pen.release((min(max(f[0], 0.0), 1.0), min(max(f[1], 0.0), 1.0)) if f else None, pos, e.modifiers()); return
             if self._nav:
                 self._nav = False; pos = e.position().toPoint()
                 d = self.nav.drag
@@ -597,6 +608,8 @@ def build_gui(args):
             self.tabs.currentChanged.connect(self._tab_changed)
             self.prev = Preview()
             self.toolbar = OverlayToolbar(self); rl.addWidget(self.toolbar)
+            from .gui_drawing import DrawBar, Pen  # 3.6: drawing arrows and shapes (R17)
+            self.drawbar = DrawBar(self); rl.addWidget(self.drawbar); self.pen = Pen(self); self.prev.pen = self.pen
             self.prev.overlay = OverlayDrag(self)
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
@@ -641,6 +654,7 @@ def build_gui(args):
             self.blur_cb.toggled.connect(lambda on: self.spec is not None and (self.spec["output"].__setitem__("motion_blur", bool(on)),
                                                                               self.schedule()))
             grid.addWidget(QtW.QLabel("Smoother"), 7, 0); grid.addWidget(self.fps_cb, 7, 1); grid.addWidget(self.blur_cb, 7, 2, 1, 3)
+            self.export.add_layers_row(grid, 8)  # 3.6: arrows and text in the movie, or as separate transparent movies
             self.go_btn = QtW.QPushButton("Make movie"); self.go_btn.setStyleSheet("font-weight:600; padding:6px 18px"); self.go_btn.clicked.connect(self.make_movie)
             self.cancel_btn = QtW.QPushButton("Cancel"); self.cancel_btn.clicked.connect(self.cancel_render)
             self.open_btn = QtW.QPushButton("Play movie"); self.open_btn.clicked.connect(lambda: self._open(self.last_movie))
@@ -648,9 +662,9 @@ def build_gui(args):
             row = QtW.QHBoxLayout()
             for w in (self.go_btn, self.cancel_btn, self.open_btn, self.dir_btn):
                 row.addWidget(w)
-            row.addStretch(1); grid.addLayout(row, 8, 0, 1, 5)
-            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 9, 0, 1, 5)
-            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 10, 0, 1, 5)
+            row.addStretch(1); grid.addLayout(row, 9, 0, 1, 5)
+            self.progress = QtW.QProgressBar(); grid.addWidget(self.progress, 10, 0, 1, 5)
+            self.status_lbl = QtW.QLabel(""); self.status_lbl.setStyleSheet(DIM); self.status_lbl.setWordWrap(True); grid.addWidget(self.status_lbl, 11, 0, 1, 5)
             mk.addWidget(g); mk.addStretch(1)
             split.addWidget(left); split.addWidget(self.right); split.setStretchFactor(1, 1); split.setSizes([560, 920])
             self.cancel_btn.hide(); self.progress.hide(); self.open_btn.setEnabled(False)
@@ -812,7 +826,7 @@ def build_gui(args):
                 self.tabs.setTabVisible(i, False)
             self.struct_dock.setVisible(False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
-            self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.voxel_row.setVisible(False)
+            self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.drawbar.setVisible(False); self.voxel_row.setVisible(False)
             self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
 
         def set_busy(self, flag, msg=None):
@@ -1019,7 +1033,7 @@ def build_gui(args):
                 self.tabs.setTabVisible(i, True)
             self.struct_dock.setVisible(True)
             self.explore.set_data(info)
-            self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
+            self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True); self.drawbar.setVisible(True)
             self.build_controls()
             if not keep_message:
                 self.say("Loaded. Change anything on the left; the preview follows.", "ok")
@@ -1782,6 +1796,8 @@ def build_gui(args):
                                                                                          or self.path_pick or self.region_pick):
                 self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
                 return
+            if e.key() == QtC.Qt.Key_Escape and getattr(self, "drawbar", None) is not None and self.drawbar.tool() != "select":
+                self.pen.cancel(); self.drawbar.set_tool("select"); self.say("Select.", "ok"); return
             if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick or self.arrow_pick):
                 self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.arrow_pick = False; self.pick_btn.setChecked(False)
                 return
@@ -1826,6 +1842,10 @@ def build_gui(args):
                 self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
             if self.multi_pick and self.st.has_segmentation and self.gen is None:
                 return self._multi_click(fx, fy)
+            if isinstance(self.arrow_pick, tuple) and self.gen is None:  # 3.6 "Move tip...": this click is where it points
+                from .gui_annotations import move_tip_to
+                aid = self.arrow_pick[1]; self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor)
+                move_tip_to(self, aid, (fx, fy)); return
             if isinstance(self.arrow_pick, str) and self.gen is None:  # "Point at more things": until a click on empty space
                 from .gui_annotations import add_pointer_at
                 if not add_pointer_at(self, self.arrow_pick, (fx, fy)):
@@ -1938,6 +1958,9 @@ def build_gui(args):
             name = re.sub(r"\.(mp4|mov)$", "", name, flags=re.I) + ".mp4"
             path = os.path.join(folder, name)
             spec = self.spec_for(); resume = False; outs = output_paths(path, spec["output"].get("formats") or ["mp4"])
+            if spec["output"].get("layers") == "separate":  # 3.6: the layer movies and their list are replaced too
+                from . import layers as _lay
+                outs.update(output_paths(path, [_lay.FORMAT_OF[n] for n in _lay.wanted(spec)])); outs["layers.json"] = _lay.info_path(path)
             part = read_partial(path)
             if part and part.get("chunks_done"):
                 from .encode import settings_hash

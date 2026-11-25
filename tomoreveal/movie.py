@@ -38,17 +38,22 @@ def moving(a, b):
             or (p.get("pos") is not None and q.get("pos") is not None and not np.allclose(p["pos"], q["pos"])))
 
 
-def motion_blurred(ren, s, nxt, spec, size, aa, transparent):
-    """The average of BLUR_SAMPLES pictures with the camera between this frame and the next (3.5)."""
-    acc = None; fov = float(spec.get("style", {}).get("fov", 30))
+def motion_blurred(ren, s, nxt, spec, size, aa, transparent, split=False):
+    """The average of BLUR_SAMPLES pictures with the camera between this frame and the next (3.5); split: as layers."""
+    acc = None; fov = float(spec.get("style", {}).get("fov", 30)); imgs = []
     for k in range(BLUR_SAMPLES):
         u = BLUR_SHUTTER * k / BLUR_SAMPLES
         pose = lerp_pose(s["pose"], nxt["pose"], u, fov=fov)
         if s["pose"].get("pos") is not None and nxt["pose"].get("pos") is not None:
             pose["pos"] = np.asarray(s["pose"]["pos"]) * (1 - u) + np.asarray(nxt["pose"]["pos"]) * u
             up = np.asarray(s["pose"]["up"]) * (1 - u) + np.asarray(nxt["pose"]["up"]) * u; pose["up"] = up / (np.linalg.norm(up) or 1.0)
+        if split:
+            imgs.append(ren.draw_layers(dict(s, pose=pose), spec, size, aa=aa, transparent=transparent)); continue
         img = ren.draw(dict(s, pose=pose), spec, size, aa=aa, transparent=transparent).astype(np.float32)
         acc = img if acc is None else acc + img
+    if split:
+        from .layers import average
+        return average(imgs)
     return np.clip(np.round(acc / BLUR_SAMPLES), 0, 255).astype(np.uint8)
 
 
@@ -75,6 +80,10 @@ class MovieJob:
                                 f"this one has {len(self.frames)} frames. Choose an empty folder, or remove the old frames.")
         formats = encode.output_settings(o)
         self.alpha = any(encode.FORMATS[f][2] for f in formats)  # a transparent MOV: frames are drawn with alpha
+        from . import layers as lay
+        self.layers = lay.wanted(spec) if o.get("layers") == "separate" else []  # 3.6: separate transparent layer movies
+        for n in self.layers:
+            formats[lay.FORMAT_OF[n]] = encode.video_args("mov-transparent")
         self.paths = encode.output_paths(out, formats)
         self.settings = encode.settings_hash(spec, ren.ds)
         chunk = int(chunk_frames or encode.CHUNK_FRAMES); start_chunk = 0
@@ -93,6 +102,7 @@ class MovieJob:
             or [i for i, s in enumerate(fr) if s.get("type") == "overview" and s["phase"] == "main" and s["e"] == 0]
         self.poster_i = idx[len(idx) // 4] if (idx and poster) else -1
         self.i, self.last_key, self.img, self.finished, self.closed = self.start, None, None, False, False
+        self.frame = None
 
     def __iter__(self):
         return self
@@ -107,6 +117,9 @@ class MovieJob:
             raise StopIteration
         if self.i >= len(self.frames):
             self.writer.close(); self.finished = self.closed = True
+            if self.layers:
+                from .layers import write_info
+                write_info(self.out, self.writer.paths, self.fps, self.size, len(self.frames), self.layers)
             if os.path.exists(poster_partial(self.out)):  # the old poster is replaced only now, with the finished movie
                 os.replace(poster_partial(self.out), poster_path(self.out))
             raise StopIteration
@@ -116,17 +129,27 @@ class MovieJob:
                    round(float(s.get("dissolve", 0) or 0), 4))  # overlays may differ per part
             tr = self.alpha or (self.transparent and bool(self.frames_dir))
             nxt = self.frames[i + 1] if (self.blur and i + 1 < len(self.frames)) else None
+            split = bool(self.layers)
             if self.blur and nxt is not None and not s.get("card") and not s.get("blend") and moving(s, nxt):
-                self.img = motion_blurred(self.ren, s, nxt, self.spec, self.size, self.aa, tr); self.last_key = None
+                self.frame = motion_blurred(self.ren, s, nxt, self.spec, self.size, self.aa, tr, split); self.last_key = None
             elif key != self.last_key:
-                self.img = self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=tr)
+                self.frame = (self.ren.draw_layers(s, self.spec, self.size, aa=self.aa, transparent=tr) if split else
+                              self.ren.draw(s, self.spec, self.size, aa=self.aa, transparent=tr))
                 self.last_key = key
+                if split:  # what the window shows while it renders: the frame as it looks merged
+                    from .layers import composite
+                    b = self.frame["base"]
+                    self.img = composite(encode.composite(b, self.writer.bg) if b.shape[2] == 4 else b,
+                                         [self.frame[n] for n in ("labels", "arrows")])
+            if not split:
+                self.img = self.frame
+            base = self.frame["base"] if split else self.img
             if self.frames_dir:  # one PNG per frame, also while the picture holds still (pauses stay in the sequence)
-                imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), self.img)
+                imageio.imwrite(os.path.join(self.frames_dir, f"frame_{i:05d}.png"), base)
             if i == self.poster_i:
                 rgb = encode.composite(self.img, self.writer.bg) if self.img.shape[2] == 4 else self.img
                 imageio.imwrite(poster_partial(self.out), rgb)
-            self.writer.write(self.img)
+            self.writer.write(self.frame)
         except BaseException:
             self.close(); raise
         self.i += 1

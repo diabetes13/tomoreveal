@@ -19,8 +19,9 @@ SEVERAL = "#9a9a9a"
 
 def ann_label(a):
     """Short name of an arrow or text box on the timeline: its kind and its words."""
-    words = ((a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")).strip()
-    kind = "Arrow" if a["kind"] == "arrow" else "Text"
+    words = ((a.get("label") or {}).get("text", "") if a["kind"] != "text" else a.get("text", "")).strip()
+    kind = {"arrow": "Arrow", "text": "Text", "curve": "Curved arrow", "freehand": "Freehand arrow", "line": "Line",
+            "ellipse": "Ellipse", "rect": "Rectangle"}.get(a["kind"], "Arrow")
     return f"{kind}: {' '.join(words.split())}" if words else kind
 
 
@@ -374,7 +375,7 @@ class TimelineCanvas(QtW.QWidget):
         f2 = p.font(); f2.setPointSizeF(max(7.0, f2.pointSizeF() * 0.95)); p.setFont(f2); fm2 = p.fontMetrics()
         for aid, pid, x0, x1, lane, s0, s1, a in bars:
             r = QtC.QRectF(x0, top + lane * LANE_H + 1, max(4.0, x1 - x0), LANE_H - 3)
-            col = QtG.QColor(ANN_COLOURS["arrow" if a["kind"] == "arrow" else "text"]); col.setAlpha(230 if a.get("visible", True) else 80)
+            col = QtG.QColor(ANN_COLOURS["text" if a["kind"] == "text" else "arrow"]); col.setAlpha(230 if a.get("visible", True) else 80)
             p.setPen(QtG.QPen(pal.color(QtG.QPalette.Highlight), 2) if aid == sel_ann else QtG.QPen(col.darker(140), 1)); p.setBrush(col)
             p.drawRoundedRect(r, 4, 4)
             if r.width() >= 10:  # grips at both ends: drag to change when it shows

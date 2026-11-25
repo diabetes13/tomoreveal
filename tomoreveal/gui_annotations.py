@@ -2,6 +2,8 @@
 by clicking in the preview, dragging, right-click menus, several selected at once (align), and editing labels."""
 import math
 
+import numpy as np
+
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import annotations as an
@@ -10,6 +12,12 @@ from .gui_theme import DIM
 
 COLOURS = (("automatic (white or black)", "auto"), ("white", "#ffffff"), ("black", "#000000"), ("yellow", "#ffd23f"),
            ("red", "#e4572e"), ("cyan", "#45b9e8"))
+
+
+KIND_GLYPHS = {"arrow": "→", "text": "T", "curve": "⤻", "freehand": "✎", "line": "╱", "ellipse": "◯", "rect": "▭"}
+HEADS_SHORT = (("head: end", "end"), ("heads: both", "both"), ("head: start", "start"), ("no head", "none"))
+KIND_NAMES = {"arrow": "An arrow", "text": "A text box", "curve": "A curved arrow", "freehand": "A freehand arrow",
+              "line": "A line", "ellipse": "An ellipse", "rect": "A rectangle"}
 
 
 def exec_menu(menu, pos):
@@ -26,6 +34,9 @@ def _split(name):
     return parts[1], (int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None)
 
 
+TIP_PX = 12  # 3.6: a tip (or the end of a drawn shape) is grabbed within this many pixels on screen
+
+
 class AnnotationMouse:
     def __init__(self, win):
         self.win = win; self.drag = None; self.selected = []  # ids selected in the preview (Ctrl + click adds)
@@ -33,7 +44,19 @@ class AnnotationMouse:
     def hit(self, od, f):
         if f is None:
             return None
-        rects = od.rects()
+        rects = od.rects(); sz = self.win.prev.image_px()
+        if sz:  # 3.6 (R16): ends and handles first, within TIP_PX of their middle (they win over the camera and the label)
+            best = None
+            for n, r in rects.items():
+                if n.startswith(("anncurve:", "anntip:", "anntail:")):
+                    x0, y0, x1, y1 = r[0]; dx, dy = ((x0 + x1) / 2 - f[0]) * sz[0], ((y0 + y1) / 2 - f[1]) * sz[1]
+                    d = (dx * dx + dy * dy) ** 0.5
+                    pri = 0 if n.startswith("anncurve:") else 1 if n.startswith("anntip:") else 2
+                    if d <= TIP_PX and (n.startswith(("anncurve:", "anntip:")) or not _label_box(r[0], sz)) and \
+                            (best is None or (pri, d) < best[0]):
+                        best = ((pri, d), n)
+            if best is not None:
+                return best[1]
         for pre in ("anntip:", "anntail:", "ann:"):
             for n in reversed([n for n in rects if n.startswith(pre)]):  # drawn last = on top
                 x0, y0, x1, y1 = rects[n][0]
@@ -51,16 +74,22 @@ class AnnotationMouse:
             return False
         if mods & QtC.Qt.ControlModifier:  # several at once
             self.selected = [x for x in self.selected if x != aid] if aid in self.selected else self.selected + [aid]
-            w.prev.update(); return True
+            w.prev.update(); _sync_bar(w); return True
         if aid not in self.selected:
             self.selected = [aid]
-        kind = "tip" if name.startswith("anntip:") else "tail" if name.startswith("anntail:") and a["kind"] == "arrow" else "move"
-        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False, more=j, tip0=self.tip_at(a),
+        kind = ("bend" if name.startswith("anncurve:") else "tip" if name.startswith("anntip:") else
+                "tail" if name.startswith("anntail:") and a["kind"] != "text" else "move")
+        self.drag = dict(aid=aid, kind=kind, f0=f, moved=False, more=j, tip0=self.tip_at(a), pinned=not an.is_2d(a),
+                         shown0=shown_fracs(w, a), under=None, t_pick=0.0,
                          start={x: (dict(an.find(w.spec, x).get("pos") or {}) if an.find(w.spec, x) else {}) for x in self.selected})
+        _sync_bar(w)
         return True
 
     def tip_at(self, a):
-        """Where an arrow's tip is on the picture now (fractions), or None."""
+        """Where an arrow's tip (a drawn shape's pinned point) is on the picture now (fractions), or None."""
+        if an.is_drawn(a):
+            S = shown_fracs(self.win, a)
+            return None if S is None else tuple(float(v) for v in an.ref_point(a, S))
         if a.get("kind") != "arrow":
             return None
         if an.is_2d(a):
@@ -82,6 +111,27 @@ class AnnotationMouse:
         a["anchor"] = anc
         return True
 
+    def _follow(self, a, f):
+        """During a drag the tip follows the mouse on the picture (2D); it is pinned again on release (3.6, R16)."""
+        a["place"] = "2d"; a["tip2d"] = [round(min(1.0, max(0.0, f[0])), 4), round(min(1.0, max(0.0, f[1])), 4)]
+
+    def _look_under(self, f):
+        """What a pinned tip would be pinned to at f: a name for the note beside the crosshair (at most 10 times a second)."""
+        import time
+        d = self.drag
+        if not d["pinned"] or time.monotonic() - d["t_pick"] < 0.1:
+            return
+        d["t_pick"] = time.monotonic(); d["at"] = f
+        ren = self.win.st.ren
+        if ren is None or ren.pick_point(*f) is None:
+            d["under"] = ""; return
+        hit = None
+        try:
+            hit = self.win.st.pick(self.win.spec_for(), {"frame": self.win.frame, "x": f[0], "y": f[1]})
+        except Exception:
+            pass
+        d["under"] = (hit.get("name") or "structure") if hit and hit.get("found") else "the slice"
+
     def move(self, od, f, mods):
         d = self.drag; w = self.win
         if d is None or f is None:
@@ -89,10 +139,12 @@ class AnnotationMouse:
         a = an.find(w.spec, d["aid"])
         if a is None:
             return
-        d["moved"] = True; ren = w.st.ren
-        if a["kind"] == "arrow" and d["kind"] == "move":  # the whole arrow: its tip goes along with the mouse
+        d["moved"] = True; ren = w.st.ren; d["at"] = f
+        if an.is_drawn(a):
+            self._move_drawn(a, d, f, mods)
+        elif a["kind"] == "arrow" and d["kind"] == "move":  # the whole arrow: its tip goes along with the mouse
             if d["tip0"] is not None:
-                self.put_tip(a, (d["tip0"][0] + f[0] - d["f0"][0], d["tip0"][1] + f[1] - d["f0"][1]))
+                g = (d["tip0"][0] + f[0] - d["f0"][0], d["tip0"][1] + f[1] - d["f0"][1]); self._follow(a, g); self._look_under(g)
         elif d["kind"] == "tail":  # angle and length of the tail, on screen
             tp = self.tip_at(a)
             if tp is None:
@@ -107,7 +159,7 @@ class AnnotationMouse:
                 if anc is not None:
                     a["more"][d["more"]] = anc
             elif a["kind"] == "arrow":
-                self.put_tip(a, f)
+                self._follow(a, f); self._look_under(f)
             else:
                 anc = pick_anchor(w, f)
                 if anc is not None:
@@ -127,12 +179,65 @@ class AnnotationMouse:
                                 y=min(0.98, max(0.0, float(st.get("y", 0.5)) + f[1] - d["f0"][1])), anchor=st.get("anchor", "top-left"))
         w.req = {"frame": w.frame}; w.do_preview(quick=True); w.prev.update()
 
+    def _move_drawn(self, a, d, f, mods):
+        """Drag a drawn shape (3.6): the whole of it, one end (the stroke turns and stretches about the other end; a
+        corner of an ellipse or rectangle), or a curve's bend. It stays on the picture during the drag."""
+        from . import drawing
+        S0 = d["shown0"]
+        if S0 is None:
+            return
+        S0 = np.asarray(S0, float); k = a["kind"]; dx, dy = f[0] - d["f0"][0], f[1] - d["f0"][1]
+        if d["kind"] == "move":
+            S = S0 + (dx, dy)
+        elif d["kind"] == "bend" and k == "curve":
+            S = S0.copy(); m = drawing.bezier_middle(S0[0], S0[1], S0[2]) + (dx, dy)
+            S[1] = drawing.control_for_middle(S0[0], m, S0[2])
+        elif k in ("ellipse", "rect"):
+            S = S0.copy(); i = 1 if d["kind"] == "tip" else 0; g = (S0[i][0] + dx, S0[i][1] + dy)
+            if mods & QtC.Qt.ShiftModifier:
+                g = _square_frac(self.win, S0[1 - i], g)
+            S[i] = g
+        else:
+            end, fixed = (S0[-1], S0[0]) if d["kind"] == "tip" else (S0[0], S0[-1])
+            g = (end[0] + dx, end[1] + dy)
+            if mods & QtC.Qt.ShiftModifier and k == "line":
+                g = _snap_frac(self.win, fixed, g)
+            S = drawing.similarity(S0, fixed, end, g)
+        a["place"] = "2d"; a["points"] = [[round(float(x), 5), round(float(y), 5)] for x, y in S]
+        if d["pinned"] and d["kind"] in ("move", "tip") or (d["pinned"] and k in ("ellipse", "rect")):
+            self._look_under(tuple(an.ref_point(a, S)))
+
     def release(self, od):
         d, self.drag = self.drag, None
         if d is not None and d["moved"]:
+            a = an.find(self.win.spec, d["aid"])
+            if a is not None and d.get("pinned") and d.get("more") is None and \
+                    (an.is_drawn(a) or (a["kind"] == "arrow" and d["kind"] in ("tip", "move"))):
+                w = self.win; w.req = {"frame": w.frame}; w.do_preview()  # full size: the spot is found to the pixel
+                repin(w, a)
             self.win.editor.commit(); self.win.schedule(0)
             if hasattr(self.win, "ann_panel"):
                 self.win.ann_panel.rebuild()
+        self.win.prev.update()
+
+    def paint(self, p, prev):
+        """While a pinned tip is dragged: a crosshair at the mouse and what the tip will be pinned to (3.6, R16)."""
+        d = self.drag
+        if d is None or not d.get("moved") or not d.get("pinned") or d.get("at") is None or d["kind"] == "bend":
+            return
+        a = an.find(self.win.spec, d["aid"]) if self.win.spec is not None else None
+        if a is None or a["kind"] == "text":
+            return
+        f = self.tip_at(a) or d["at"]; c = prev.to_widget(*f)
+        for col, wd in ((QtG.QColor(0, 0, 0, 160), 3), (QtG.QColor(255, 210, 63), 1.4)):
+            p.setPen(QtG.QPen(col, wd))
+            p.drawLine(QtC.QPointF(c.x() - 14, c.y()), QtC.QPointF(c.x() - 4, c.y())); p.drawLine(QtC.QPointF(c.x() + 4, c.y()), QtC.QPointF(c.x() + 14, c.y()))
+            p.drawLine(QtC.QPointF(c.x(), c.y() - 14), QtC.QPointF(c.x(), c.y() - 4)); p.drawLine(QtC.QPointF(c.x(), c.y() + 4), QtC.QPointF(c.x(), c.y() + 14))
+        u = d.get("under")
+        text = "pin to: " + u if u else "nothing here: it will stay on the picture" if u == "" else "pin to: ..."
+        fm = p.fontMetrics(); r = QtC.QRectF(c.x() + 16, c.y() + 10, fm.horizontalAdvance(text) + 12, fm.height() + 6)
+        p.setPen(QtC.Qt.NoPen); p.setBrush(QtG.QColor(0, 0, 0, 170)); p.drawRoundedRect(r, 4, 4)
+        p.setPen(QtG.QColor(255, 255, 255)); p.drawText(r, QtC.Qt.AlignCenter, text)
 
     # ---- menus ----
     def context(self, od, f, gpos):
@@ -168,12 +273,104 @@ def pick_anchor(win, f):
                 component=hit.get("component") if found else None)
 
 
+def _label_box(box, sz):
+    """A tail box that is a label (wider than a handle): grabbed anywhere on it, not by its middle only."""
+    return (box[2] - box[0]) * sz[0] > 2 * TIP_PX + 8
+
+
+def _px(win):
+    ren = win.st.ren
+    return ren.size if ren is not None else (16, 9)
+
+
+def _snap_frac(win, p0, p1):
+    from .drawing import snap_angle
+    W, H = _px(win); q = snap_angle((p0[0] * W, p0[1] * H), (p1[0] * W, p1[1] * H))
+    return (q[0] / W, q[1] / H)
+
+
+def _square_frac(win, p0, p1):
+    from .drawing import square
+    W, H = _px(win); q = square((p0[0] * W, p0[1] * H), (p1[0] * W, p1[1] * H))
+    return (q[0] / W, q[1] / H)
+
+
+def shown_fracs(win, a):
+    """A drawn shape's points where they are on the picture now (fractions), or None (its spot is behind the camera)."""
+    if not an.is_drawn(a):
+        return None
+    P = np.asarray(a.get("points"), float)
+    if an.is_2d(a):
+        return P
+    ren = win.st.ren
+    if ren is None:
+        return P
+    (fx, fy), front = ren.project(a["anchor"]["xyz"])
+    return P + (np.array([fx, fy]) - an.ref_point(a, P)) if front else None
+
+
+def repin(win, a, say=True):
+    """After a drag: pin the tip (a shape's pinned point) to the 3D spot under it again. Nothing there: it stays on
+    the picture (2D) and the window says so. True when pinned."""
+    if a["kind"] == "arrow":
+        at = tuple(a["tip2d"]) if an.is_2d(a) else None
+    else:
+        at = tuple(float(v) for v in an.ref_point(a))
+    anc = pick_anchor(win, at) if at is not None else None
+    if anc is None:
+        if say:
+            win.say("Nothing under the tip to pin it to: it now stays where it is on the picture. Drag it onto a structure "
+                    "or the slice to pin it again.", "err")
+        return False
+    a["anchor"] = anc; a["place"] = "3d"
+    if a["kind"] == "arrow":
+        a.pop("tip2d", None)
+    return True
+
+
+def _sync_bar(win):
+    bar = getattr(win, "drawbar", None)
+    if bar is not None:
+        bar.sync()
+
+
+def start_move_tip(win, aid):
+    """Move tip...: the next click in the preview is where the tip goes (pinned to what is there, or on the picture)."""
+    win.pick_btn.setChecked(False); win.end_picks(); win.arrow_pick = ("tip", aid); win.prev.setCursor(QtC.Qt.CrossCursor)
+    win.say("Click where the tip should point. Esc cancels.")
+
+
+def move_tip_to(win, aid, f):
+    a = an.find(win.spec, aid)
+    if a is None or f is None:
+        return
+    if an.is_drawn(a):
+        S = shown_fracs(win, a)
+        if S is None:
+            S = np.asarray(a["points"], float)
+        S = S + (np.asarray(f, float) - an.ref_point(a, S))
+        a["points"] = [[round(float(x), 5), round(float(y), 5)] for x, y in S]; a["place"] = "2d"
+    else:
+        a["place"] = "2d"; a["tip2d"] = [round(float(f[0]), 4), round(float(f[1]), 4)]
+    pinned = repin(win, a, say=False)
+    commit(win)
+    win.say("The tip now points there." if pinned else "Nothing there to pin to: the tip stays on the picture there.", "ok")
+
+
 def set_place(win, aid, how):
     """An arrow on the spot in 3D (it moves with the camera) or on the picture in 2D (it stays where it is on screen).
     It stays where it is now in the preview when switched."""
     a = an.find(win.spec, aid)
-    if a is None or a["kind"] != "arrow":
+    if a is None or a["kind"] == "text":
         return
+    if an.is_drawn(a):  # 3.6: drawn shapes keep their place on the picture, pinned (3D) or not (2D)
+        S = shown_fracs(win, a)
+        if S is not None:
+            a["points"] = [[round(float(x), 5), round(float(y), 5)] for x, y in S]
+        a["place"] = "2d"
+        if how == "3d" and not repin(win, a, say=False):
+            win.say("There is nothing under the tip to pin it to. Drag the tip onto a structure or the slice.", "err")
+        commit(win); return
     now = win.ann_mouse.tip_at(a)
     if how == "2d":
         if now is None:
@@ -235,9 +432,12 @@ def item_menu(win, aid, gpos, pointer=None):
     a = an.find(win.spec, aid)
     if a is None:
         return
-    m = QtW.QMenu(win); arrow = a["kind"] == "arrow"
-    m.addAction("Edit label..." if arrow else "Edit text...", lambda: edit_label(win, aid))
-    m.addAction("Point at more things...", lambda: start_add_pointer(win, aid))
+    m = QtW.QMenu(win); arrow = a["kind"] == "arrow"; drawn = an.is_drawn(a)
+    m.addAction("Edit text..." if a["kind"] == "text" else "Edit label...", lambda: edit_label(win, aid))
+    if a["kind"] != "text":
+        m.addAction("Move tip..." if a["kind"] not in ("ellipse", "rect") else "Move to...", lambda: start_move_tip(win, aid))
+    if not drawn:
+        m.addAction("Point at more things...", lambda: start_add_pointer(win, aid))
     if pointer is not None:
         m.addAction("Remove this pointer", lambda: change(win, aid, lambda b: b["more"].pop(pointer) if pointer < len(b.get("more") or []) else None))
     if an.pointers(a):
@@ -248,6 +448,16 @@ def item_menu(win, aid, gpos, pointer=None):
         for t, v in an.SHAPES:
             act = sh.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("shape", v))); act.setCheckable(True)
             act.setChecked(st.get("shape", "arrow") == v)
+        pl = m.addMenu("Keep it")
+        for t, v in an.PLACES:
+            act = pl.addAction(t, lambda v=v: set_place(win, aid, v)); act.setCheckable(True)
+            act.setChecked(("2d" if an.is_2d(a) else "3d") == v)
+    elif drawn:
+        if a["kind"] in ("curve", "freehand", "line"):
+            hd = m.addMenu("Arrowheads")
+            for t, v in an.HEADS:
+                act = hd.addAction(t, lambda v=v: change(win, aid, lambda b: b["style"].__setitem__("heads", v))); act.setCheckable(True)
+                act.setChecked(st.get("heads", "end") == v)
         pl = m.addMenu("Keep it")
         for t, v in an.PLACES:
             act = pl.addAction(t, lambda v=v: set_place(win, aid, v)); act.setCheckable(True)
@@ -270,6 +480,14 @@ def item_menu(win, aid, gpos, pointer=None):
         act.setChecked(st.get("color", "auto") == v)
     other = co.addAction("other colour ...", lambda: pick_colour(win, aid, "color", "Colour")); other.setCheckable(True)
     other.setChecked(st.get("color", "auto") not in [v for _, v in COLOURS])
+    ap = m.addMenu("Appear")
+    for t, v in an.APPEAR:
+        act = ap.addAction(t, lambda v=v: change(win, aid, lambda b: b.setdefault("show", {}).__setitem__("appear", v)))
+        act.setCheckable(True); act.setChecked((a.get("show") or {}).get("appear", "fade") == v)
+    ly = m.addMenu("Separate layer movie")
+    for t, v in an.LAYERS:
+        act = ly.addAction(f"goes into: {t}", lambda v=v: change(win, aid, lambda b: b.__setitem__("layer", v)))
+        act.setCheckable(True); act.setChecked(an.layer_of(a) == v)
     m.addAction("Duplicate", lambda: (an.duplicate(win.spec, aid), commit(win)))
     cp = m.addMenu("Copy to")
     for i, p in enumerate(win.spec.get("shots", [])):
@@ -321,6 +539,8 @@ def copy_to(win, aid, pid):
         b["show"]["parts"] = [pid]
         if b["kind"] == "text":
             b["pos"] = dict(an.find(win.spec, aid).get("pos") or b["pos"])  # same place on the screen
+        elif an.is_drawn(b):
+            b["points"] = [list(q) for q in an.find(win.spec, aid)["points"]]
         else:
             b["tail"] = dict(an.find(win.spec, aid)["tail"])  # same 3D anchor and tail
         commit(win)
@@ -370,7 +590,7 @@ def edit_label(win, aid):
     a = an.find(win.spec, aid)
     if a is None:
         return
-    cur = (a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")
+    cur = (a.get("label") or {}).get("text", "") if a["kind"] != "text" else a.get("text", "")
     le = QtW.QLineEdit(win.prev); le.setText(cur); le.setPlaceholderText("type the label"); le.setMinimumWidth(200)
     od = win.prev.overlay; r = od.rects().get(f"anntail:{aid}") or od.rects().get(f"ann:{aid}") if od is not None else None
     pt = win.prev.to_widget(r[0][0], r[0][1]).toPoint() if r and win.prev.image_px() else QtC.QPoint(40, 40)
@@ -380,7 +600,7 @@ def edit_label(win, aid):
     def done():
         b = an.find(win.spec, aid)
         if b is not None and le.isVisible():
-            if b["kind"] == "arrow":
+            if b["kind"] != "text":
                 b.setdefault("label", {})["text"] = le.text()
             else:
                 b["text"] = le.text()
@@ -513,20 +733,20 @@ class AnnotationPanel(QtC.QObject):
     def _row(self, a):
         """One item: [shown] [arrow / text] [label] [shape or box] [colour] [x], and under it when it shows and what it
         points at (3.5: the common choices are in the row; the rest stays in the ⋯ menu)."""
-        w = self.win; aid = a["id"]; arrow = a["kind"] == "arrow"
+        w = self.win; aid = a["id"]; arrow = a["kind"] != "text"; drawn = an.is_drawn(a)
         row = QtW.QFrame(); row.setFrameShape(QtW.QFrame.StyledPanel)
         v = QtW.QVBoxLayout(row); v.setContentsMargins(4, 3, 4, 3); v.setSpacing(2)
         h = QtW.QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); v.addLayout(h)
         vis = QtW.QCheckBox(); vis.setChecked(a.get("visible", True)); vis.setToolTip("Show or hide this item")
         vis.toggled.connect(lambda on: change_here(w, aid, lambda b: b.__setitem__("visible", bool(on))))
-        kind = QtW.QLabel("→" if arrow else "T"); kind.setToolTip("An arrow" if arrow else "A text box")
+        kind = QtW.QLabel(KIND_GLYPHS.get(a["kind"], "→")); kind.setToolTip(KIND_NAMES.get(a["kind"], "An arrow"))
         txt = QtW.QLineEdit((a.get("label") or {}).get("text", "") if arrow else a.get("text", ""))
         txt.setToolTip("The label of the arrow, or the text"); txt.setMinimumWidth(80)
         txt.setPlaceholderText("label" if arrow else "text")
 
         def set_text():
             def fn(b, t=txt.text()):
-                if b["kind"] == "arrow":
+                if b["kind"] != "text":
                     b.setdefault("label", {})["text"] = t
                 else:
                     b["text"] = t
@@ -541,8 +761,12 @@ class AnnotationPanel(QtC.QObject):
             cb.setCurrentIndex(max(0, cb.findData(cur))); cb.setToolTip(tip)
             cb.activated.connect(lambda j: change_here(w, aid, lambda b: b.setdefault("style", {}).__setitem__(key, cb.itemData(j))))
             return cb
-        look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
-            combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
+        if drawn:
+            look = combo(HEADS_SHORT, st.get("heads", "end"), "heads", "Arrowheads at the ends of the line") \
+                if a["kind"] in ("curve", "freehand", "line") else None
+        else:
+            look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
+                combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
         col = combo(COLOURS, st.get("color", "auto"), "color", "Colour")
         if st.get("color", "auto") not in [v for _, v in COLOURS]:  # chosen from the colour wheel
             col.addItem("own colour", st["color"]); col.setCurrentIndex(col.count() - 1)
@@ -558,7 +782,8 @@ class AnnotationPanel(QtC.QObject):
             wheel.clicked.connect(lambda: pick_colour(w, aid, "fill", "Colour of the box"))
         dele = QtW.QToolButton(); dele.setText("✕"); dele.setToolTip("Delete this item"); dele.clicked.connect(lambda: delete(w, aid))
         for x in (vis, kind, txt, look, col, wheel, dele):
-            h.addWidget(x)
+            if x is not None:
+                h.addWidget(x)
         h.setStretch(2, 1)
         h2 = QtW.QHBoxLayout(); h2.setContentsMargins(22, 0, 0, 0); v.addLayout(h2)
         sh = a.get("show") or {}
@@ -581,7 +806,7 @@ class AnnotationPanel(QtC.QObject):
         more.clicked.connect(lambda: start_add_pointer(w, aid))
         menu = QtW.QToolButton(); menu.setText("⋯"); menu.setToolTip("Edit, duplicate, copy to another part, align, same look for all ...")
         menu.clicked.connect(lambda: item_menu(w, aid, menu.mapToGlobal(QtC.QPoint(0, menu.height()))))
-        for x in (stt, en, here, there, more, menu):
+        for x in (stt, en, here, there) + (() if drawn else (more,)) + (menu,):
             h2.addWidget(x)
         h2.addStretch(1)
         return row
@@ -602,15 +827,27 @@ class AnnotationPanel(QtC.QObject):
 
 
 def paint_selection(p, prev, win):
-    """Dashed boxes around the selected arrows and text boxes."""
+    """Dashed boxes around the selected arrows and text boxes, round handles on their tips, ends and bends (3.6), and
+    the crosshair of a tip being dragged."""
     od = prev.overlay
-    if od is None or not win.ann_mouse.selected:
+    if od is None:
         return
-    rects = od.rects()
+    win.ann_mouse.paint(p, prev)
+    if not win.ann_mouse.selected:
+        return
+    rects = od.rects(); hl = prev.palette().highlight().color()
     for aid in win.ann_mouse.selected:
         r = rects.get(f"ann:{aid}")
         if not r:
             continue
         a, b = prev.to_widget(r[0][0], r[0][1]), prev.to_widget(r[0][2], r[0][3])
-        p.setPen(QtG.QPen(prev.palette().highlight().color(), 1, QtC.Qt.DashLine)); p.setBrush(QtC.Qt.NoBrush)
+        p.setPen(QtG.QPen(hl, 1, QtC.Qt.DashLine)); p.setBrush(QtC.Qt.NoBrush)
         p.drawRect(QtC.QRectF(a, b))
+        p.setRenderHint(QtG.QPainter.Antialiasing)
+        for pre, rad in (("anntip", 6.0), ("anncurve", 5.0), ("anntail", 4.5)):
+            q = rects.get(f"{pre}:{aid}")
+            if not q or (pre == "anntail" and _label_box(q[0], prev.image_px() or (1, 1))):
+                continue
+            c = prev.to_widget((q[0][0] + q[0][2]) / 2, (q[0][1] + q[0][3]) / 2)
+            p.setPen(QtG.QPen(QtG.QColor(0, 0, 0, 180), 1.2)); p.setBrush(QtG.QColor(255, 210, 63) if pre == "anncurve" else hl)
+            p.drawEllipse(c, rad, rad)

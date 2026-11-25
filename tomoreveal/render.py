@@ -80,7 +80,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self._slice_grey, self._shadow_key = None, None
         self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
         self.text_ref_h = None  # the window's preview: text sized for a picture this high, also in smaller quick frames (3.6)
-        self.hide_overlay = None; self.last_layer = None; self._preview_draw = False  # 3.6: an overlay item being dragged (drawn by the window meanwhile)
+        self.hide_overlay = None; self.last_layer = None; self._preview_draw = False; self._split = None  # 3.6: an overlay item being dragged (drawn by the window meanwhile)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
         self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
         self.shape = ds.shape; nz, ny, nx = self.shape
@@ -177,12 +177,16 @@ class Renderer(PreviewPicking, PictureLooks):
             a, rects = card_frame(part, size, self._font, float(s.get("card_fade", 1.0)), transparent)
             self._card_cache = dict(key=key, img=a, rects=rects)
         a, rects = self._card_cache["img"], self._card_cache["rects"]
-        q = float(s.get("dissolve", 0.0) or 0.0)
+        q = float(s.get("dissolve", 0.0) or 0.0); nxt_layers = None
         if q > 0 and s.get("dissolve_to") is not None:
             nxt = s["dissolve_to"]; nk = (state_key(nxt), nxt.get("part"), tuple(size), bool(transparent))
+            nk = nk + (self._split is not None,)
             if self._next_cache.get("key") != nk:
-                self._next_cache = dict(key=nk, img=self.draw(nxt, spec, size, aa=aa, transparent=True).astype(np.float32))
+                img = self.draw(nxt, spec, size, aa=aa, transparent=True)
+                self._next_cache = dict(key=nk, img=img if isinstance(img, dict) else img.astype(np.float32))
             b = self._next_cache["img"]
+            if isinstance(b, dict):  # separate layers: the next part's arrows and labels fade in on their own layers
+                nxt_layers = {k: v * q for k, v in b.items() if k != "base"}; b = b["base"].astype(np.float32)
             a = a * (1 - q) + b * q
         out = np.clip(a, 0, 255).astype(np.uint8)
         if not transparent:
@@ -193,7 +197,22 @@ class Renderer(PreviewPicking, PictureLooks):
             self.last_rects = dict(rects); return out
         img = self.annotate(out, s, spec, size, False, transparent)
         self.last_rects.update(rects)
+        if isinstance(img, dict) and q > 0 and s.get("dissolve_to") is not None and nxt_layers is not None:
+            from .layers import over
+            img = dict(img, **{k: over(img[k], v) for k, v in nxt_layers.items()})
         return img
+
+    def draw_layers(self, s, spec, size, aa=False, transparent=False):
+        """One frame as separate layers (3.6, R12): {"base": the 3D picture without any overlay (RGB, RGBA when
+        transparent), "arrows": arrows and text, "labels": legend, scale bar, captions ...} (layers: straight RGBA
+        uint8). The 3D scene is drawn once; laying the layers over the base gives the frame `draw` returns."""
+        from .layers import straight
+        self._split = {}
+        try:
+            out = self.draw(s, spec, size, aa=aa, transparent=transparent)
+        finally:
+            self._split = None
+        return {k: (v if k == "base" else straight(v)) for k, v in out.items()}
 
     def draw(self, s, spec, size, aa=False, transparent=False, annotate=True, preview=False):
         """One frame. preview=True also shows helpers that never go into a movie (the path of a camera path part)."""
@@ -202,21 +221,16 @@ class Renderer(PreviewPicking, PictureLooks):
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
         if s.get("blend"):  # a dissolve or a fade through black / white between two parts (3.5)
             b = s["blend"]; q = float(b["q"])
-            a_img = self.draw(dict(b["src"], blend=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
-            b_img = self.draw(dict(s, blend=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
-            if b["via"] in ("black", "white"):
-                tone = np.zeros_like(a_img) if b["via"] == "black" else np.full_like(a_img, 255.0)
-                if transparent and a_img.shape[2] == 4:
-                    tone[..., 3] = 255.0
-                out = a_img + (tone - a_img) * min(1.0, 2 * q) if q < 0.5 else tone + (b_img - tone) * min(1.0, 2 * q - 1)
-            else:
-                out = a_img * (1 - q) + b_img * q
-            return np.clip(np.round(out), 0, 255).astype(np.uint8)
+            a_img = self.draw(dict(b["src"], blend=None), spec, size, aa, transparent, annotate, preview)
+            b_img = self.draw(dict(s, blend=None), spec, size, aa, transparent, annotate, preview)
+            from .layers import blend
+            return blend(a_img, b_img, q, b["via"], transparent)
         if s.get("lkfrom") is not None and float(s.get("lkq", 1.0)) < 1.0:  # a part with other effects begins (3.5)
             q = float(s["lkq"])
-            a_img = self.draw(dict(s, lk=s["lkfrom"], lkfrom=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
-            b_img = self.draw(dict(s, lkfrom=None), spec, size, aa, transparent, annotate, preview).astype(np.float32)
-            return np.clip(np.round(a_img * (1 - q) + b_img * q), 0, 255).astype(np.uint8)
+            a_img = self.draw(dict(s, lk=s["lkfrom"], lkfrom=None), spec, size, aa, transparent, annotate, preview)
+            b_img = self.draw(dict(s, lkfrom=None), spec, size, aa, transparent, annotate, preview)
+            from .layers import blend
+            return blend(a_img, b_img, q, "dissolve", transparent)
         if s.get("card"):
             return self.draw_card(s, spec, size, aa, transparent, annotate)
         if size != self.size:
@@ -818,12 +832,21 @@ class Renderer(PreviewPicking, PictureLooks):
                              (("x", np.array([1.0, 0, 0])), ("y", np.array([0, 1.0, 0])), ("z", np.array([0, 0, 1.0])))}, True)
         else:
             P.axes(ax_item, {}, False)
+        arrows = Image.new("RGBA", im.size, (0, 0, 0, 0)) if self._split is not None else None
         if s.get("ann"):  # arrows and text boxes (3.5), on top of everything
             from vtkmodules.util.numpy_support import vtk_to_numpy
             from .annotations import draw as draw_annotations
             arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-            draw_annotations(layer, P, self, s, spec, size, vtk_to_numpy(arr).reshape(H, W))  # rows from the bottom
+            zb = vtk_to_numpy(arr).reshape(H, W)  # rows from the bottom
+            if arrows is None:
+                draw_annotations(layer, P, self, s, spec, size, zb)
+            else:  # separate layer movies (3.6): the 3D picture stays as it is; each layer is kept on its own
+                draw_annotations(layer, P, self, s, spec, size, zb, only="labels")
+                draw_annotations(arrows, P, self, s, spec, size, zb, only="arrows")
         self.last_rects = P.rects; self.last_layer = layer  # the text and marks alone (a dragged item's picture)
+        if arrows is not None:
+            from .layers import premul
+            return {"base": fr_img if transparent else np.asarray(fr_img)[..., :3], "arrows": premul(arrows), "labels": premul(layer)}
         im = Image.alpha_composite(im, layer)
         return np.asarray(im if transparent else im.convert("RGB"))
 

@@ -23,6 +23,11 @@ H265_NOTE = ("H.265: about half the file size of H.264 at the same quality. Play
 TRANSPARENT_NOTE = ("Transparent backgrounds work in Keynote, Final Cut, Premiere and DaVinci Resolve. Check your presentation "
                     "program before relying on it.")
 PRORES_NOTE = "The two ProRes .mov files ignore the file size and codec choices."
+LAYER_CHOICES = (("in the movie", "in"), ("as separate transparent movies", "separate"))
+LAYERS_NOTE = ("Separate: the movie has the 3D picture only; arrows and text, and the legend, scale bar and captions, each "
+               "go into a transparent .mov of their own (ProRes 4444, same length), listed in a _layers.json next to them. "
+               "Lay them over the movie in a video editor, or with File > Merge layer movies. The scale bar drawn on the "
+               "slice stays in the 3D movie.")
 
 
 class ExportControls(QtC.QObject):
@@ -49,8 +54,78 @@ class ExportControls(QtC.QObject):
         self.est_lbl.setToolTip("Estimated from a few frames of this movie; real sizes differ a little")
         grid.addWidget(self.est_lbl, row + 3, 0, 1, 5)
         self.cache = {}; self.est = None; self.est_gen = None; self.shown_key = None; self.last = None
+        self.merge_job = None
         self.wait = QtC.QTimer(self); self.wait.setSingleShot(True); self.wait.setInterval(2000); self.wait.timeout.connect(self.start)
         self.tick = QtC.QTimer(self); self.tick.setInterval(0); self.tick.timeout.connect(self.step)
+
+    def add_layers_row(self, grid, row):
+        """3.6 (R12): 'Arrows and text: in the movie / as separate transparent movies' and Merge layers..."""
+        self.layers_cb = QtW.QComboBox(); self.layers_cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        for t, d in LAYER_CHOICES:
+            self.layers_cb.addItem(t, d)
+        self.layers_cb.setToolTip(LAYERS_NOTE)
+        self.layers_cb.activated.connect(lambda j: self.set_output(layers=self.layers_cb.itemData(j)))
+        self.merge_btn = QtW.QPushButton("Merge layers...")
+        self.merge_btn.setToolTip("Lay separate layer movies (a _layers.json and its files) back over their 3D movie, into one MP4. "
+                                  "Nothing is drawn again, so it is quick. Choose which layers to include.")
+        self.merge_btn.clicked.connect(lambda: self.merge_dialog())
+        grid.addWidget(QtW.QLabel("Arrows and text"), row, 0); grid.addWidget(self.layers_cb, row, 1, 1, 2)
+        grid.addWidget(self.merge_btn, row, 3, 1, 2)
+
+    def merge_dialog(self, info=None):
+        """Choose a _layers.json (the last layered movie by default) and the layers to include, then merge."""
+        from . import layers
+        w = self.win
+        if info is None:
+            start = layers.info_path(w.last_movie) if getattr(w, "last_movie", None) else (w.folder_le.text() if hasattr(w, "folder_le") else "")
+            info, _ = QtW.QFileDialog.getOpenFileName(w, "Merge layer movies", start, "Layer list (*_layers.json)")
+            if not info:
+                return None
+        try:
+            rec = json.load(open(info))
+        except (OSError, ValueError):
+            w.say(f"Could not read {os.path.basename(info)}.", "err"); return None
+        names = [L["name"] for L in rec.get("layers", [])]
+        if len(names) > 1:
+            pick = ask_layers(w, [(L["name"], L.get("title", L["name"])) for L in rec["layers"]])
+            if pick is None:
+                return None
+            names = pick
+        return self.merge(info, names)
+
+    def merge(self, info, names):
+        """Run the merge in a thread; the panel's status line says when it is done."""
+        import threading
+        from . import layers
+        from .common import UserError
+        w = self.win
+        if self.merge_job is not None and self.merge_job["thread"].is_alive():
+            w.say("A merge is still running.", "err"); return None
+        job = dict(out=None, err=None)
+
+        def run():
+            try:
+                job["out"] = layers.merge(info, layers=names)
+            except UserError as exc:
+                job["err"] = str(exc)
+            except Exception as exc:  # FFmpeg missing or failing: shown in plain words, not as a crash
+                job["err"] = f"merging failed: {exc}"
+        job["thread"] = threading.Thread(target=run, daemon=True); self.merge_job = job
+        self.merge_btn.setEnabled(False); w.say("Merging the layers ...")
+        job["thread"].start()
+        t = QtC.QTimer(self); t.setInterval(200); job["timer"] = t
+
+        def check():
+            if job["thread"].is_alive():
+                return
+            t.stop(); self.merge_btn.setEnabled(True)
+            if job["err"]:
+                w.say(job["err"][:1].upper() + job["err"][1:], "err")
+            else:
+                w.last_movie = job["out"]; w.open_btn.setEnabled(True)
+                w.say(f"Merged into {os.path.basename(job['out'])}.", "ok")
+        t.timeout.connect(check); t.start()
+        return job
 
     # ---- settings ----
     def formats_changed(self, *_):
@@ -75,6 +150,8 @@ class ExportControls(QtC.QObject):
         for f, cb in self.fmt.items():
             cb.blockSignals(True); cb.setChecked(f in formats); cb.blockSignals(False)
         self.size_cb.setCurrentIndex(max(0, self.size_cb.findData(o.get("file_size", "balanced"))))
+        if hasattr(self, "layers_cb"):
+            self.layers_cb.setCurrentIndex(max(0, self.layers_cb.findData(o.get("layers", "in"))))
         self.codec_cb.setCurrentIndex(max(0, self.codec_cb.findData(o.get("codec", "h264"))))
         h26x = any(f in ("mp4", "mov") for f in formats)
         self.size_cb.setEnabled(h26x); self.codec_cb.setEnabled(h26x)
@@ -85,6 +162,8 @@ class ExportControls(QtC.QObject):
             notes.append(TRANSPARENT_NOTE)
         if any(f in ("mov-transparent", "mov-prores") for f in formats):
             notes.append(PRORES_NOTE)
+        if o.get("layers") == "separate":
+            notes.append(LAYERS_NOTE)
         self.note.setText("\n".join(notes)); self.note.setVisible(bool(notes))
 
     # ---- estimates ----
@@ -176,3 +255,17 @@ class ExportControls(QtC.QObject):
                 except OSError:
                     pass
         return " · ".join(out)
+
+
+def ask_layers(win, layers):
+    """Which layers to lay over the movie (all ticked); None = cancelled. Tests replace this."""
+    d = QtW.QDialog(win); d.setWindowTitle("Merge layer movies"); v = QtW.QVBoxLayout(d)
+    v.addWidget(QtW.QLabel("Lay these layers over the 3D movie:")); boxes = []
+    for name, title in layers:
+        cb = QtW.QCheckBox(title); cb.setChecked(True); cb.setToolTip(f"Include the {title.lower()} layer"); v.addWidget(cb)
+        boxes.append((name, cb))
+    bb = QtW.QDialogButtonBox(QtW.QDialogButtonBox.Ok | QtW.QDialogButtonBox.Cancel); v.addWidget(bb)
+    bb.accepted.connect(d.accept); bb.rejected.connect(d.reject)
+    if d.exec() != QtW.QDialog.Accepted:
+        return None
+    return [n for n, cb in boxes if cb.isChecked()]

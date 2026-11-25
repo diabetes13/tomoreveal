@@ -46,12 +46,20 @@ FORMATS = {  # name: (suffix added to the movie name, extension, needs alpha)
     "mov-transparent": ("_transparent", ".mov", True),
     "mov-prores": ("_prores", ".mov", False),
 }
+LAYER_FORMATS = {  # 3.6: separate transparent layer movies (layers.py), written next to the movie's own formats
+    "layer-arrows": ("_arrows", ".mov", True),
+    "layer-labels": ("_labels", ".mov", True),
+}
+
+
+def _fmt(f):
+    return FORMATS.get(f) or LAYER_FORMATS[f]
 
 
 def output_paths(out, formats):
     """{format: final file path} for a movie called `out` (any extension is replaced)."""
     base = os.path.splitext(out)[0]
-    return {f: base + FORMATS[f][0] + FORMATS[f][1] for f in formats}
+    return {f: base + _fmt(f)[0] + _fmt(f)[1] for f in formats}
 
 
 def settings_hash(spec, ds):
@@ -90,7 +98,7 @@ def read_partial(out):
 def remove_partial(out, formats=None):
     """Delete every partial file of a movie (after a cancel, or before starting again)."""
     st = read_partial(out) or {}
-    formats = formats or st.get("formats") or list(FORMATS)
+    formats = formats or st.get("formats") or list(FORMATS) + list(LAYER_FORMATS)
     folder = os.path.dirname(os.path.abspath(out)) or "."
     for p in output_paths(out, formats).values():
         base, ext = os.path.splitext(os.path.basename(p))
@@ -186,7 +194,7 @@ class ChunkedWriter:
         os.replace(tmp, _state_path(self.out))
 
     def _open(self):
-        self.pipes = {f: Pipe(_partial(p, self.chunk), self.size, self.fps, self.formats[f], alpha=FORMATS[f][2])
+        self.pipes = {f: Pipe(_partial(p, self.chunk), self.size, self.fps, self.formats[f], alpha=_fmt(f)[2])
                       for f, p in self.paths.items()}
         self.n_in_chunk = 0
 
@@ -197,12 +205,18 @@ class ChunkedWriter:
         self.record["chunks_done"] = self.chunk; self._save_record()
 
     def write(self, img):
-        """One frame (RGB, or RGBA when a transparent format is written) to every format."""
+        """One frame (RGB, or RGBA when a transparent format is written) to every format. With separate layers (3.6)
+        img is {"base": picture, "arrows": RGBA, "labels": RGBA}: each layer goes to its own movie."""
         if self.pipes is None:
             self._open()
+        layers = img if isinstance(img, dict) else {}
+        img = layers.get("base", img)
         rgb = composite(img, self.bg) if img.shape[2] == 4 else img
-        for p in self.pipes.values():
-            p.write(img if p.alpha else rgb)
+        for f, p in self.pipes.items():
+            if f in LAYER_FORMATS:
+                p.write(layers[f[len("layer-"):]])
+            else:
+                p.write(img if p.alpha else rgb)
         self.n_in_chunk += 1
         if self.n_in_chunk >= self.chunk_frames:
             self._close_chunk()

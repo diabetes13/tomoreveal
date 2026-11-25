@@ -18,6 +18,17 @@ ADD_ENTRIES = (("Slide up through the slices", "slide_up"), ("Slide back, reveal
 CARD_ENTRIES = (("Title card", "title_card"), ("End card (thank you)", "end_card"), ("Blank card", "card"))
 
 
+def _mouse_held(win):
+    """True while the mouse drags something in the preview (an item, an arrow, the camera, a drawing): the history
+    timer then waits, so a slow drag is not split into several undo steps (3.6, R16)."""
+    prev = getattr(win, "prev", None)
+    if prev is None:
+        return False
+    od, nav, pen = getattr(prev, "overlay", None), getattr(prev, "nav", None), getattr(win, "pen", None)
+    return bool((od is not None and od.drag is not None) or (nav is not None and nav.drag is not None)
+                or (pen is not None and pen.stroke is not None))
+
+
 class MovieEditor(QtC.QObject):
     """Every change to the parts goes through here: one storyboard edit function, then one undo step."""
 
@@ -64,6 +75,8 @@ class MovieEditor(QtC.QObject):
 
     def record(self):
         """Store the settings as one undo step (any change: structures, view, clip, look, parts)."""
+        if _mouse_held(self.win):  # 3.6: a drag still going on is one step, at its end
+            self.hist_timer.start(); return
         if self.spec is not None:
             self.history.push(self.spec)
         self.refresh_buttons()

@@ -15,6 +15,12 @@ spec["annotations"] is a list; each item:
             "show": {"parts": "all" | [part ids], "start": s or None, "end": s or None (seconds from the start of the
                      part), "fade": s, "appear": "fade" | "grow" | "pop"},
             "behind": "normal" | "faint" | "hide", "hide_when_hidden": bool, "visible": bool}
+3.6 (R17): shapes drawn with the mouse, kinds "curve" (a curved arrow), "freehand" (an arrow along a stroke), "line",
+"ellipse" and "rect": "points": [[fx, fy], ...] fractions of the picture as drawn (a curve: tail, bend, tip; ellipses
+and rectangles: two corners), "place" "2d" | "3d" with "anchor" (as arrows): pinned, the shape is moved so that its
+reference point (the tip; the middle of an ellipse or rectangle) stays on the anchor and keeps its shape on screen.
+style "heads": "end" | "start" | "both" | "none". Any item may have "layer": "arrows" (default) | "labels" (which
+separate transparent movie it goes into, 6.3), and show "appear": "draw" (drawn on over show["draw"] seconds).
 An arrow's tip is pinned to a 3D point: each frame it is projected onto the picture; the tail keeps its angle and length
 on screen. Everything is drawn with the overlays after the 3D picture, so it stays sharp at any zoom, and goes into
 every movie format (opaque pixels in the transparent MOV).
@@ -29,7 +35,13 @@ SHAPES = (("Arrow", "arrow"), ("Thin arrow", "thin"), ("Pointer", "pointer"), ("
 BOXES = (("dark box", "dark"), ("light box", "light"), ("coloured box", "fill"), ("outline", "outline"), ("no box", "none"))
 PLACES = (("on the spot in 3D (moves with the camera)", "3d"), ("on the picture in 2D (stays put)", "2d"))
 SUPERSAMPLE = 3  # arrows and boxes are drawn this many times larger and scaled down: smooth edges
-APPEAR = (("fade in", "fade"), ("grow", "grow"), ("pop", "pop"))
+APPEAR = (("fade in", "fade"), ("grow", "grow"), ("pop", "pop"), ("draw on", "draw"))
+DRAWN = ("curve", "freehand", "line", "ellipse", "rect")  # 3.6: shapes drawn with the mouse
+KINDS = ("arrow", "text") + DRAWN
+HEADS = (("arrowhead at the end", "end"), ("arrowheads at both ends", "both"), ("arrowhead at the start", "start"),
+         ("no arrowhead", "none"))
+LAYERS = (("Arrows and text", "arrows"), ("Legend and scale bar", "labels"))  # separate transparent movies (6.3)
+DRAW_ON = 1.0  # seconds for a shape to draw itself on ("draw on")
 BEHIND = (("draw normally", "normal"), ("draw faintly", "faint"), ("hide", "hide"))
 GROW = 0.4  # seconds for the shaft to draw from tail to tip
 
@@ -52,6 +64,32 @@ def new_text(text, x=0.72, y=0.18, parts="all", pin=None):
                 show=dict(parts=parts, start=None, end=None, fade=0.4, appear="fade"), behind="normal", hide_when_hidden=True)
 
 
+def new_drawn(kind, points, anchor=None, parts="all", heads=None):
+    """A shape drawn with the mouse (3.6): points in fractions of the picture; anchor: pinned to that 3D spot."""
+    if heads is None:
+        heads = "end" if kind in ("curve", "freehand") else "none"
+    return dict(id=new_id(), kind=kind, visible=True, points=[[round(float(x), 5), round(float(y), 5)] for x, y in points],
+                place="3d" if anchor else "2d", anchor=anchor, label=dict(text="", size=1.0, side="auto"),
+                style=dict(color="auto", outline=True, width=1.0, head=1.0, opacity=1.0, heads=heads),
+                show=dict(parts=parts, start=None, end=None, fade=0.4, appear="fade"), behind="normal", hide_when_hidden=True)
+
+
+def is_drawn(a):
+    return a.get("kind") in DRAWN
+
+
+def layer_of(a):
+    return a.get("layer") if a.get("layer") in ("arrows", "labels") else "arrows"
+
+
+def ref_point(a, points=None):
+    """The point of a drawn shape that is pinned (its tip; the middle of an ellipse or rectangle), in its own units."""
+    P = np.asarray(points if points is not None else a.get("points") or [[0.5, 0.5]], float)
+    if a.get("kind") in ("ellipse", "rect") and len(P) >= 2:
+        return (P[0] + P[1]) / 2
+    return P[-1]
+
+
 def pointers(a):
     """The extra anchors an item points at (3.5): [{"xyz", "structure", "component"}]."""
     return [m for m in (a.get("more") or []) if isinstance(m, dict) and m.get("xyz") is not None]
@@ -64,7 +102,8 @@ def add_pointer(a, xyz, structure=None, component=None):
 
 
 def items(spec):
-    return [a for a in (spec.get("annotations") or []) if isinstance(a, dict) and a.get("kind") in ("arrow", "text")]
+    return [a for a in (spec.get("annotations") or []) if isinstance(a, dict) and a.get("kind") in KINDS
+            and (a.get("kind") not in DRAWN or len(a.get("points") or []) >= 2)]
 
 
 def find(spec, aid):
@@ -78,6 +117,8 @@ def duplicate(spec, aid):
     b = copy.deepcopy(a); b["id"] = new_id()
     if b["kind"] == "text":
         b["pos"]["x"] = min(0.97, b["pos"]["x"] + 0.03); b["pos"]["y"] = min(0.97, b["pos"]["y"] + 0.03)
+    elif b["kind"] in DRAWN:
+        b["points"] = [[min(0.99, x + 0.03), min(0.99, y + 0.03)] for x, y in b["points"]]
     else:
         b["tail"]["angle"] = (b["tail"]["angle"] + 15) % 360
     spec.setdefault("annotations", []).append(b)
@@ -131,8 +172,9 @@ def plan_annotations(spec, ds, frames, segments, fr, fps, aspect):
             if not (s0 <= t <= s1):
                 continue
             ain = 1.0 if how == "pop" or fade <= 0 else _ramp((t - s0) / fade)
-            if how == "grow":
-                grown[j] = _ramp((t - s0) / GROW); ain = 1.0
+            if how in ("grow", "draw"):
+                grown[j] = _ramp((t - s0) / (GROW if how == "grow" else max(0.05, float(sh.get("draw", DRAW_ON) or DRAW_ON))))
+                ain = 1.0
             aout = 1.0 if fade <= 0 else _ramp((s1 - t) / fade) if sh.get("end") is not None else 1.0
             alpha[j] = min(ain, aout)
         anchor = anchor_xyz(a)
@@ -196,7 +238,7 @@ def _visible_here(a, s, spec, ds, xyz, anc=None):
         return 1.0
     from .storyboard import class_spec, clip_box, others_of, target_items
     if anc is None:
-        anc = a.get("anchor") if a["kind"] == "arrow" else (a.get("pin") or {})
+        anc = (a.get("pin") or {}) if a["kind"] == "text" else a.get("anchor")
     key = (anc or {}).get("structure")
     x, y, z = xyz
     cb = clip_box(spec, ds.shape)
@@ -219,12 +261,15 @@ def _visible_here(a, s, spec, ds, xyz, anc=None):
 
 
 def is_2d(a):
+    """Placed on the picture (stays put whatever the camera does): 2D arrows and drawn shapes not pinned to anything."""
+    if a.get("kind") in DRAWN:
+        return a.get("place") != "3d" or not (a.get("anchor") or {}).get("xyz")
     return a.get("kind") == "arrow" and a.get("place") == "2d" and a.get("tip2d") is not None
 
 
 def anchor_xyz(a):
-    """The 3D point an item is pinned to (None: a free text box, or an arrow placed on the picture)."""
-    if a.get("kind") == "arrow":
+    """The 3D point an item is pinned to (None: a free text box, or an arrow or shape placed on the picture)."""
+    if a.get("kind") == "arrow" or a.get("kind") in DRAWN:
         return None if is_2d(a) else (a.get("anchor") or {}).get("xyz")
     return (a.get("pin") or {}).get("xyz")
 
@@ -281,29 +326,30 @@ class _Draw:
         layer.paste(out)
 
 
-def draw(layer, P, ren, s, spec, size, zbuf=None):
+def draw(layer, P, ren, s, spec, size, zbuf=None, only=None):
     """Draw the annotations visible in frame s onto the PIL layer; their boxes go into P.rects as "ann:<id>" (whole
-    item), "anntip:<id>" (an arrow's tip) and "anntail:<id>" (its tail / label)."""
+    item), "anntip:<id>" (an arrow's tip), "anntail:<id>" (its tail / label) and "anncurve:<id>" (a curve's bend).
+    only: draw the items of that layer only ("arrows" / "labels", for separate layer movies)."""
     vis = s.get("ann") or {}
     if not vis:
         return
     W, H = size; d = _Draw(size); ds = ren.ds; dark = P.dark; px = P.px
     try:
-        _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf)
+        _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf, only)
     finally:
         d.onto(layer)
 
 
-def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf):
+def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf, only=None):
     placed = []  # label boxes already drawn (to keep labels apart)
     for a in items(spec):
-        if a["id"] not in vis or not a.get("visible", True):
+        if a["id"] not in vis or not a.get("visible", True) or (only is not None and layer_of(a) != only):
             continue
         alpha, grown, ang = vis[a["id"]]
         st = a.get("style") or {}
         alpha *= float(st.get("opacity", 1.0))
         anc = anchor_xyz(a)
-        tip = (float(a["tip2d"][0]) * W, float(a["tip2d"][1]) * H) if is_2d(a) else None
+        tip = (float(a["tip2d"][0]) * W, float(a["tip2d"][1]) * H) if is_2d(a) and a["kind"] == "arrow" else None
         if anc is not None:
             (fx, fy), front = ren.project(anc)
             if not front:
@@ -327,7 +373,9 @@ def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf):
             aj = _visible_here(a, s, spec, ds, m["xyz"], m) if front else 0.0
             if front and -0.02 <= mx <= 1.02 and -0.02 <= my <= 1.02 and aj > 0.002:
                 extra.append((j, (mx * W, my * H), aj))
-        if a["kind"] == "arrow" and tip is not None:
+        if a["kind"] in DRAWN:
+            box = _drawn(d, a, tip, grown, W, H, px, col, A, outline, st, P, placed)
+        elif a["kind"] == "arrow" and tip is not None:
             box = _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extra)
         else:
             box = _text(d, a, tip, W, H, px, col, A, st, P, placed, dark, extra, outline)
@@ -455,6 +503,84 @@ def _arrow(d, a, tip, ang, grown, W, H, px, col, A, outline, st, P, placed, extr
         P.rects[f"anntail:{a['id']}"] = dict(box=(x - 4, y - 4, x + tw + 4, y + th + tp + 4), shown=True)
     else:
         P.rects[f"anntail:{a['id']}"] = dict(box=(tail[0] - 9, tail[1] - 9, tail[0] + 9, tail[1] + 9), shown=True)
+    return tuple(box)
+
+
+def shown_points(a, W, H, ref=None):
+    """A drawn shape's points in pixels of a W x H picture; ref: where its pinned point is now (pixels), or None."""
+    P = np.asarray(a.get("points"), float) * [W, H]
+    if ref is not None:
+        P = P + (np.asarray(ref, float) - ref_point(a, P))
+    return P
+
+
+def outline_of(a, P):
+    """The line a drawn shape is drawn along (pixels)."""
+    from . import drawing
+    k = a["kind"]
+    if k == "curve" and len(P) >= 3:
+        return drawing.bezier(P[0], P[1], P[2])
+    if k == "freehand":
+        return drawing.smooth(P)
+    if k == "ellipse":
+        return drawing.ellipse(P[0], P[1])
+    if k == "rect":
+        return drawing.rect(P[0], P[1])
+    return np.asarray([P[0], P[-1]], float)
+
+
+def _drawn(d, a, ref, grown, W, H, px, col, A, outline, st, P, placed):
+    """A curve, freehand stroke, line, ellipse or rectangle (3.6), drawn on to `grown` of its length."""
+    from . import drawing
+    pts = shown_points(a, W, H, ref if not is_2d(a) else None)
+    line = outline_of(a, pts); L = drawing.length(line)
+    if L < 1.0:
+        return None
+    w = max(1.5, H * 0.005 * float(st.get("width", 1.0))); ow = max(1.0, w * 0.45) if st.get("outline", True) else 0
+    fill = col + (A,); oc = outline if st.get("outline", True) else None
+    hl = H * 0.024 * float(st.get("head", 1.0)); hw = max(hl * 0.5, w * 1.7)
+    heads = st.get("heads", "end") if a["kind"] in ("curve", "freehand", "line") else "none"
+    shown = drawing.cut(line, grown)
+    at_end = heads in ("end", "both") and grown >= 0.999; at_start = heads in ("start", "both")
+    body = shown
+    if at_end:  # the shaft stops under the head, so its round end does not poke through the point
+        body = drawing.cut(body, max(0.0, 1 - hl * 0.8 / max(1e-6, drawing.length(body))))
+    if at_start and len(body) >= 2:
+        rev = body[::-1]; body = drawing.cut(rev, max(0.0, 1 - hl * 0.8 / max(1e-6, drawing.length(rev))))[::-1]
+    closed = a["kind"] in ("ellipse", "rect") and grown >= 0.999
+    pl = [tuple(p) for p in body]
+    for c, wd in ((oc, w + 2 * ow), (fill, w)) if oc else ((fill, w),):
+        if len(pl) >= 2:
+            d.line(pl + ([pl[1]] if closed else []), fill=c, width=wd, joint="curve")
+            if not closed:
+                r = wd / 2
+                for q in (pl[0], pl[-1]):
+                    d.ellipse([q[0] - r, q[1] - r, q[0] + r, q[1] + r], fill=c)
+    for on, tip, seq in ((at_end, line[-1], line), (at_start and grown > 0.05, line[0], line[::-1])):
+        if on:
+            u = drawing.end_direction(seq, hl); hp = drawing.head(tip, u, hl, hw)
+            if oc:
+                d.polygon(hp, fill=fill, outline=oc, width=int(round(ow)))
+            else:
+                d.polygon(hp, fill=fill)
+    xs, ys = line[:, 0], line[:, 1]
+    box = [float(xs.min()) - 8, float(ys.min()) - 8, float(xs.max()) + 8, float(ys.max()) + 8]
+    i0, i1 = (0, 1) if a["kind"] in ("ellipse", "rect") else (0, len(pts) - 1)
+    for name, q in (("anntip", pts[i1]), ("anntail", pts[i0])):
+        P.rects[f"{name}:{a['id']}"] = dict(box=(q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9), shown=True)
+    if a["kind"] == "curve" and len(pts) >= 3:
+        m = drawing.bezier_middle(pts[0], pts[1], pts[2])
+        P.rects[f"anncurve:{a['id']}"] = dict(box=(m[0] - 9, m[1] - 9, m[0] + 9, m[1] + 9), shown=True)
+    lab = a.get("label") or {}
+    if lab.get("text"):  # beside the start of the line (the top left corner of an ellipse or rectangle)
+        f = P.font(max(9, round(px * float(lab.get("size", 1.0))))); l, tp, r, b = d.textbbox((0, 0), lab["text"], font=f)
+        tw, th = r - l, b - tp; gap = px * 0.35; q = pts[0]
+        back = line[min(len(line) - 1, 3)] - line[0] if a["kind"] not in ("ellipse", "rect") else np.array([1.0, 1.0])
+        x = q[0] - gap - tw if back[0] > 0 else q[0] + gap; y = q[1] - th / 2 - tp
+        x = min(max(2, x), W - tw - 2); y = min(max(2, y), H - th - 2); x, y = _apart(x, y, tw, th, placed, H)
+        d.text((x, y), lab["text"], font=f, fill=col + (A,), stroke_width=max(1, round(px * 0.09)), stroke_fill=outline)
+        placed.append((x, y, x + tw, y + th + tp))
+        box = [min(box[0], x - 4), min(box[1], y - 4), max(box[2], x + tw + 4), max(box[3], y + th + tp + 4)]
     return tuple(box)
 
 

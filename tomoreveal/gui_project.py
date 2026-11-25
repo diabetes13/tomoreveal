@@ -125,6 +125,9 @@ class ProjectManager(QtC.QObject):
         self.act_save = m.addAction("Save", self.save, QtG.QKeySequence("Ctrl+S"))
         self.act_save_as = m.addAction("Save as...", self.save_as, QtG.QKeySequence("Ctrl+Shift+S"))
         self.act_revert = m.addAction("Revert to saved", self.revert)
+        m.addSeparator()
+        self.act_merge = m.addAction("Merge layer movies...", lambda: self.win.export.merge_dialog())
+        self.act_merge.setToolTip("Lay separate arrow and label movies back over their 3D movie, into one MP4 (no drawing again)")
         h = mb.addMenu("Help"); self.help_menu = h
         h.addAction("Show log folder", lambda: QtG.QDesktopServices.openUrl(QtC.QUrl.fromLocalFile(pj.logs_dir())))
         a = h.addAction("Performance...", self.show_performance)

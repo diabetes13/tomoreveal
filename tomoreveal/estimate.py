@@ -104,4 +104,4 @@ def human(nbytes, rough=False):
     return f"about {txt}" + (" (rough)" if rough else "")
 
 
-FORMAT_NAMES = {"mp4": "MP4", "mov": "MOV", "mov-transparent": "Transparent MOV", "mov-prores": "Editing MOV"}
+FORMAT_NAMES = {"mp4": "MP4", "mov": "MOV", "mov-transparent": "Transparent MOV", "mov-prores": "Editing MOV", "layer-arrows": "Arrows layer", "layer-labels": "Labels layer"}

@@ -566,10 +566,12 @@ The source code is in the `tomoreveal` folder:
 | `dragonfly.py` | Reader for `.ORSSession` files |
 | `volumes.py` | Reading volumes, recognising file types, surfaces |
 | `matching.py` | Lining up a tomogram file with Dragonfly's copy |
-| `storyboard.py` | Camera, clip box, the parts of the movie, editing them, undo, and the frame-by-frame plan |
+| `storyboard.py` | Camera, clip box, and the frame-by-frame plan |
+| `parts.py` | The parts of the movie: making them, close-up targets, older settings, names |
 | `render.py` | Drawing one frame and writing the movie |
 | `studio.py` | Program state that the window and the commands share |
 | `gui.py` | The desktop window |
+| `gui_widgets.py` | The preview widget, the worker thread and other small widgets of the window |
 | `gui_data.py` | The Data tab |
 | `gui_explore.py`, `explore.py` | The Explore tab and its slice drawing |
 | `gui_theme.py` | Light and dark themes |

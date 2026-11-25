@@ -31,7 +31,7 @@ class PictureLooks:
         dark = SHADOW_DARKEST[L35["shadow"]]
         for kk, act, mesh in acts:
             if not act.GetVisibility() or mesh is None or getattr(act, "_shown_mesh", mesh) is not mesh or \
-                    class_spec(spec, self.ds, kk).get("no_shadow"):  # this structure without soft shadows (Structures tab)
+                    class_spec(spec, self.ds, kk).get("no_shadow"):  # this structure without soft shadows (Structures panel)
                 act.mapper.ScalarVisibilityOff(); continue
             f = self._ao.factor(mesh, dark)
             col = np.array(act.GetProperty().GetColor(), np.float32)
@@ -159,7 +159,7 @@ class PictureLooks:
                     return self.ds.classes.get(kk, {}).get("key") not in only
                 return class_spec(spec, self.ds, kk).get("no_outline")
             plain = [c[0] * 65536 + c[1] * 256 + c[2] for c, kk in ids.items() if plain_one(kk)]
-            if plain:  # structures drawn without an outline (Structures tab, or this part's list): no edge on them
+            if plain:  # structures drawn without an outline (Structures panel, or this part's list): no edge on them
                 code = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
                 edge &= ~np.isin(code, plain)
             w = OUTLINE_PX[L35["outline"]] * H / 1080.0

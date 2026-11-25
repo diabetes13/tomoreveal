@@ -1,4 +1,7 @@
 """3.6 phase 2: surfaces kept on disk, label counts without big copies, the tomogram in its own data type."""
+import os
+
+import pytest
 import numpy as np
 
 import tomoreveal as tr
@@ -181,3 +184,17 @@ def test_half_detail_surfaces(demo):
     half = ds.meshes[k]
     assert half is not full and half.n_cells < 0.4 * full.n_cells
     assert ds.set_params(k, detail=None) and ds.meshes[k] is full  # back to the full surface, from the cache
+
+
+def test_own_folder_without_the_window(monkeypatch):
+    """Bug found in 3.6 dev: without the window (command line, scripts) the application names were not set, so the
+    folder was ~/.local/share itself and cached surfaces went to ~/.local/share/surfaces."""
+    QtCore = pytest.importorskip("PySide6.QtCore")
+    from tomoreveal.project import data_dir
+    A = QtCore.QCoreApplication; old = (A.organizationName(), A.applicationName())
+    monkeypatch.delenv("TOMOREVEAL_DATA_DIR", raising=False)
+    try:
+        A.setOrganizationName(""); A.setApplicationName("")
+        assert os.path.basename(os.path.normpath(data_dir())) == "TomoReveal"  # nothing is written: only the path
+    finally:
+        A.setOrganizationName(old[0]); A.setApplicationName(old[1])

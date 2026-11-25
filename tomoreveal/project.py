@@ -306,8 +306,13 @@ def data_dir():
         return env
     try:
         from PySide6 import QtCore
+        A = QtCore.QCoreApplication
+        if A.organizationName() != "TomoReveal" or A.applicationName() != "TomoReveal":
+            # 3.6 fix: without the window (command line, scripts) the names were not set, and the folder was the
+            # user's whole ~/.local/share (surfaces went to ~/.local/share/surfaces). Use the window's folder.
+            A.setOrganizationName("TomoReveal"); A.setApplicationName("TomoReveal")
         p = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.AppDataLocation)
-        if p:
+        if p and os.path.basename(os.path.normpath(p)) == "TomoReveal":
             return p
     except ImportError:
         pass

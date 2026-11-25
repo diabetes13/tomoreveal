@@ -348,6 +348,11 @@ class Navigator:
                 lambda: (self.push(force=True), self.glide(self.centre_on((np.asarray(lo_hi[0], float) + np.asarray(lo_hi[1], float)) / 2), GLIDE)),
                 lo_hi is not None, "Make the middle of this the rotation centre: spins and rocks then turn around it")
             act(f"Hide {name}", lambda: self.set_shown(key, False))
+            selp = w.parts_panel.part(w.selected_part) if w.selected_part else None
+            if selp is not None:  # 3.6: hidden in the selected part only, faded at its edges
+                from .gui_visibility import set_hidden
+                act(f"Hide {name} in this part", lambda: set_hidden(w, selp["id"], key, True), True,
+                    "Hide it in the part selected on the timeline only (the eye in the Structures panel shows it again)")
             act(f"Show only {name}", lambda: self.show_only(key))
             tgt = {"class": key, "component": hit["component"]} if hit.get("component") is not None else {"class": key}
             act(f"Add a close-up of this {name}" if hit.get("component") is not None else f"Add a close-up of {name}",
@@ -367,7 +372,7 @@ class Navigator:
     def set_shown(self, key, on):
         w = self.win
         if key in w.spec.get("classes", {}):
-            w.spec["classes"][key]["show"] = bool(on); w.build_controls(); w.schedule(0)
+            w.spec["classes"][key]["show"] = bool(on); w.build_controls(); w.editor.record(); w.schedule(0)
 
     def show_only(self, key):
         w = self.win

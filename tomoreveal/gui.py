@@ -55,6 +55,7 @@ def build_gui(args):
     from .look import look_settings, AA_MOVIE, ensure as ensure_look
     from .gui_look import LookControls, style_rows
     from .gui_numbers import ClipNumbers, NumberEdit
+    from .gui_visibility import EyeButton, eye_toggled, refresh_eyes
     from .gui_export import ExportControls
     from .encode import output_paths
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
@@ -349,7 +350,7 @@ def build_gui(args):
             self._path_worker = None
             self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
             self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
-            self._struct_open = set()  # structures whose settings are open in the Structures tab
+            self._struct_open = set()  # structures whose settings are open in the Structures panel
             self._param_pending = {}; self._soften_cb = {}; self._surf_worker = None
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
             self.prev_timer = QtC.QTimer(self); self.prev_timer.setSingleShot(True); self.prev_timer.timeout.connect(self.do_preview)
@@ -477,15 +478,25 @@ def build_gui(args):
                     win.editor.record(); win.schedule()
             self.data = DataPanel(self.st, self.run_job, self.settings, self.load_demo, self.start_over, names=Names()); lay.addWidget(self.data)
             self.voxel_row = VoxelRow(self); lay.addWidget(self.voxel_row); self.voxel_row.setVisible(False)
-            # structures
-            lay = self._tab("Structures")
-            self.struct_group, sl = self._group("Structures", lay)
+            # structures (3.6: a panel docked on the right of the preview, with an eye per structure; was a tab)
+            from .gui_visibility import ScopeRow
+            self.struct_dock = QtW.QDockWidget("Structures", self); self.struct_dock.setObjectName("structures_dock")
+            self.struct_dock.setFeatures(QtW.QDockWidget.DockWidgetMovable | QtW.QDockWidget.DockWidgetFloatable)
+            self.struct_dock.setAllowedAreas(QtC.Qt.LeftDockWidgetArea | QtC.Qt.RightDockWidgetArea)
+            dscroll = QtW.QScrollArea(); dscroll.setWidgetResizable(True); dpage = QtW.QWidget(); dscroll.setWidget(dpage)
+            lay = QtW.QVBoxLayout(dpage); lay.setContentsMargins(4, 4, 4, 4)
+            self.vis_scope = ScopeRow(self); lay.addWidget(self.vis_scope)
+            self.struct_group = QtW.QWidget(); sl = QtW.QVBoxLayout(self.struct_group); sl.setContentsMargins(0, 0, 0, 0); lay.addWidget(self.struct_group)
             self.struct_box = QtW.QWidget(); self.struct_grid = QtW.QGridLayout(self.struct_box); self.struct_grid.setContentsMargins(0, 0, 0, 0)
             self.struct_grid.setColumnStretch(2, 1); sl.addWidget(self.struct_box)
             self.struct_note = QtW.QLabel("No segmentation loaded. Add one in the Data tab."); sl.addWidget(self.struct_note)
-            self.struct_group.setToolTip("Untick to hide. Zoom adds a close-up of that structure to the movie. easymode structures "
-                                         "have a threshold: the surface is drawn where the network's score is above it.")
+            self.struct_group.setToolTip("Click an eye to hide a structure. Zoom adds a close-up of that structure to the movie. "
+                                         "easymode structures have a threshold: the surface is drawn where the network's score is above it.")
             lay.addStretch(1)
+            self.struct_dock.setWidget(dscroll); self.struct_dock.setMinimumWidth(330)
+            self.addDockWidget(QtC.Qt.RightDockWidgetArea, self.struct_dock); self.struct_dock.setVisible(False)
+            for b in self.struct_dock.findChildren(QtW.QAbstractButton, options=QtC.Qt.FindDirectChildrenOnly):
+                b.setToolTip("Take the Structures panel out as a window of its own (double-click its title to put it back)")
             # explore
             lay = self._tab("Explore")
             self.explore = ExplorePanel(self.st, lambda: self.spec, self.spec_for, self._set_z_range,
@@ -555,7 +566,7 @@ def build_gui(args):
             self.title_le = QtW.QLineEdit(); self.title_le.setPlaceholderText("optional text, bottom left")
             self.title_le.textChanged.connect(lambda t: self._style_set("title", t))
             self.allop_s = QtW.QSlider(QtC.Qt.Horizontal); self.allop_s.setRange(0, 100)
-            self.allop_s.setToolTip("Fades all structures together, for a 'ghost' look. Each structure's own opacity is in the Structures tab.")
+            self.allop_s.setToolTip("Fades all structures together, for a 'ghost' look. Each structure's own opacity is in the Structures panel.")
             self.allop_s.valueChanged.connect(lambda v: self._style_set("structures_opacity", v / 100))
             form.addRow("Background", self.bg_cb); form.addRow("Contrast", self.contrast_s); form.addRow("All structures", self.allop_s)
             form.addRow("Title", self.title_le); ll.addLayout(form)
@@ -570,7 +581,7 @@ def build_gui(args):
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             from .gui_presets import PresetsPanel
             self.presets = PresetsPanel(self, self._tab("Presets")); self.pages[-1].layout().addStretch(1)
-            self.tabs.tabBar().moveTab(5, 3)  # choose a look before making the movie: Presets comes before Movie
+            self.tabs.tabBar().moveTab(4, 2)  # choose a look before making the movie: Presets comes before Movie
             wg, wl = self._group("Window", lay, "window", False, "Light or dark window. This does not change the movie: its "
                                  "background is set in the Look.")
             row = QtW.QHBoxLayout(); row.addWidget(QtW.QLabel("Theme")); self.theme_cb = QtW.QComboBox()
@@ -651,7 +662,18 @@ def build_gui(args):
             if text:
                 self.statusBar().showMessage(text, 10000)
 
-        TAB_DATA, TAB_STRUCT, TAB_EXPLORE, TAB_PRESETS, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4, 5
+        @property
+        def selected_part(self):
+            return getattr(self, "_selected_part", None)
+
+        @selected_part.setter
+        def selected_part(self, pid):
+            """The part selected on the timeline; the Structures panel's eyes follow it (3.6)."""
+            old = getattr(self, "_selected_part", None); self._selected_part = pid
+            if pid != old and hasattr(self, "vis_scope"):
+                refresh_eyes(self)
+
+        TAB_DATA, TAB_EXPLORE, TAB_PRESETS, TAB_MOVIE, TAB_LOOK = 0, 1, 2, 3, 4  # (3.6: Structures is a panel on the right)
 
         # ---------- playback ----------
         def toggle_play(self):
@@ -786,8 +808,9 @@ def build_gui(args):
                 self.spec["z_range"] = zr; self.schedule()
 
         def show_empty(self):
-            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
+            for i in (self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
                 self.tabs.setTabVisible(i, False)
+            self.struct_dock.setVisible(False)
             self.tabs.setCurrentIndex(self.TAB_DATA)
             self.timeline.setVisible(False); self.go_btn.setEnabled(False); self.toolbar.setVisible(False); self.voxel_row.setVisible(False)
             self.prev.clear_image("Drop files to begin.\n\nA tomogram, a segmentation, or both: the preview appears here.")
@@ -992,8 +1015,9 @@ def build_gui(args):
             self.editor.reset_history()  # loading other data starts a new history
             if not same or not self.name_le.text().strip():
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
-            for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
+            for i in (self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
                 self.tabs.setTabVisible(i, True)
+            self.struct_dock.setVisible(True)
             self.explore.set_data(info)
             self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
             self.build_controls()
@@ -1166,7 +1190,6 @@ def build_gui(args):
             """Settings of one structure changed outside its row (undo, a preset, the Look tab): set the row's controls
             in place and remake only its settings panel (one panel, not the whole list)."""
             k = c["key"]; sc = self.spec["classes"][k]
-            row["cb"].blockSignals(True); row["cb"].setChecked(bool(sc["show"])); row["cb"].blockSignals(False)
             self._paint(row["colb"], sc["color"])
             if row["ne"].text() != sc["name"] and not row["ne"].hasFocus():
                 row["ne"].blockSignals(True); row["ne"].setText(sc["name"]); row["ne"].blockSignals(False)
@@ -1198,7 +1221,7 @@ def build_gui(args):
                 k = c["key"]; sc = sp["classes"][k]
                 if several and c["source"] != src:
                     src = c["source"]; head = QtW.QLabel(f"<b>{c['source_title']}</b>"); grid.addWidget(head, r, 0, 1, 5); r += 1
-                cb = QtW.QCheckBox(); cb.setChecked(bool(sc["show"])); cb.toggled.connect(lambda v, c=c: self._show_set(c, v))
+                cb = EyeButton(); cb.setChecked(bool(sc["show"])); cb.toggled.connect(lambda v, c=c: eye_toggled(self, c, v))
                 colb = QtW.QPushButton(); colb.setFixedSize(30, 22); self._paint(colb, sc["color"])
                 colb.clicked.connect(lambda _=False, k=k, b=colb: self.pick_color(k, b))
                 ne = QtW.QLineEdit(sc["name"]); ne.setMinimumWidth(70); ne.textChanged.connect(lambda t, k=k: self._class_set(k, "name", t))
@@ -1210,9 +1233,8 @@ def build_gui(args):
                 zb.setEnabled(bool(c["mesh"]))
                 why = ("background" if c["background"] else "hidden in Dragonfly" if c["hidden"] else
                        "no name in the session" if not c["named"] else "")
-                if why:  # listed in grey, switched off at first; tick it to show it anyway
-                    ne.setStyleSheet(DIM); ne.setToolTip(f"{why}; tick the box to show it anyway")
-                    cb.setToolTip(f"{why}; tick to show it anyway")
+                if why:  # listed in grey, switched off at first; click its eye to show it anyway
+                    ne.setStyleSheet(DIM); ne.setToolTip(f"{why}; click the eye to show it anyway")
                 more = QtW.QToolButton(); more.setText("\u2699"); more.setCheckable(True); more.setChecked(k in self._struct_open)
                 more.setToolTip("Opacity, threshold, small specks and smoothing of this structure")
                 for col, w in enumerate((cb, colb, ne, v, zb, more)):
@@ -1225,11 +1247,12 @@ def build_gui(args):
                     lab = QtW.QLabel(f"{why}, so not drawn at first" if not sc["show"] else why); lab.setStyleSheet(DIM)
                     grid.addWidget(lab, r, 2, 1, 3); r += 1; row["lab"] = lab
                 self._watch(k, [cb, colb, ne]); self._watch(k, det); self._grid_snap[k] = self._class_snap(k)
+            refresh_eyes(self)
 
         def build_controls(self):
             sp = self.spec
             self._sync_params(ready_only=True)
-            self._struct_rows()
+            self._struct_rows(); refresh_eyes(self)
             v = sp["view"]
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
             self._sync_clip()

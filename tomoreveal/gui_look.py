@@ -229,7 +229,7 @@ class LookControls(QtC.QObject):
 
 
 def style_rows(win, form, key):
-    """Style settings of one structure in its settings in the Structures tab."""
+    """Style settings of one structure in its settings in the Structures panel."""
     st = lk.style_of(win.spec, key)
     kind = QtW.QComboBox()
     for t, d in lk.STYLES:
@@ -309,7 +309,7 @@ class Look35Controls(QtC.QObject):
         self.membranes.setMinimumContentsLength(8)
         for t, d in lk.MEMBRANE_LOOKS:
             self.membranes.addItem(t, d)
-        self.membranes.setToolTip("Structures ticked 'Treat as membrane' (Structures tab): in their own colour, pale and see-through "
+        self.membranes.setToolTip("Structures ticked 'Treat as membrane' (Structures panel): in their own colour, pale and see-through "
                                   "so what is behind or inside them shows, or solid cream like a ceramic model")
         self.membranes.activated.connect(lambda j: self.set_membranes(self.membranes.itemData(j)))
         self.glass_op = _slider(5, 100, lambda v: f"{v} %", lambda v: self.set(glass_opacity=v / 100))
@@ -323,7 +323,7 @@ class Look35Controls(QtC.QObject):
         f.addRow("See-through edges", self.glass_line)
         self.smooth_mem = QtW.QCheckBox("smoother membrane surfaces")
         self.smooth_mem.setToolTip("Takes away the bumps and ridges a segmentation leaves on membranes (every structure ticked "
-                                   "'Treat as membrane'). Each structure's own setting is 'Smoother surface' in the Structures tab")
+                                   "'Treat as membrane'). Each structure's own setting is 'Smoother surface' in the Structures panel")
         self.smooth_mem.toggled.connect(self.set_smooth_membranes)
         f.addRow("", self.smooth_mem)
         more = Fold("More settings", "look_more", False, "Shadows, outlines, depth fade, surface and colours")
@@ -438,7 +438,7 @@ def _row(*ws):
 
 
 def membrane_row(win, form, key, name):
-    """'Treat as membrane' of one structure (Structures tab): see-through with the Glass looks."""
+    """'Treat as membrane' of one structure (Structures panel): see-through with the Glass looks."""
     cb = QtW.QCheckBox("Treat as membrane"); cb.setChecked(lk.is_membrane(win.spec, key, name))
     cb.setToolTip("With 'See-through membranes' (Look tab), this structure is drawn pale and see-through")
 

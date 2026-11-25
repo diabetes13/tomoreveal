@@ -126,7 +126,7 @@ class ExplorePanel(QtW.QWidget):
         form.addRow("Segmentation", self.overlay_cb); form.addRow("Overlay opacity", self.alpha_s); form.addRow("Show", self.cut_cb)
         gl.addLayout(form)
         self.form = form
-        gl.addWidget(self._dim("Structure colours and which ones are shown come from the Structures tab. "
+        gl.addWidget(self._dim("Structure colours and which ones are shown come from the Structures panel. "
                                "The dashed box is the clip box; slices outside the movie's range are dimmed."))
 
         g = QtW.QGroupBox("Use in the movie"); gl = QtW.QVBoxLayout(g); lay.addWidget(g)

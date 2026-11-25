@@ -67,7 +67,7 @@ def test_window_opens_and_loads_demo(demo, needs_3d):
     for _ in range(40):
         app.processEvents()
     assert win.st.can_show and win.st.ren is not None, "the demo did not load and draw"
-    assert win.tabs.isTabVisible(win.TAB_STRUCT) and win.clip_s["z"].mx == 47
+    assert not win.struct_dock.isHidden() and win.clip_s["z"].mx == 47
     win._clip_changed("z", 10, 30)
     assert win.spec["clip"]["z"] == [10, 30]
     win.reset_clip()

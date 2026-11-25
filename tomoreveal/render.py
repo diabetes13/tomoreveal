@@ -112,7 +112,7 @@ class Renderer(PreviewPicking, PictureLooks):
         return a
 
     def _use_surfaces(self, spec, level):
-        """The surfaces this frame needs: a part may smooth its membranes more or less than the Structures tab (3.5).
+        """The surfaces this frame needs: a part may smooth its membranes more or less than the Structures panel (3.5).
         In the window (surface_async) a surface not made yet is asked for (surfaces_pending) and the usual one is drawn
         meanwhile; in a movie it is made at once."""
         ds = self.ds; now = {}
@@ -283,6 +283,7 @@ class Renderer(PreviewPicking, PictureLooks):
         ocol, oop = others_of(mode)
         keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
         each = (mode.get("each") or {}) if not legacy else {}  # per structure in this close-up (3.5): glass / hide
+        vis = s.get("vis") or {}  # hidden in this part (3.6): {key: 0..1}
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
         from .look import XRAY_OPACITY
         translucent = False; self._legend_col = {}
@@ -322,6 +323,9 @@ class Renderer(PreviewPicking, PictureLooks):
             elif ch == "glass":  # see-through in this close-up, like the glass membranes
                 to = hex2rgb(L35["glass_colour"]); col = tuple(a + (b - a) * e for a, b in zip(col, to))
                 op *= 1.0 - e * (1.0 - float(L35["glass_opacity"]))
+            hq = vis.get(ds.classes[kk]["key"], 0.0)
+            if hq > 0:  # hidden in this part (3.6), fading out and in at part changes
+                op *= 1.0 - hq; act.SetVisibility(act.GetVisibility() and op > 0.002)
             set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
         translucent |= self._apply_styles(spec, lk, all_op)
@@ -779,6 +783,8 @@ class Renderer(PreviewPicking, PictureLooks):
             c = getattr(self, "_legend_col", {}).get(kk)
             return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c) if c is not None else \
                 class_spec(spec, ds, kk).get("color", ds.classes[kk]["color"])
+        pvis = s.get("vis") or {}  # hidden in this part (3.6)
+
         def leaves(kk):  # in a close-up, the rows of the structures that are greyed or hidden
             hid = isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide"
             return hid or bool(focused and not keep and kk not in focused), hid
@@ -790,11 +796,13 @@ class Renderer(PreviewPicking, PictureLooks):
                     continue
                 go, hid = leaves(kk)
                 hidden = hid or others_of(mode)[1] <= 0.0
+                a = 1.0 - q * (1.0 if hidden else 0.7) if go else 1.0
                 rows.append((class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk),
-                             1.0 - q * (1.0 if hidden else 0.7) if go else 1.0))
+                             a * (1.0 - pvis.get(ds.classes[kk]["key"], 0.0))))
         else:
             rows = [(class_spec(spec, ds, kk).get("name", ds.classes[kk]["name"]), legend_colour(kk))
                     for kk in sorted(self.actors) if class_spec(spec, ds, kk).get("show", True)
+                    and pvis.get(ds.classes[kk]["key"], 0.0) <= 0.5
                     and not (focused and e > 0.5 and not keep and kk not in focused)
                     and not (e > 0.5 and isinstance(mode, dict) and (mode.get("each") or {}).get(ds.classes[kk]["key"]) == "hide")]
         P.legend(items["legend"], rows, shown("legend", bool(s["reveal"])))

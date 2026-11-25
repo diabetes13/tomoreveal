@@ -694,11 +694,11 @@ class PartsPanel(QtW.QWidget):
         form.addRow(fd)
 
     def _outline_only_button(self, pid, choose):
-        """Which structures get an outline in this part: every one (as in the Structures tab) or the ticked ones only."""
+        """Which structures get an outline in this part: every one (as in the Structures panel) or the ticked ones only."""
         b = QtW.QToolButton(); b.setPopupMode(QtW.QToolButton.InstantPopup)
         b.setToolButtonStyle(QtC.Qt.ToolButtonTextOnly); menu = QtW.QMenu(b); b.setMenu(menu)
         b.setToolTip("Outlines on some structures only, in this part: tick the ones to outline. 'Every structure' follows the "
-                     "outline boxes in the Structures tab. If outlines are off, picking structures turns them on (medium) "
+                     "outline boxes in the Structures panel. If outlines are off, picking structures turns them on (medium) "
                      "in this part.")
 
         def structures():
@@ -734,14 +734,14 @@ class PartsPanel(QtW.QWidget):
 
         def toggle(key, on):
             own = sb.part_look(self.part(pid) or {}); only = own.get(sb.OUTLINE_ONLY)
-            if only is None:  # start from what the Structures tab outlines
+            if only is None:  # start from what the Structures panel outlines
                 only = [c["key"] for c in structures() if not (self.win.spec.get("classes", {}).get(c["key"]) or {}).get("no_outline")]
             only = [k for k in only if k != key] + ([key] if on else [])
             put(only)
 
         def fill():
             menu.clear(); only = sb.part_look(self.part(pid) or {}).get(sb.OUTLINE_ONLY)
-            a = menu.addAction("Every structure (as in the Structures tab)"); a.setCheckable(True); a.setChecked(only is None)
+            a = menu.addAction("Every structure (as in the Structures panel)"); a.setCheckable(True); a.setChecked(only is None)
             a.triggered.connect(lambda _=False: put(None))
             menu.addSeparator()
             for c in structures():

@@ -21,7 +21,7 @@ TEXTS = {
     "label:Tomogram": "Show the tomogram as set in the Look tab, always, faded or hidden during this part.",
     "label:speed": "Even speed along the path, or slower at the start and the end.",
     "label:Voxel size": "Size of one voxel in nanometres. The scale bar and the depth shown with the slice number use it.",
-    # Structures tab
+    # Structures panel
     "text:Zoom": "Add a close-up of this structure to the movie.",
     "text:⚙": "Opacity, threshold, small specks, smoothing and surface style of this structure.",
     "label:Opacity": "How solid the structure looks: 100 % is solid, lower values let you see through it.",

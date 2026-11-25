@@ -65,7 +65,7 @@ def test_soft_shadows_are_kept_for_the_sets_a_closeup_switches_between(studio):
 def test_presets_come_before_movie_and_membranes_can_be_smoother(window):
     app, win, errs = window
     names = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert names == ["Data", "Structures", "Explore", "Presets", "Movie", "Look"]
+    assert names == ["Data", "Explore", "Presets", "Movie", "Look"]  # Structures: a panel on the right (3.6)
     assert names[win.TAB_PRESETS] == "Presets" and names[win.TAB_MOVIE] == "Movie" and names[win.TAB_LOOK] == "Look"
     ds = win.st.ds; mem = next(c["key"] for c in ds.classes.values() if c["name"] == "membrane")
     k = ds.id_of(mem); before = ds.meshes[k]

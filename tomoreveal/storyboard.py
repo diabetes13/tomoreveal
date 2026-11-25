@@ -322,6 +322,44 @@ def each_of(part):
     return {k: v for k, v in (part.get("each") or {}).items() if v in EACH_CHOICES}
 
 
+HIDE_FADE = 0.5  # seconds a structure hidden in a part (3.6) takes to fade out and back in
+
+
+def hidden_in(part):
+    """Structure keys hidden in this part (3.6: any kind of part; close-ups also through their own `each`)."""
+    return {k for k, v in each_of(part).items() if v == "hide"}
+
+
+def part_visibility(spec, frames, fps):
+    """3.6: frames get "vis" = {structure key: 0..1 hidden} when some part other than a close-up hides structures.
+    Each structure fades over HIDE_FADE s around the change (half before, half after); card frames keep the value
+    before them. Plans without such parts are unchanged (no "vis" key)."""
+    shots = [p for p in spec.get("shots", []) if p.get("on", True)]
+    if not any(hidden_in(p) for p in shots if p.get("type") != "focus"):
+        return
+    own = {p["id"]: hidden_in(p) for p in shots}
+    keys = sorted(set().union(*own.values()))
+    target = np.zeros((len(frames), len(keys)))
+    prev = None
+    for i, f in enumerate(frames):
+        if f.get("card") and prev is not None:
+            target[i] = prev
+        else:
+            h = own.get(f.get("part"), set())
+            target[i] = [1.0 if k in h else 0.0 for k in keys]
+        prev = target[i]
+    n = max(1, int(round(HIDE_FADE * fps)))
+    if n > 1 and len(frames) > 1:  # moving average: a linear ramp of n frames centred on each change
+        pad = np.concatenate([np.repeat(target[:1], n, 0), target, np.repeat(target[-1:], n, 0)])
+        c = np.cumsum(np.vstack([np.zeros((1, len(keys))), pad]), 0)
+        lo = np.arange(len(frames)) + n - n // 2
+        target = (c[lo + n] - c[lo]) / n
+    for i, f in enumerate(frames):
+        v = {k: round(float(q * q * (3 - 2 * q)), 4) for k, q in zip(keys, target[i]) if q > 1e-6}
+        if v:
+            f["vis"] = v
+
+
 def closeup_others(part):
     """The others setting a close-up's frames carry. Without per-structure choices it is the part's own setting
     (old projects draw exactly as before); with them, a dict that also holds "each"."""
@@ -920,7 +958,7 @@ def build_plan(spec, ds):
                 problems[part.get("id")] = "structure not loaded" if target_items(tgt) else "choose what to show: objects, or draw a frame"
                 continue
             if target_items(tgt) and not any(class_spec(spec, ds, ds.id_of(key)).get("show", True) for key, _ in target_items(tgt)):  # every object is off
-                problems[part.get("id")] = "structure switched off in the Structures tab"
+                problems[part.get("id")] = "structure switched off in the Structures panel"
                 continue
             start_fade(part)
             need_structures()
@@ -1079,6 +1117,7 @@ def build_plan(spec, ds):
         caption_fades(frames, max(1, int(round(cap_fade * fps))))
     if any(isinstance(p.get("look"), dict) and p["look"] for p in spec.get("shots", [])):
         part_looks(spec, frames, fps)  # effects only in some parts (3.5)
+    part_visibility(spec, frames, fps)  # structures hidden in some parts (3.6)
     if spec.get("annotations"):  # arrows and text boxes (3.5): opacity, growth and tail angle per frame
         from .annotations import plan_annotations
         plan_annotations(spec, ds, frames, segments, fr, fps, w / h)
@@ -1125,7 +1164,7 @@ PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored b
     "membranes": (("as in the Look tab", None), ("their own colour", "own"), ("see-through (glass)", "glass"), ("solid colour", "cream")),
     "tomo_shadow": (("as in the Look tab", None), ("on", True), ("off", False)),
     # smoother membrane surfaces in this part (structures ticked "Treat as membrane"); the levels of volumes.SOFTEN
-    "soften": (("as in the Structures tab", None), ("off", 0), ("a little", 1), ("more", 2), ("much", 3)),
+    "soften": (("as in the Structures panel", None), ("off", 0), ("a little", 1), ("more", 2), ("much", 3)),
 }
 LOOK_BLEND = 0.6
 
@@ -1190,6 +1229,8 @@ def state_key(s):
         extra += (s["blend"]["via"], s["blend"]["q"], state_key(s["blend"]["src"]))
     if s.get("cap_a") is not None:  # a caption fading in or out (3.5)
         extra += (s["cap_a"],)
+    if s.get("vis"):  # structures hidden in some parts (3.6)
+        extra += (json.dumps(s["vis"], sort_keys=True),)
     if s.get("lk") or s.get("lkfrom"):  # effects in some parts only (3.5)
         extra += (json.dumps(s.get("lk"), sort_keys=True), json.dumps(s.get("lkfrom"), sort_keys=True), s.get("lkq"))
     if p.get("fov") is not None:  # field of view per point of a camera path (3.5)

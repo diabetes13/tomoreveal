@@ -58,7 +58,7 @@ class PerformanceDialog(QtW.QDialog):
             if n > 10e6:  # 3.6: each pass of the graphics card costs about 0.25 s per 28 million triangles
                 big = sorted(((m.n_cells, st.ds.classes[k]["name"]) for k, m in st.ds.meshes.items() if m is not None), reverse=True)[:3]
                 lines.append("Many triangles make drawing slower. For the largest structures (" + ", ".join(nm for _, nm in big)
-                             + ") choose Structures tab ▸ ⚙ ▸ Detail ▸ half (about 4 times fewer), or Data tab ▸ Size ▸ half.")
+                             + ") choose Structures panel ▸ ⚙ ▸ Detail ▸ half (about 4 times fewer), or Data tab ▸ Size ▸ half.")
         lines.append("<b>Video encoder:</b> processor (x264); encoding takes about 5 ms per HD frame")
         self.text.setText("<br>".join(lines))
 

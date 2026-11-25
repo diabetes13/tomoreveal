@@ -59,10 +59,17 @@ def set_opacity(act, op):
         act.SetVisibility(False)
 
 
+_WINDOW_ENV = os.environ.get("VTK_DEFAULT_OPENGL_WINDOW")  # as TomoReveal found it (3.6: put back for the graphics card)
+
+
 class Renderer(PreviewPicking, PictureLooks):
     def __init__(self, ds, headless=False):
         if headless and software_rendering_available():
             os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = "vtkOSOpenGLRenderWindow"
+        elif _WINDOW_ENV is None:  # a software renderer made earlier set it for the whole process: undo that
+            os.environ.pop("VTK_DEFAULT_OPENGL_WINDOW", None)
+        else:
+            os.environ["VTK_DEFAULT_OPENGL_WINDOW"] = _WINDOW_ENV
         import pyvista as pv, vtk
         self.pv, self.vtk, self.ds = pv, vtk, ds
         self.size, self.aa, self.bg, self.shown, self.peeling = (960, 540), "off", None, False, False

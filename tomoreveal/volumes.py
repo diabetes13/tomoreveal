@@ -170,6 +170,29 @@ def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None):
     return pd.compute_normals(auto_orient_normals=False, consistent_normals=True, split_vertices=False)
 
 
+def binned_shape(shape, b):
+    """Grid (nz, ny, nx) after "Open smaller" by b (3.6): whole blocks of b voxels in each direction."""
+    return tuple(max(1, int(n) // int(b)) for n in shape) if b > 1 else tuple(shape)
+
+
+def bin_volume(arr, b, average=False):
+    """The volume at 1/b size in each direction (3.6 "Open smaller"), as a new compact array: the mean of each
+    b x b x b block (average=True, for the tomogram; its data type is kept) or every b-th voxel (labels, scores)."""
+    if b <= 1:
+        return arr
+    nz, ny, nx = binned_shape(arr.shape, b)
+    if not average:
+        return np.ascontiguousarray(arr[:nz * b:b, :ny * b:b, :nx * b:b])
+    out = np.zeros((nz, ny, nx), np.float32)
+    for z in range(b):  # one slice of the block at a time: no float copy of the whole volume
+        sub = arr[z:nz * b:b, :ny * b, :nx * b].astype(np.float32)
+        out += sub.reshape(nz, ny, b, nx, b).sum(axis=(2, 4))
+    out /= b ** 3
+    if arr.dtype.kind in "iu":
+        info = np.iinfo(arr.dtype); out = np.clip(np.rint(out), info.min, info.max).astype(arr.dtype)
+    return out
+
+
 class Dataset:
     """Optional tomogram plus structures from any number of segmentation sources.
 
@@ -199,7 +222,11 @@ class Dataset:
         if arr is None:
             self.tomo = None; self._lev = {}; self.tomo_name = ""
             return
-        self.tomo = np.ascontiguousarray(arr, dtype=np.float32); self._lev = {}; self.tomo_name = name
+        # 3.6: whole numbers (8-, 16-, 32-bit) and float32 are kept as they are; only the slice drawn is converted.
+        # An 8-bit 1.5 GB tomogram took 6 GB as float32.
+        keep = (arr.dtype.kind in "iu" and arr.dtype.itemsize <= 4) or arr.dtype == np.float32
+        self.tomo = arr if keep else np.asarray(arr, dtype=np.float32)
+        self._lev = {}; self.tomo_name = name
 
     def has_seg(self):
         return bool(self.classes)
@@ -231,8 +258,13 @@ class Dataset:
         """(voxel count per label, bounding box per label) of a label volume."""
         from scipy import ndimage
         mx = int(lab.max()) if lab.size else 0
-        counts = np.bincount(lab.ravel().astype(np.int64), minlength=mx + 1)
-        boxes = ndimage.find_objects(lab.astype(np.int32), max_label=max(mx, 1))
+        # 3.6: counted in chunks and boxes found on the volume's own integer type: the int64 and int32 copies of a
+        # 1.5 GB segmentation needed about 6 GB for a moment and took 3 s
+        counts = np.zeros(mx + 1, np.int64); flat = lab.reshape(-1); step = 1 << 24
+        for i in range(0, flat.size, step):
+            counts += np.bincount(flat[i:i + step], minlength=mx + 1)[:mx + 1]
+        native = lab if lab.dtype.kind in "iu" and lab.dtype.itemsize <= 4 else lab.astype(np.int32)
+        boxes = ndimage.find_objects(native, max_label=max(mx, 1))
         return counts, boxes
 
     def set_segmentation(self, sources, vox=None, keep_background=False, shape=None):
@@ -280,6 +312,8 @@ class Dataset:
         v = (self.params.get(self.classes[k]["key"]) or {}).get(name)
         if name == "smoothing":
             return int(self.smooth if v is None else v)
+        if name == "detail":  # 3.6: 1 full, 2 half (surface made on every 2nd voxel: about 4 times fewer triangles)
+            return 2 if v == 2 else int(self.step)
         return int(v or 0)
 
     def _cache_key(self, k, soften=None, params=None):
@@ -289,7 +323,8 @@ class Dataset:
         mov = int(p["min_object_voxels"]) if "min_object_voxels" in p else self.param(k, "min_object_voxels")
         sm = int(p["smoothing"]) if "smoothing" in p else self.param(k, "smoothing")
         so = int(soften) if soften is not None else int(p["soften"]) if "soften" in p else self.param(k, "soften")
-        return (c["key"], c.get("threshold"), mov, sm, so)
+        st = (2 if p["detail"] == 2 else int(self.step)) if "detail" in p else self.param(k, "detail")
+        return (c["key"], c.get("threshold"), mov, sm, so, st)
 
     MESH_CACHE = 48  # surfaces kept for settings not shown now (going back to one is then instant)
 
@@ -305,7 +340,7 @@ class Dataset:
         if sl is None:
             return None
         mask = self.kept_mask(k, sl, ck[2])
-        m = surface(mask, [s.start for s in sl], ck[3], self.step, ck[4], self.shape) if mask.any() else None
+        m = self._surface_of(mask, [s.start for s in sl], ck[3], ck[4], ck[5]) if mask.any() else None
         with self._mesh_lock:
             self._mesh_cache[ck] = m
             if len(self._mesh_cache) > self.MESH_CACHE:
@@ -314,13 +349,27 @@ class Dataset:
                     del self._mesh_cache[old]
         return m
 
+    def _surface_of(self, mask, off, smooth, soften, step=None):
+        """surface(), or the same surface kept on disk from an earlier session (3.6, surface_cache)."""
+        from . import surface_cache
+        step = int(self.step if step is None else step)
+        fp = surface_cache.fingerprint(mask, off, self.shape, (int(smooth), step, int(soften or 0)))
+        m = surface_cache.load(fp)
+        if m is not None:
+            self.disk_hits = getattr(self, "disk_hits", 0) + 1
+            return m or None
+        m = surface(mask, off, smooth, step, soften, self.shape)
+        self.built = getattr(self, "built", 0) + 1
+        surface_cache.save(fp, m)
+        return m
+
     def surface_ready(self, k, soften=None, params=None):
         return self._cache_key(k, soften, params) in self._mesh_cache
 
     def set_params(self, k, **kw):
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
         key = self.classes[k]["key"]; before = self._cache_key(k)
-        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften")})
+        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften", "detail")})
         self.params[key] = cur; self.path_cache = {}
         if self._cache_key(k) == before:
             return False
@@ -367,10 +416,19 @@ class Dataset:
             self.meshes[k] = m
 
     def build_meshes(self, log=print):
-        for k in self.classes:
-            if k not in self.meshes:
-                self._mesh(k)
-        log(f"built {len(self.meshes)} surfaces")
+        """Surfaces of every shown structure, one after another, each kept on disk for the next time (3.6).
+        Measured on a 1.5 GB session (15 structures): threads gave nothing (the libraries hold Python's lock) and
+        separate processes were slower (51 s instead of 21 s) and needed far more memory; the disk cache brings a
+        second opening from 28 s to 7 s."""
+        import time
+        todo = [k for k in self.classes if k not in self.meshes and self.bbox.get(k) is not None and not self.classes[k]["background"]]
+        t0 = time.monotonic(); hits0 = getattr(self, "disk_hits", 0)
+        for i, k in enumerate(todo, 1):
+            if len(todo) > 1:  # 3.6: stages with times while loading
+                log(f"building surfaces {i}/{len(todo)}: {self.classes[k]['name']} ... ({time.monotonic() - t0:.0f} s)")
+            self._mesh(k)
+        hits = getattr(self, "disk_hits", 0) - hits0
+        log(f"built {len(self.meshes)} surfaces in {time.monotonic() - t0:.1f} s" + (f" ({hits} kept from an earlier time)" if hits else ""))
 
     def forget(self, source_key):
         """Drop cached surfaces of a source that was removed."""

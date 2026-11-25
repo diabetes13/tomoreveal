@@ -31,3 +31,18 @@ first preview). Peak RSS 6.9 GB.
 Biggest gains for phase 2: build the 15 surfaces in parallel (they are independent) and cache them on disk (the second
 load of the same file would skip the 22 s); label counts without int copies (about 3 s); keeping the image as 16-bit
 instead of float32 saves 1 GB.
+
+## After phase 2 (2026-11-26), the same session file
+
+| Step | Before | After |
+|---|---|---|
+| First opening | 30.6 s | 29.9 s (surfaces 24 s, made one after another) |
+| **Opening it again** | 30.6 s | **6.2 s** (15 surfaces from the disk cache in 1.0 s) |
+| Tomogram in memory | 2.1 GB (float32) | 1.06 GB (its own 16-bit type) |
+| Label counts | 4.2 s, about 6 GB of temporary copies | chunked, on the native type |
+| Soft preview frame (960 × 540), 27.8 M triangles | 0.60 s | 0.32 s with Detail ▸ half on the 4 largest structures (12.6 M triangles) |
+
+Tried and dropped: building surfaces in threads (no gain: marching cubes and VTK hold Python's lock) and in separate
+processes (51 s instead of 21 s, and 8 workers on large structures ran the machine out of memory once).
+The GPU spends about 0.25 s per pass on 28 M triangles, and Soft looks draw two passes (picture + object outlines): the
+number of triangles is what to reduce (Detail, or Data ▸ Size ▸ half).

@@ -188,8 +188,7 @@ class OrsSession:
     @_checked
     def read_image(self, im):
         nx, ny, nz = im["dims"]
-        a = np.frombuffer(self._read(im["off"]), im.get("dtype", "<f4")).reshape(nz, ny, nx)
-        return a if a.dtype == np.float32 else a.astype(np.float32)
+        return np.frombuffer(self._read(im["off"]), im.get("dtype", "<f4")).reshape(nz, ny, nx)  # its own type (3.6)
 
     @_checked
     def objects(self, include_undo=False):

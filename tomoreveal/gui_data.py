@@ -72,7 +72,17 @@ class DataPanel(QtW.QWidget):
                                                          "example when it looks mirrored compared with another program. "
                                                          "Your files are not changed. Arrows, frames and close-ups move along.")
             cb.clicked.connect(lambda _=False: self.flip_changed()); fl.addWidget(cb); self.flip_cb[a] = cb
+        fl.addSpacing(12); fl.addWidget(QtW.QLabel("Size"))
+        self.bin_cb = QtW.QComboBox()
+        for t, b in (("full", 1), ("half", 2), ("quarter", 4)):
+            self.bin_cb.addItem(t, b)
+        self.bin_cb.setToolTip("Open smaller: show the tomogram and the segmentation at half or a quarter of their size in "
+                               "each direction (the tomogram is averaged). Everything is then about 8 or 64 times lighter "
+                               "and faster; fine details are lost. Your files are not changed; arrows, frames, slice numbers "
+                               "and close-ups move along.")
+        self.bin_cb.activated.connect(lambda j: self.bin_changed(self.bin_cb.itemData(j))); fl.addWidget(self.bin_cb)
         fl.addStretch(1); lay.addWidget(self.flip_w); self.flip_w.setVisible(False)
+        self.big_note = dim(""); self.big_note.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.big_note); self.big_note.setVisible(False)
 
         self.seg_head = QtW.QLabel("<b>SEGMENTATION</b>"); lay.addWidget(self.seg_head)
         self.seg_shared = dim("", wrap=False); self.seg_shared.setContentsMargins(8, 0, 0, 0); lay.addWidget(self.seg_shared)
@@ -100,6 +110,13 @@ class DataPanel(QtW.QWidget):
         paths = paths or self._ask("Add a segmentation", SEGMENTATIONS)
         if paths:
             self.run(lambda log: self.st.add_files(paths, as_segmentation=paths, log=log, make_renderer=False))
+
+    def bin_changed(self, b):
+        w = self.window()
+        if hasattr(w, "bin_volume"):
+            w.bin_volume(int(b))
+        else:
+            self.run(lambda log: self.st.set_bin(int(b), log=log, make_renderer=False), "Changing the size ...")
 
     def flip_changed(self):
         axes = tuple(a for a, cb in self.flip_cb.items() if cb.isChecked())
@@ -226,6 +243,15 @@ class DataPanel(QtW.QWidget):
         self.flip_w.setVisible(bool(dims) and loaded)
         for a, cb in self.flip_cb.items():
             cb.blockSignals(True); cb.setChecked(a in (info.get("flip") or ())); cb.blockSignals(False)
+        b = int(info.get("bin") or 1)
+        self.bin_cb.blockSignals(True); self.bin_cb.setCurrentIndex(max(0, self.bin_cb.findData(b))); self.bin_cb.blockSignals(False)
+        if dims and b > 1:
+            txt += f" (shown at 1/{b} size)"; self.dims_lbl.setText(txt)
+        n = (dims[0] * dims[1] * dims[2] * b ** 3) if dims else 0  # 3.6: suggest a smaller size for large volumes
+        big = b == 1 and n > 300e6 and loaded
+        self.big_note.setText("This volume is large. Size ▸ half makes loading, surfaces and drawing about 8 times "
+                              "faster; choose full again for the final movie if fine details matter.")
+        self.big_note.setVisible(big)
         # segmentation: tick boxes grouped by file
         clear_layout(self.seg_lay)
         self.seg_head.setVisible(bool(sources)); self.seg_w.setVisible(bool(sources))

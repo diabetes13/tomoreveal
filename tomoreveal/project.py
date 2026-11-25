@@ -263,7 +263,7 @@ def load_into(st, data, resolved, log=print):
             if s is not None:
                 s["thr"] = float(r["entry"]["threshold"])
     for key, c in (remap((data.get("spec") or {}).get("classes") or {}, mapping)).items():  # surfaces built as saved
-        kw = {n: c[n] for n in ("min_object_voxels", "smoothing", "soften") if c.get(n) is not None}
+        kw = {n: c[n] for n in ("min_object_voxels", "smoothing", "soften", "detail") if c.get(n) is not None}
         if kw:
             st.ds.params[key] = kw
     enabled = remap(data.get("segmentation_enabled") or {}, mapping)
@@ -271,6 +271,8 @@ def load_into(st, data, resolved, log=print):
         if s["key"] in enabled:
             s["enabled"] = bool(enabled[s["key"]])
     st.flip = tuple(a for a in "xyz" if a in ((data.get("spec") or {}).get("flip") or ()))  # shown flipped (3.5)
+    b = (data.get("spec") or {}).get("bin")  # shown smaller (3.6 "Open smaller")
+    st.bin = int(b) if b in (2, 4) else 1
     t = remap(data.get("tomogram_source"), mapping)
     if not data.get("tomogram_auto", False) and t in [c["key"] for c in st._tomogram_choices()]:
         st.tomo_source = t; st._tomo_auto = False

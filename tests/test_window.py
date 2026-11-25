@@ -144,7 +144,9 @@ def test_preview_error_does_not_switch_to_software_rendering_where_it_cannot_sta
     def broken(*a, **k):
         raise RuntimeError("graphics driver problem")
     monkeypatch.setattr(win.st.ren, "draw", broken)
-    win.do_preview()
-    assert win.st.headless is False
+    ren = win.st.ren
+    monkeypatch.setattr(win.st, "ensure_renderer", lambda: ren)  # 3.6: the graphics card is tried once more first
+    win._gpu_retried = False; win.do_preview()
+    assert win._gpu_retried and win.st.headless is False
     assert "Preview failed: graphics driver problem" in win.msg_lbl.text()
     assert "software rendering is not available" in win.msg_lbl.text()

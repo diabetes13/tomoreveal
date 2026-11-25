@@ -2,6 +2,13 @@
 
 ## 3.6.0 (in progress)
 
+- **Opening a file again is much faster.** Surfaces are kept on disk (in TomoReveal's own folder, up to 5 GB, never next to your data): a 1.5 GB Dragonfly session opened in 6 s the second time instead of 30 s.
+- **Less memory:** a tomogram stays in its own data type (8- or 16-bit) instead of being turned into 32-bit numbers, and counting the structures no longer makes large temporary copies.
+- **Data tab ▸ Size: full / half / quarter** ("Open smaller"): shows the tomogram and segmentation at half or a quarter size in each direction, about 8 or 64 times lighter and faster. Arrows, frames, slice numbers and close-ups move along; saved with the project. Large volumes suggest it.
+- **Detail per structure:** Structures tab ▸ ⚙ ▸ **Detail: full / half**. Half has about 4 times fewer triangles; on a large segmentation it halved the time of a Soft frame.
+- **Help ▸ Performance** (and `tomoreveal --diagnose`): whether your graphics card draws the pictures, the memory used, the graphics card's load, and where the time of one movie frame goes, with a hint when there are very many triangles.
+- **Loading tells you what it is doing:** each file with its size and time, each surface ("building surfaces 3/15: Capsid"), and a note when a file is on a slow drive.
+- **No silent switch to software drawing.** After a drawing error the graphics card is tried once more with a fresh window; only then are you asked whether to draw on the processor for this session. The error is written to the log.
 - **Spins and rocks keep one size.** A turning overview no longer swings closer and further away (the distance changed by up to 62 % during a full spin): Movie tab ▸ overview ▸ **Keep the size steady during the turn** (on for new parts).
 - **Turn around what is shown.** **Centre of the turn: middle of what is shown** (new parts) turns around the middle of the clip box even when the view is not fitted to it; before, a clipped tomogram could circle around an empty point. Right-click a structure ▸ **Rotate around this** makes it the centre. View ▸ **Show rotation axis** draws the axis in the preview (never in the movie).
 - **Turn around the screen's up-down line:** a new choice for spins and rocks: the volume turns around itself however the view is tilted or rotated.

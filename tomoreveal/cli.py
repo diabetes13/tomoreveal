@@ -328,6 +328,8 @@ def validate_args(args):
 def build_parser():
     ap = argparse.ArgumentParser(prog="tomoreveal", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("--diagnose", action="store_true",
+                    help="say what draws the pictures (graphics card or processor), the video encoder and the versions, then stop")
     sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("gui", help="open the desktop program (default when no command is given)")
@@ -428,6 +430,9 @@ def main():
             stream.reconfigure(errors="replace")
     ap = build_parser()
     argv = sys.argv[1:]
+    if argv[:1] == ["--diagnose"]:
+        from .diagnose import report
+        print(report()); return
     if not argv or argv[0] not in ("gui", "app", "icon", "demo", "list", "inspect", "extract", "movie", "preview", "-h", "--help", "--version"):
         argv = ["gui"] + argv  # bare "tomoreveal [files]" opens the desktop program
     args = ap.parse_args(argv)

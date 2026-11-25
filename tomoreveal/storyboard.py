@@ -222,6 +222,56 @@ def flip_spec(spec, shape, axes):
     return spec
 
 
+def bin_spec(spec, r, shape=None):
+    """Points, boxes, slice numbers and sizes in the settings scaled by r when the volume is shown at another size
+    ("Open smaller", 3.6; r = old bin / new bin, so 0.5 going from full to half size). Like flip_spec, the settings then
+    still mean the same places. shape: the new grid (nz, ny, nx), to keep numbers inside it."""
+    if r == 1:
+        return spec
+    top = None if shape is None else {"x": shape[2] - 1, "y": shape[1] - 1, "z": shape[0] - 1}
+
+    def pt(p):
+        return None if p is None else [float(v) * r for v in p]
+
+    def one(v, a):
+        v = int(round(int(v) * r))
+        return max(0, min(top[a], v)) if top else max(0, v)
+    for a in spec.get("annotations") or []:
+        for anc in [a.get("anchor"), a.get("pin")] + list(a.get("more") or []):
+            if isinstance(anc, dict) and anc.get("xyz") is not None:
+                anc["xyz"] = pt(anc["xyz"])
+    for v in [spec.get("view")] + [p.get("view") for p in spec.get("shots", [])]:
+        if isinstance(v, dict) and v.get("pan") is not None:
+            v["pan"] = pt(v["pan"])
+    for p in spec.get("shots", []):
+        reg = p.get("region")
+        if isinstance(reg, dict) and reg.get("lo") is not None and reg.get("hi") is not None:
+            reg["lo"], reg["hi"] = pt(reg["lo"]), pt(reg["hi"])
+        for w in p.get("waypoints") or []:
+            for key in ("point", "pos", "focal"):
+                if isinstance(w, dict) and w.get(key) is not None:
+                    w[key] = pt(w[key])
+        cam = p.get("camera")
+        if p.get("type") == "path" and isinstance(cam, dict) and cam.get("distance") is not None:
+            cam["distance"] = float(cam["distance"]) * r  # in units of 60 voxels: the same distance in nm
+        if p.get("type") == "slide":
+            for key in ("from", "to"):
+                v = p.get(key)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    p[key] = one(v, "z")
+    c = spec.get("clip")
+    if isinstance(c, dict):
+        for a in "xyz":
+            if c.get(a):
+                c[a] = [one(c[a][0], a), one(c[a][1], a)]
+    if spec.get("z_range"):
+        spec["z_range"] = [one(spec["z_range"][0], "z"), one(spec["z_range"][1], "z")]
+    for cl in (spec.get("classes") or {}).values():  # sizes in voxels: the same objects are left out
+        if isinstance(cl, dict) and cl.get("min_object_voxels"):
+            cl["min_object_voxels"] = max(1, int(round(float(cl["min_object_voxels"]) * r ** 3)))
+    return spec
+
+
 def focus_box(part, ds, pad=True):
     """The box a close-up frames: the drawn region when there is one, else the box of the objects in focus."""
     r = part_region(part)

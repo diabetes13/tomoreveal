@@ -69,7 +69,7 @@ def test_a_16_bit_stored_image_is_used_as_the_tomogram(tmp_path):
     p = write_session(str(tmp_path / "s.ORSSession"), dims=DIMS, labels=_labels(), layout=2025, image=img, image_dtype="<u2")
     ses = OrsSession(p); (im,) = ses.images()
     a = ses.read_image(im)
-    assert a.dtype == np.float32 and np.array_equal(a, img)
+    assert a.dtype == np.uint16 and np.array_equal(a, img)  # kept as 16-bit (3.6)
     st = tr.Studio(headless=True)
     st.add_files([p], log=lambda *a: None, make_renderer=False)
     assert st.ds.tomo is not None and st.ds.tomo.shape == DIMS[::-1]

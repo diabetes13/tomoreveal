@@ -21,7 +21,7 @@ from .matching import apply_match, match_volume
 from .movie import render_movie
 from .render import Renderer
 from .storyboard import build_plan, build_timeline, class_spec, default_spec
-from .volumes import Dataset, clean_labels, guess_kind, load_volume, looks_like_scores, regrid, score_scale, sidecar_classes
+from .volumes import Dataset, bin_volume, binned_shape, clean_labels, guess_kind, load_volume, looks_like_scores, regrid, score_scale, sidecar_classes
 
 # what _init_sources creates: the whole state of the loaded sources, which a failed change puts back
 _SOURCE_STATE = ("ds", "sessions", "tomo_files", "seg_sources", "hidden", "tomo_source", "_tomo_auto", "_tomo_loaded",
@@ -91,11 +91,27 @@ class Studio:
                 return s
         return None
 
+    SLOW_DRIVE = 100e6  # bytes per second: below this, reading a large file says the drive is slow (3.6)
+
+    def _timed_read(self, p, fn, log):
+        """fn() with a message before ("reading x.mrc (1.5 GB) ...") and after (time; a note when the drive is slow)."""
+        import time
+        size = os.path.getsize(p) if os.path.isfile(p) else 0
+        log(f"reading {os.path.basename(p)} ({size / 1e9:.1f} GB) ..." if size > 1e8 else f"reading {os.path.basename(p)} ...")
+        t = time.monotonic(); out = fn(); dt = time.monotonic() - t
+        if size > 2e8:
+            note = ""
+            if dt > 2 and size / dt < self.SLOW_DRIVE:
+                note = (f" Your file is on a slow drive ({size / dt / 1e6:.0f} MB/s); copying it to the internal disk "
+                        "makes loading faster.")
+            log(f"read {os.path.basename(p)} in {dt:.0f} s.{note}")
+        return out
+
     def _add_session(self, p, log):
         if p in self.sessions:
             log(f"{os.path.basename(p)} is already loaded")
             return
-        ses = OrsSession(p); self.sessions[p] = ses
+        ses = self._timed_read(p, lambda: OrsSession(p), log); self.sessions[p] = ses
         objs = ses.objects(); usable = [o for o in objs if o["dims"][2] > 1]
         self.hidden[p] = dict(previews=len(objs) - len(usable), undo=len(ses.objects(include_undo=True)) - len(objs))
         guess = guess_roi(usable)
@@ -106,8 +122,8 @@ class Studio:
                                          path=p, group=os.path.basename(p), obj=o, roi=o["kind"] == "ROI", enabled=on,
                                          native=(nz, ny, nx), vox=o["voxel"], preview=ses.preview_classes(o)))
 
-    def _add_volume(self, p, as_features, as_segmentation, as_tomogram, as_labels, nvol):
-        a, vox = load_volume(p); stem = os.path.splitext(os.path.basename(p))[0]
+    def _add_volume(self, p, as_features, as_segmentation, as_tomogram, as_labels, nvol, log=print):
+        a, vox = self._timed_read(p, lambda: load_volume(p), log); stem = os.path.splitext(os.path.basename(p))[0]
         if p in as_tomogram:  # a role you give always wins over the guess
             kind = "tomogram"
         elif p in as_labels:
@@ -158,7 +174,7 @@ class Studio:
             if p.lower().endswith(".orssession"):
                 self._add_session(p, log)
             else:
-                self._add_volume(p, as_features, as_segmentation, as_tomogram, as_labels, nvol)
+                self._add_volume(p, as_features, as_segmentation, as_tomogram, as_labels, nvol, log)
 
     @_atomic
     def add_files(self, paths, as_features=(), as_segmentation=(), as_tomogram=(), as_labels=(), log=print, make_renderer=True):
@@ -289,18 +305,18 @@ class Studio:
                                    if m["notes"] else "Your tomogram file and Dragonfly's copy are on the same grid.")
         if src != self._tomo_loaded:
             if src is None:
-                self.ds.set_tomogram(None, None, "")
+                self.ds.set_tomogram(None, None, ""); self._tomo_native = None
             elif src.startswith("file:"):
                 fpath = src[5:]; f = self.tomo_files[fpath]; m = self._match(fpath, lambda *a: None) if self.sessions else None
                 if m is not None and m["error"] is None:
-                    self.ds.set_tomogram(self._flipped(m["v"]), m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"]),
+                    self._set_tomogram(m["v"], self._vox(m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"])),
                                          os.path.basename(fpath))
                 else:
-                    self.ds.set_tomogram(self._flipped(f["arr"]), f["vox"], os.path.basename(fpath))
+                    self._set_tomogram(f["arr"], self._vox(f["vox"]), os.path.basename(fpath))
             else:
                 p, i = src[8:].rsplit(":", 1); im = self.sessions[p].images()[int(i)]
                 log(f"reading image '{im['title']}' from the session ...")
-                self.ds.set_tomogram(self._flipped(self.sessions[p].read_image(im)), im["voxel"], im["title"])
+                self._set_tomogram(self.sessions[p].read_image(im), self._vox(im["voxel"]), im["title"])
             self._tomo_loaded = src
         return tf
 
@@ -359,7 +375,8 @@ class Studio:
 
     def _update(self, log=print, make_renderer=True):
         tf = self._load_tomogram(log)
-        ref, ref_name = (self.ds.tomo.shape, "the tomogram") if self.ds.tomo is not None else (None, "")
+        # the grid the sources are placed on is the tomogram's own (before "Open smaller")
+        ref, ref_name = (self._tomo_native or self.ds.tomo.shape, "the tomogram") if self.ds.tomo is not None else (None, "")
         if ref is None:  # no tomogram: the first switched-on segmentation sets the grid
             first = next((s for s in self.seg_sources if s["enabled"]), None)
             if first is not None:
@@ -367,20 +384,20 @@ class Studio:
         for s in self.seg_sources:
             self._place(s, ref, ref_name, tf, log)
         use = [s for s in self.seg_sources if s["enabled"] and s["usable"]]
-        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background, self.flip)
+        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background, self.flip, self.bin)
         if sig != self._seg_loaded:
             parts = []
             for s in use:
-                if self.flip:  # shown flipped: a copy of the source's settings with the flipped volume (statistics of its own)
+                if self.flip or self.bin > 1:  # shown flipped or smaller: a copy of the source's settings (statistics of its own)
                     parts.append(dict(s, arr=self._flipped(s["arr"]), _stats=None, **({} if s["kind"] in ("labels", "scores") else {"kind": "labels"})))
                 elif s["kind"] == "scores":
                     parts.append(s)  # the source itself carries arr, scale and thr, so a threshold change persists
                 else:
                     parts.append(s if s["kind"] == "labels" else dict(s, kind="labels"))
-            self.ds.set_segmentation(parts, vox=next((s["vox"] for s in use if s.get("vox")), None),
-                                     keep_background=self.keep_background, shape=ref)
+            self.ds.set_segmentation(parts, vox=self._vox(next((s["vox"] for s in use if s.get("vox")), None)),
+                                     keep_background=self.keep_background, shape=binned_shape(ref, self.bin) if ref is not None else None)
             for s, part in zip(use, parts):  # keep label statistics for the next rebuild
-                if part is not s and not self.flip:
+                if part is not s and not self.flip and self.bin == 1:
                     s["_stats"] = part.get("_stats")
             self._seg_loaded = sig; self._stale = True
         if self.has_segmentation and any(k not in self.ds.meshes and self.ds.bbox.get(k) is not None and not c["background"]
@@ -443,13 +460,35 @@ class Studio:
         self.tomo_source = None; self._tomo_auto = True; self._tomo_loaded = None; self._seg_loaded = None
         self._matches = {}; self._stale = False; self.match_note = ""
         self.flip = ()  # axes of the volume shown flipped (3.5): a subset of "x", "y", "z"
+        self._tomo_native = None  # the tomogram's grid before "Open smaller"
+        self.bin = 1    # 3.6 "Open smaller": shown at 1/2 or 1/4 size in every direction (2 or 4); the files are unchanged
 
     FLIP_AXES = {"z": 0, "y": 1, "x": 2}  # numpy axis of each (arrays are z, y, x)
 
-    def _flipped(self, arr):
-        """The volume as shown: flipped in the chosen axes (a view, nothing is copied and the files are not changed)."""
+    def _flipped(self, arr, average=False):
+        """The volume as shown: flipped in the chosen axes (a view: nothing is copied and the files are not changed), and
+        made smaller when "Open smaller" is chosen (3.6): every b-th voxel (segmentations), or the mean of b x b x b
+        voxels (the tomogram, average=True)."""
         ax = tuple(sorted(self.FLIP_AXES[a] for a in self.flip))
-        return np.flip(arr, ax) if ax and arr is not None else arr
+        out = np.flip(arr, ax) if ax and arr is not None else arr
+        return bin_volume(out, self.bin, average) if out is not None and self.bin > 1 else out
+
+    def _set_tomogram(self, arr, vox, name):
+        self._tomo_native = tuple(arr.shape)
+        self.ds.set_tomogram(self._flipped(arr, True), vox, name)
+
+    def _vox(self, v):
+        return v * self.bin if v else v
+
+    def set_bin(self, b, log=print, make_renderer=True):
+        """Show the tomogram and every segmentation at full size (1), half (2) or a quarter (4) in each direction."""
+        b = int(b) if int(b) in (1, 2, 4) else 1
+        if b == self.bin:
+            return self.info()
+        self.bin = b; self.ds._mesh_cache.clear(); self.ds.meshes = {}; self._tomo_loaded = None; self._seg_loaded = None
+        self._drop_renderer()
+        log("making the volume " + ("full size" if b == 1 else f"1/{b} size") + " and building 3D surfaces ...")
+        return self._update(log, make_renderer)
 
     def set_flip(self, axes, log=print, make_renderer=True):
         """Show the tomogram and every segmentation flipped in these axes ("x", "y", "z"); surfaces are made again."""
@@ -490,7 +529,7 @@ class Studio:
     def info(self):
         d = dict(can_show=self.can_show, has_tomogram=self.has_tomogram, has_segmentation=self.has_segmentation,
                  outdir=self.outdir, views=VIEWS, version=__version__, match_note=self.match_note,
-                 tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(), flip=list(self.flip),
+                 tomogram=self.tomo_source, tomogram_choices=self._tomogram_choices(), flip=list(self.flip), bin=self.bin,
                  sessions=[dict(key=f"session:{p}", label=os.path.basename(p), **self.hidden.get(p, {})) for p in self.sessions],
                  segmentation_sources=[dict(key=s["key"], kind=s["kind"], label=s["label"], group=s["group"], path=s["path"],
                                             session=(f"session:{s['path']}" if s["kind"] == "dragonfly" else None),

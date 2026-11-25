@@ -127,6 +127,15 @@ class ProjectManager(QtC.QObject):
         self.act_revert = m.addAction("Revert to saved", self.revert)
         h = mb.addMenu("Help"); self.help_menu = h
         h.addAction("Show log folder", lambda: QtG.QDesktopServices.openUrl(QtC.QUrl.fromLocalFile(pj.logs_dir())))
+        a = h.addAction("Performance...", self.show_performance)
+        a.setToolTip("Whether the graphics card draws the pictures, memory used, and where the time of a frame goes")
+
+    def show_performance(self):
+        from .gui_performance import PerformanceDialog
+        d = getattr(self, "_perf", None)
+        if d is None:
+            d = self._perf = PerformanceDialog(self.win)
+        d.refresh(); d.show(); d.raise_()
 
     def fill_recent(self):
         self.recent_menu.clear()

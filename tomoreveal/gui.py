@@ -868,7 +868,24 @@ def build_gui(args):
             toggled = set(self.st.flip) ^ set(axes)
             if not toggled:
                 return
-            ds = self.st.ds; nz, ny, nx = ds.shape; n = {"x": nx, "y": ny, "z": nz}; fix = []
+            ds = self.st.ds; nz, ny, nx = ds.shape; n = {"x": nx, "y": ny, "z": nz}
+
+            def moved(p):
+                for a in toggled:
+                    p[a] = n[a] - 1 - p[a]
+                return p
+            fix = self._object_points(moved)
+            flip_spec(self.spec, ds.shape, toggled)
+            if axes:
+                self.spec["flip"] = list(axes)
+            else:
+                self.spec.pop("flip", None)
+            self._flip_fix = fix
+            self.run_job(lambda log: self.st.set_flip(axes, log=log, make_renderer=False), "Flipping the volume and building 3D surfaces ...")
+
+        def _object_points(self, move):
+            """(ref, field, new xyz) of every object in focus: one of its voxels, moved by move({"x","y","z"})."""
+            ds = self.st.ds; fix = []
             for ref, field in self._object_refs():
                 k = ds.id_of(ref.get(field))
                 try:
@@ -877,17 +894,35 @@ def build_gui(args):
                     z, y, x = vox[len(vox) // 2] + np.array([s.start for s in sl])
                 except (KeyError, IndexError, TypeError, ValueError):
                     continue
-                p = {"x": float(x), "y": float(y), "z": float(z)}
-                for a in toggled:
-                    p[a] = n[a] - 1 - p[a]
+                p = move({"x": float(x), "y": float(y), "z": float(z)})
                 fix.append((ref, field, (p["x"], p["y"], p["z"])))
-            flip_spec(self.spec, ds.shape, toggled)
-            if axes:
-                self.spec["flip"] = list(axes)
+            return fix
+
+        def bin_volume(self, b):
+            """Open smaller (Data tab, 3.6): show everything at full, half or quarter size. The settings' points, slice
+            numbers and object sizes are scaled along; the objects in focus are found again by one of their voxels."""
+            b = int(b)
+            if self.busy or self.gen is not None or not self.spec or not self.info:
+                self.data.refresh(self.st.info()); return
+            old = self.st.bin
+            if b == old:
+                return
+            r = old / b; ds = self.st.ds
+            native = self.st._tomo_native or tuple(int(n) * old for n in ds.shape)
+            fix = self._object_points(lambda p: {a: v * r for a, v in p.items()})
+            from .volumes import binned_shape
+            from .storyboard import bin_spec
+            bin_spec(self.spec, r, binned_shape(native, b))
+            for kw in ds.params.values():  # the surfaces about to be made use the scaled sizes at once
+                if kw.get("min_object_voxels"):
+                    kw["min_object_voxels"] = max(1, int(round(kw["min_object_voxels"] * r ** 3)))
+            if b > 1:
+                self.spec["bin"] = b
             else:
-                self.spec.pop("flip", None)
+                self.spec.pop("bin", None)
             self._flip_fix = fix
-            self.run_job(lambda log: self.st.set_flip(axes, log=log, make_renderer=False), "Flipping the volume and building 3D surfaces ...")
+            what = "full size" if b == 1 else f"1/{b} size"
+            self.run_job(lambda log: self.st.set_bin(b, log=log, make_renderer=False), f"Making the volume {what} and building 3D surfaces ...")
 
         def _refind_objects(self):
             """After a flip: each object in focus by the voxel it had, now flipped."""
@@ -906,7 +941,7 @@ def build_gui(args):
                 else:
                     lost += 1
             if lost:
-                self.say(f"{lost} object{'s' if lost != 1 else ''} in focus could not be found again after the flip; "
+                self.say(f"{lost} object{'s' if lost != 1 else ''} in focus could not be found again after the change; "
                          "choose them again in their close-up.", "err")
 
         def _loaded(self, info):
@@ -1000,6 +1035,14 @@ def build_gui(args):
                           "'Much' can lose parts thinner than 2 voxels")
             so.activated.connect(lambda i, k=k: self._param_changed(k, "soften", SOFTEN[i][1])); self._soften_cb[k] = so
             f.addRow("Smoother surface", so)
+            de = QtW.QComboBox(); de.addItem("full", 1); de.addItem("half (faster)", 2)
+            de.setCurrentIndex(1 if sc.get("detail") == 2 else 0)
+            kk = self.st.ds.id_of(k); m = self.st.ds.meshes.get(kk) if kk is not None else None
+            tri = f" It has {m.n_cells / 1e6:.1f} million triangles now." if m is not None else ""
+            de.setToolTip("Surface detail: 'half' makes the surface on every second voxel, with about 4 times fewer "
+                          "triangles, so large structures draw much faster; small details get rounder." + tri)
+            de.activated.connect(lambda i, k=k, de=de: self._param_changed(k, "detail", 2 if de.itemData(i) == 2 else None))
+            f.addRow("Detail", de)
             style_rows(self, f, k)
             from .gui_look import membrane_row
             membrane_row(self, f, k, self.spec["classes"].get(k, {}).get("name", c.get("name", "")))
@@ -1012,7 +1055,7 @@ def build_gui(args):
             sc = self.spec["classes"].get(c["key"], {})
             return dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
                         smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
-                        soften=int(sc.get("soften", 0) or 0))
+                        soften=int(sc.get("soften", 0) or 0), detail=2 if sc.get("detail") == 2 else 1)
 
         def apply_params(self):
             """Rebuild the surfaces whose speck size or smoothing changed (after the controls settle). New surfaces are
@@ -1359,6 +1402,16 @@ def build_gui(args):
             if self.spec is not None and hasattr(self, "editor"):
                 self.editor.changed()  # one undo step once things settle
 
+        def ask_software(self, exc):
+            """After drawing failed twice with the graphics card: draw on the processor for this session? (tests replace it)"""
+            box = QtW.QMessageBox(self); box.setWindowTitle("TomoReveal"); box.setIcon(QtW.QMessageBox.Warning)
+            box.setText("The graphics card could not draw the preview, also after a second try.")
+            box.setInformativeText(f"{type(exc).__name__}: {exc}\n\nDraw on the processor instead (software rendering, "
+                                   "slower) for the rest of this session? The error is in the log (Help ▸ Show log folder).")
+            yes = box.addButton("Use software rendering", QtW.QMessageBox.AcceptRole); box.addButton("Not now", QtW.QMessageBox.RejectRole)
+            box.exec()
+            return box.clickedButton() is yes
+
         def spec_for(self):
             sp = json.loads(json.dumps(self.spec)); sp["output"]["size"] = list(self.quality_cb.currentData())
             return sp
@@ -1378,14 +1431,26 @@ def build_gui(args):
                 img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
-                if not self.st.headless and soft:
+                log_exception(type(exc), exc, exc.__traceback__)
+                if not self.st.headless and not getattr(self, "_gpu_retried", False):
+                    # 3.6: first try the graphics card once more with a fresh window (it used to switch to software
+                    # rendering for the rest of the session at the first error, with only a short message)
+                    self._gpu_retried = True; self.st._stale = True; self.st.ensure_renderer(); self.req = req
+                    return self.do_preview(quick)
+                if not self.st.headless and soft and self.ask_software(exc):
+                    self.software_reason = f"{type(exc).__name__}: {exc}"
                     self.st.headless = True; self.st._stale = True; self.st.ensure_renderer(); self.req = req
-                    self.say("Graphics problem: switched to software rendering (slower).", "err")
+                    self.say("Drawing on the processor (software rendering, slower) for this session.", "err")
                     return self.do_preview(quick)
                 self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
             finally:
                 if self.st.ren is not None:
                     self.st.ren.surface_async = False; self.st.ren.text_ref_h = None
+            self._gpu_retried = False  # drawn: a later error gets its own retry
+            if not getattr(self, "_renderer_logged", False):  # 3.6: what draws the pictures, once, in the log
+                from .diagnose import in_plain_words, renderer_string
+                rs = renderer_string(self.st.ren.pl.ren_win); self._renderer_logged = True
+                print(f"Drawing with: {in_plain_words(rs, type(self.st.ren.pl.ren_win).__name__)} [{rs}]", flush=True)
             self._make_part_surfaces()
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))

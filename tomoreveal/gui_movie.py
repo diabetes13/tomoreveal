@@ -619,15 +619,21 @@ class PartsPanel(QtW.QWidget):
                       "close-up), or effects on or off in this part only. 'As in the Look tab' follows the Look tab, which "
                       "sets them for the whole movie. Changes blend in smoothly at the start of the part.")
 
-        def choose(name, v):
+        combos = {}
+
+        def choose(name, v, also=None):
             q = self.part(pid)
             if q is None:
                 return
             cur = sb.part_look(q)
-            if v is None:
-                cur.pop(name, None)
-            else:
-                cur[name] = v
+            for k, val in [(name, v)] + list((also or {}).items()):
+                if val is None:
+                    cur.pop(k, None)
+                else:
+                    cur[k] = val
+                if k in combos:  # keep a combo that changed along in step
+                    ch = sb.PART_LOOK[k]
+                    combos[k].setCurrentIndex(next((i for i, (_, d) in enumerate(ch) if d == val and (val is not None or i == 0)), 0))
             self.set(pid, "look", cur or None)
             m = len(cur); fd._text = f"Look and effects in this part ({m} changed)" if m else "Look and effects in this part"
             fd.button.setText(fd._text)
@@ -638,14 +644,74 @@ class PartsPanel(QtW.QWidget):
                 cb.addItem(t)
             cur = own.get(name)
             cb.setCurrentIndex(next((i for i, (_, d) in enumerate(choices) if d == cur and (cur is not None or i == 0)), 0))
-            cb.activated.connect(lambda j, name=name, choices=choices: choose(name, choices[j][1]))
+            cb.activated.connect(lambda j, name=name, choices=choices: choose(name, choices[j][1])); combos[name] = cb
             cb.setToolTip("A whole look for this part only (the background stays the movie's); the rows below can still "
                           "change single effects" if name == "style" else
                           "Smoother surfaces of the membranes (structures ticked 'Treat as membrane') in this part only. "
                           "Thin parts are kept. The first time, the smoother surfaces take a few seconds to make" if name == "soften" else
                           f"{label} in this part: as in the Look tab (the whole movie), or its own choice")
             fd.form.addRow(label, cb)
+            if name == "outline":
+                fd.form.addRow("Outline these", self._outline_only_button(pid, choose))
         form.addRow(fd)
+
+    def _outline_only_button(self, pid, choose):
+        """Which structures get an outline in this part: every one (as in the Structures tab) or the ticked ones only."""
+        b = QtW.QToolButton(); b.setPopupMode(QtW.QToolButton.InstantPopup)
+        b.setToolButtonStyle(QtC.Qt.ToolButtonTextOnly); menu = QtW.QMenu(b); b.setMenu(menu)
+        b.setToolTip("Outlines on some structures only, in this part: tick the ones to outline. 'Every structure' follows the "
+                     "outline boxes in the Structures tab. If outlines are off, picking structures turns them on (medium) "
+                     "in this part.")
+
+        def structures():
+            return [c for c in (self.win.info or {}).get("structures", []) if c.get("mesh")]
+
+        def label():
+            only = sb.part_look(self.part(pid) or {}).get(sb.OUTLINE_ONLY)
+            if only is None:
+                text = "every structure"
+            elif not only:
+                text = "none"
+            else:
+                names = [self._name(k) for k in only]
+                text = ", ".join(names[:2]) + (f" and {len(names) - 2} more" if len(names) > 2 else "")
+            b.setText(text + " \u25be")
+
+        def outlines_off(own):
+            from .look import LOOK_PRESETS, style35
+            if own.get("outline"):
+                return own["outline"] == "off"
+            if own.get("style") in LOOK_PRESETS:
+                return LOOK_PRESETS[own["style"]].get("outline", "off") == "off"
+            return style35(self.win.spec).get("outline", "off") == "off"
+
+        def put(only):
+            q = self.part(pid)
+            if q is None:
+                return
+            own = sb.part_look(q)
+            also = {"outline": "medium"} if only is not None and outlines_off(own) else None  # picked structures should show
+            choose(sb.OUTLINE_ONLY, only, also)
+            label()
+
+        def toggle(key, on):
+            own = sb.part_look(self.part(pid) or {}); only = own.get(sb.OUTLINE_ONLY)
+            if only is None:  # start from what the Structures tab outlines
+                only = [c["key"] for c in structures() if not (self.win.spec.get("classes", {}).get(c["key"]) or {}).get("no_outline")]
+            only = [k for k in only if k != key] + ([key] if on else [])
+            put(only)
+
+        def fill():
+            menu.clear(); only = sb.part_look(self.part(pid) or {}).get(sb.OUTLINE_ONLY)
+            a = menu.addAction("Every structure (as in the Structures tab)"); a.setCheckable(True); a.setChecked(only is None)
+            a.triggered.connect(lambda _=False: put(None))
+            menu.addSeparator()
+            for c in structures():
+                on = (c["key"] in only) if only is not None else not (self.win.spec.get("classes", {}).get(c["key"]) or {}).get("no_outline")
+                a = menu.addAction(self._name(c["key"])); a.setCheckable(True); a.setChecked(on)
+                a.toggled.connect(lambda v, key=c["key"]: toggle(key, v))
+        menu.aboutToShow.connect(fill); label()
+        return b
 
     def _fold_more(self, t, form):
         """Put the less used rows of a part under "More settings" (closed unless the user opened it before)."""

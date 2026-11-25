@@ -151,8 +151,15 @@ class PictureLooks:
             thr = 0.012 if float(s.get("e", 0)) > 0.5 else 0.02
             from .look import outline_edges
             edge = outline_edges(lin, bg, idimg if L35["between"] else None, thr)
-            plain = [c[0] * 65536 + c[1] * 256 + c[2] for c, kk in ids.items() if class_spec(spec, self.ds, kk).get("no_outline")]
-            if plain:  # structures drawn without an outline (Structures tab): no edge on them
+            only = (s.get("lk") or {}).get("outline_only")  # this part outlines these structures only
+            only = None if only is None else set(only)
+
+            def plain_one(kk):
+                if only is not None:
+                    return self.ds.classes.get(kk, {}).get("key") not in only
+                return class_spec(spec, self.ds, kk).get("no_outline")
+            plain = [c[0] * 65536 + c[1] * 256 + c[2] for c, kk in ids.items() if plain_one(kk)]
+            if plain:  # structures drawn without an outline (Structures tab, or this part's list): no edge on them
                 code = idimg[..., 0].astype(np.int64) * 65536 + idimg[..., 1].astype(np.int64) * 256 + idimg[..., 2]
                 edge &= ~np.isin(code, plain)
             w = OUTLINE_PX[L35["outline"]] * H / 1080.0

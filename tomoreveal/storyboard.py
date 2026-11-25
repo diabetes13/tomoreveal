@@ -1023,10 +1023,18 @@ PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored b
 LOOK_BLEND = 0.6
 
 
+OUTLINE_ONLY = "outline_only"  # part["look"]["outline_only"] = [structure keys]: only these get an outline in this part
+
+
 def part_look(part):
-    """The Look settings this part changes: {setting: value} (only known settings with a real choice)."""
+    """The Look settings this part changes: {setting: value} (only known settings with a real choice), plus
+    "outline_only" (a list of structure keys) when the part outlines some structures only."""
     own = (part or {}).get("look") if isinstance((part or {}).get("look"), dict) else {}
-    return {k: v for k, v in own.items() if k in PART_LOOK and v is not None and any(v == d for _, d in PART_LOOK[k][1:])}
+    out = {k: v for k, v in own.items() if k in PART_LOOK and v is not None and any(v == d for _, d in PART_LOOK[k][1:])}
+    only = own.get(OUTLINE_ONLY)
+    if isinstance(only, list) and all(isinstance(x, str) for x in only):
+        out[OUTLINE_ONLY] = sorted(set(only))
+    return out
 
 
 def part_looks(spec, frames, fps):

@@ -12,7 +12,7 @@ TomoReveal reads these segmentations:
 
 The application is read-only for your data. It does not edit, rename or move tomograms, sessions or segmentations. It writes only the movies, in the folder that you select. It runs on your computer and does not send data to the internet.
 
-This is version 3.5.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 3.6.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -137,7 +137,9 @@ Drop the files on the window, or use the buttons in the **Data** tab. You can dr
 
 TomoReveal recognises each dropped file by its content. To choose yourself, use **Add tomogram...** (the file is always used as the tomogram) or **Add segmentation...** (a session, a label volume or easymode files; never used as the tomogram). If a dropped file was recognised wrongly, right-click it in the Data tab and choose **Use as tomogram** or **Use as segmentation**.
 
-Large tomograms and sessions can take a minute to load. A line in the Data tab shows the progress.
+Large tomograms and sessions can take a minute to load. The line at the bottom says what is happening: each file with its size and time, then each surface ("building surfaces 3/15: Capsid"), and a note when a file is on a slow drive. Surfaces are kept on disk in TomoReveal's own folder (up to 5 GB, never next to your data), so opening the same data again is much faster.
+
+**Size: full / half / quarter** (Data tab) shows the tomogram and segmentation at half or a quarter size in each direction: about 8 or 64 times lighter and faster, for very large files. Arrows, frames, slice numbers and close-ups move along, and the choice is saved with the project.
 
 ### 2. Choose the tomogram and the segmentations
 
@@ -151,7 +153,7 @@ Large tomograms and sessions can take a minute to load. A line in the Data tab s
 
 Sometimes the image is changed during the import into Dragonfly: it is cropped, binned, or an axis is flipped. Then the tomogram file and the segmentation are not on the same grid. TomoReveal compares your file with Dragonfly's copy and finds the crop, the binning and the flips. It then puts your file on the grid of the segmentation. A line below the list tells you what it found, for example "cropped to x 60-767, y 150-1315, z 6-73". easymode files that were made from the original tomogram file are put on the Dragonfly grid in the same way. If the file is not the image that was imported, TomoReveal tells you and shows Dragonfly's copy.
 
-**SEGMENTATION** lists every multi-ROI and ROI of each session, and each label or easymode file, with a tick box. Next to each one you see how many structures it has and, in grey, their names, so that you can see what you switch on. You can switch on several at the same time; their structures are listed in groups in the Structures tab. For each session, TomoReveal switches on the one that looks like the final segmentation. Change it with one click if it chose wrongly.
+**SEGMENTATION** lists every multi-ROI and ROI of each session, and each label or easymode file, with a tick box. Next to each one you see how many structures it has and, in grey, their names, so that you can see what you switch on. You can switch on several at the same time; their structures are listed in groups in the Structures panel. For each session, TomoReveal switches on the one that looks like the final segmentation. Change it with one click if it chose wrongly.
 
 - A segmentation on another grid than the tomogram is greyed out, with the reason, for example "511 × 720 × 250 voxels, but the tomogram is 512 × 720 × 250".
 - The single-slice previews that Dragonfly's Segmentation Wizard leaves in a session, and Dragonfly's undo copies, are not listed. A grey line says how many were left out.
@@ -159,9 +161,9 @@ Sometimes the image is changed during the import into Dragonfly: it is cropped, 
 
 ### 3. Set the structures
 
-The **Structures** tab lists the structures with the names and colours that are saved in the Dragonfly session (or in the `.json` file next to a label volume). For each structure you can:
+The **Structures** panel on the right of the preview lists the structures with the names and colours that are saved in the Dragonfly session (or in the `.json` file next to a label volume). For each structure you can:
 
-- remove the tick to hide it.
+- click the **eye** to hide or show it. **Eyes hide or show in: the selected part only** (the default) hides it only in the part selected on the timeline: it fades out and back in at the part's edges, and an orange dot marks the eye. Switch to **the whole movie** to hide it everywhere. Right-click a structure in the preview ▸ **Hide … in this part** does the same.
 - click the coloured box to change the colour.
 - change the name. The legend uses this name.
 - click the **⚙** button to open the structure's settings:
@@ -170,11 +172,16 @@ The **Structures** tab lists the structures with the names and colours that are 
   - **Remove specks smaller than** a number of voxels: leaves out small separate bits of a noisy segmentation.
   - **Smoothing**: how round the surface is; 0 shows the raw voxel steps.
   - **Smoother surface**: off, a little, more or much takes away the bumps a segmentation leaves. **Flat sheet, even thickness** draws a membrane as a smooth sheet of the thickness measured in the segmentation (or one you type), with holes and breaks up to the **Fill gaps** size bridged. It is a model of the membrane, not the segmentation as it is: use the other levels to show what was segmented. **Flatness: less** keeps membranes that run 2 to 4 voxels apart as two sheets.
+  - **Detail**: full, or half (about 4 times fewer triangles, so large structures draw much faster).
   - **Style**: Normal, Cartoon (flat colour with dark outlines), Dots, or Glossy (shiny, metallic or glass). **Apply to all** gives every structure this style.
 
 **All structures** in the Look tab fades every structure together, for a "ghost" look.
 
-Structures that are hidden in Dragonfly, and the background, are listed in grey with the tick removed. Tick them to show them anyway. A structure that has no name in the session is shown as "label 3 (no name in the session)".
+![Filaments hidden in the overview only](docs/images/22-structures-panel.png)
+
+![A bumpy membrane with holes: as segmented, "much", and a flat sheet](docs/images/26-flat-membrane.png)
+
+Structures that are hidden in Dragonfly, and the background, are listed in grey with the eye closed. Click the eye to show them anyway. A structure that has no name in the session is shown as "label 3 (no name in the session)".
 
 ### Look through the slices
 
@@ -186,7 +193,7 @@ The **Explore** tab is for looking at the data slice by slice. It does not chang
 - **2D slice** shows the slice flat, with the segmentation filled, as outlines, or off. **Overlay opacity** sets how strongly the colours cover the slice. Ctrl + mouse wheel zooms, dragging moves the image, and a double-click shows the whole slice again.
 - **3D at this slice** shows the 3D view with the slice at this position, and the structures above the slice, all structures, or none.
 - The line below the image shows the slice number, the depth in nm, and under the mouse the position, the grey value and the name of the structure.
-- Colours and which structures are shown come from the Structures tab. The clip box is drawn as a dashed rectangle, and slices outside the movie's slice range are dimmed.
+- Colours and which structures are shown come from the Structures panel. The clip box is drawn as a dashed rectangle, and slices outside the movie's slice range are dimmed.
 
 Three buttons pass what you found to the movie: **Start the slice sweep here**, **End the slice sweep here**, and **Add a close-up of** the structure under the mouse.
 
@@ -206,6 +213,8 @@ In the **Movie** tab, set the **main view**: click a view button, or use the **T
 | + and −, F, Home | Zoom in and out, fit everything, back to the main view |
 | 1, 3, 7 | Front, side, top view |
 
+Every bar has a number box beside it: type 30 for Tilt and press Enter (Esc cancels, the arrow keys step, Shift ten at a time). Right-click a structure ▸ **Rotate around this** makes it the centre of the turns; **View ▸ Show rotation axis** draws the axis in the preview (never in the movie).
+
 The **?** in the corner of the preview lists these. **View ▸ Moving around in the preview** can swap the left and right buttons or turn the mouse wheel the other way.
 
 ### 5. Clip the tomogram
@@ -214,7 +223,7 @@ Use **Clip** to keep only a part of the tomogram, as with the clip box in Dragon
 
 ![Clip bars keep only a part of the tomogram](docs/images/03-clip.png)
 
-**Fit the view to the kept part** moves the camera closer. Remove the tick to keep the camera where it is. **Reset** shows the full tomogram again.
+Each bar also has **from** and **to** boxes: type a slice number, or a length such as "120 nm". **Fit the view to the kept part** moves the camera closer. Remove the tick to keep the camera where it is. **Reset** shows the full tomogram again.
 
 ### 6. Build the movie on the timeline
 
@@ -270,13 +279,13 @@ The **Movie** tab lists the same parts, one line each. Click a line to open its 
 | Part | Settings |
 |---|---|
 | Slide | From (first slice, last slice, where the slice is, a slice number), To, Structures (hidden, above the slice, all, leave as they are), Pause before, Pause after |
-| Overview | Camera movement (rock, full spin, still), Rock angle, View (main view or own view) |
+| Overview | Camera movement (rock, full spin, still), Rock angle, **Turn around** (Z, X, Y, or the screen's up-down line), **Centre of the turn** (the middle of what is shown, so a clipped tomogram turns around itself), **Keep the size steady**, **Start gently**, View (main view or own view) |
 | Close-up | Structure and Object (or Objects in focus), Other structures (colour and opacity), Camera movement (orbit, rock, wiggle, still), Camera push-in, Highlight, Object effect, Zoom, Tilt, Vignette |
 | Hold | only the common settings |
 | Card | Background, text and picture blocks, Fades (see [Title and end cards](#9-title-and-end-cards)) |
 | Camera path | What the camera follows, or its points; Camera, Looks, Other structures (see [Camera paths](#camera-paths)) |
 
-Every part also has **On the picture**: show or hide the legend, slice number and scale bar during this part only.
+Each line has a stripe in its part's timeline colour (blue slides, green overviews, red close-ups, purple cards, orange camera paths, grey holds). Every part also has **On the picture**: show or hide the legend, slice number and scale bar during this part only.
 
 **Transitions.** Each part's settings end with "Transition from part 3 to part 4":
 
@@ -293,7 +302,7 @@ Slides, spins and orbits also have **Slow down at the end**.
 
 #### Close-ups
 
-- Click **Zoom** next to a structure in the Structures tab, or use **+ Add part > Close-up of**, to add a close-up of all of that structure.
+- Click **Zoom** next to a structure in the Structures panel, or use **+ Add part > Close-up of**, to add a close-up of all of that structure.
 - Click **+ Click a structure in the preview** (or choose "an object I click in the preview"), then click one object (one vesicle, one filament) to add a close-up of that object only.
 - To change what a close-up shows, open it and choose another **Structure** or **Object** from the lists. The caption follows the structure unless you typed your own.
 - A close-up of a structure that you switched off in the Data tab stays in the list, marked "structure not loaded", and is left out of the movie until the structure is back.
@@ -301,7 +310,8 @@ Slides, spins and orbits also have **Slow down at the end**.
 - **A close-up of a frame you draw**: **Frame a region...** in a close-up's settings (or **+ Add part > Close-up of > a region I draw in the preview**), then drag a frame over the preview: the close-up shows only what is inside it, for example where two objects touch.
 - **Other structures**: grey, darker, unchanged colour, or **hidden**, and their opacity.
 - New close-ups look from the top (Tilt 0°). **Keep zoom steady** keeps the camera at one distance, so the object does not grow and shrink while the camera moves.
-- **Vignette**: darker edges around the objects in focus, as set in the Look tab or for this close-up only, with an optional **blur** of what is nearer or further away.
+- **Blur the background**: as in the Look tab, off, light, medium or strong. The objects in focus stay sharp; what is nearer or further away is blurred. While the preview plays, it shows the light level.
+- **Vignette**: darker edges around the objects in focus, as set in the Look tab or for this close-up only.
 
 #### Close-up animations
 
@@ -328,6 +338,12 @@ They can be combined:
 For both: **Camera** sets the distance and the side the camera looks from, **Looks** whether it looks at the path or a little ahead and whether it moves at even speed or slows down at the ends. The path is drawn in the preview while the part is selected, never in the movie.
 
 **Following a structure calmly**: **Steadiness** chooses close (follows the bends), steady (the default) or very steady, with a slider for fine control. The camera glides on a smoothed rail at a constant height, keeps the picture upright and turns at most 20° per second. **Edit as points** turns the path into a path through points you can adjust.
+
+**Calm ends**: the flights into and out of a camera path take as long as a gentle turn needs (**Ends ▸ calm flights in and out**, on for new paths), and **hold at start / at end** keeps the camera still at the first and last point. Projects with paths from older versions offer once to make them smoother (Undo brings the old path back).
+
+**Edit from above** (a path through points) looks straight down on the tomogram while you lay out the path: click to add points at the **height** you chose (or on what you click), drag them, or **Draw the path** with the mouse (about one point every 30 pixels). A strip under the preview shows each point's height; drag a point up or down there. Your view is back as it was when you switch it off or press Esc. **Play path** flies it.
+
+![Laying out a camera path from above](docs/images/25-edit-from-above.png)
 
 **The path editor** (a path through points, while its part is selected):
 
@@ -357,13 +373,16 @@ The change happens at the start of the part, over the **fade** time (0.5 s unles
 
 ### 8. On the picture: legend, slice number, scale bar
 
-The Look tab group **On the picture**, and the buttons above the preview, switch the **legend**, the **slice number**, the **scale bar**, the **title** and the **captions** on or off. Each part can override this for itself (Movie tab, **On the picture**).
+The Look tab group **On the picture**, and the buttons above the preview, switch the **legend**, the **slice number**, the **scale bar**, the **title**, the **captions** and the **orientation arrows** (X red, Y green, Z blue; **Axes**) on or off. The orientation arrows turn with the camera; they show in the preview only, unless you tick **also in the movie**, and you can give them your own labels. Captions can have a **coloured box** in any colour. Each part can override this for itself (Movie tab, **On the picture**).
 
 - **Move** an item by dragging it in the preview; drag its corner handle to make it bigger or smaller (hold Shift for steps of 0.1). It snaps to the edges and the centre lines. Right-click an item for Hide, Reset position, Bigger, Smaller, and, for the legend, one or two columns and the box. **Layout boxes** shows all items, also hidden ones, as dashed boxes.
+- The legend keeps one size for the whole movie (new projects): in a close-up the rows of the other structures fade instead of leaving.
 - The positions are kept as fractions of the picture, so they stay in place at every quality (Draft, HD, 4K, square, portrait).
 - **Scale bar**: its length comes from the voxel size of the data, shown in the Data tab. Many files say 1 Å or 0 by mistake; then the Data tab warns you, and you can type the real voxel size there. With **automatic length**, a round number (1, 2 or 5 × 10ⁿ nm) is chosen for each part. **Flat on the picture**, the bar is exact at the centre of the view (switch on Orthographic view for an exact bar everywhere); **lying on the slice**, it is exact in every view.
 
 ![Moving the legend; the scale bar](docs/images/11-overlays.png)
+
+![Orientation arrows and a caption in a coloured box](docs/images/24-orientation.png)
 
 ### Arrows and text
 
@@ -371,11 +390,15 @@ In the Look tab, **Arrows and text** lists them:
 
 - **+ Add arrow**, then click the spot the arrow should point to (or right-click in the preview ▸ **Add arrow here**). The tip stays on that spot while the camera moves. The label is the structure's name; type over it.
 - **+ Add text** adds a text box; drag it into place.
-- In the preview: drag an arrow's tail to turn it or make it longer, and drag its tip to another spot. Right-click an arrow or a text box for its shape (arrow, thin arrow, pointer, ring, bracket), box, colour, Duplicate, Copy to another part, Delete, and **Make all arrows look like this one**. Ctrl + click selects several; with several text boxes, **Align** lines them up.
-- Each item has its own **from** and **to** time in its part (**⏵** and **⏹** take the playhead). It fades in, grows or pops. Its bar on the timeline can be dragged.
+- **Draw** them: the **Draw** toolbar above the preview has **Arrow** (press at the tail, drag, let go where it points; Shift for steps of 15°), **Curved** (then drag the yellow handle to bend it), **Freehand** (draw it as with a pen), **Line**, **Ellipse** and **Rectangle** (Shift: circle or square). **Follows the structure / Stays on the picture** decides whether the tip is pinned to the structure under it (it then follows that spot when the camera moves) or stays where it is on the picture; with arrows selected, it switches them.
+- In the preview: drag an arrow's tail to turn it or make it longer, and drag its tip to another spot: a crosshair shows where it goes and what it will be pinned to; over empty space the arrow stays there on the picture. Right-click ▸ **Move tip...** then click where it should point. Right-click an arrow or a text box for its shape (arrow, thin arrow, pointer, ring, bracket), box, colour, Duplicate, Copy to another part, Delete, and **Make all arrows look like this one**. Ctrl + click selects several; with several text boxes, **Align** lines them up.
+- Lines and curves can have arrowheads at the end, the start, both or none (right-click ▸ **Arrowheads**).
+- Each item has its own **from** and **to** time in its part (**⏵** and **⏹** take the playhead). It fades in, grows, pops, or **draws itself on**. Its bar on the timeline can be dragged.
 - Arrows hide while their structure is switched off, not yet revealed by the slide, outside the clip box, or out of the picture. Labels never cover each other.
 
 ![Two arrows with labels](docs/images/20-arrows.png)
+
+![Drawn arrows and shapes; the selected curve shows its handles](docs/images/23-draw.png)
 
 ### 9. Title and end cards
 
@@ -394,8 +417,8 @@ In the Look tab:
   - **Illustration**: thick black outlines.
   - **On the tomogram**: the structures over the grey slice.
 
-  You can then change **Soft shadows** (strength and reach; they are part of the surfaces, so they never flicker in movies), **Outlines** (thin, medium, thick; dark, black or a darker shade; also between touching structures), **See-through membranes** (which structures count as membranes: **Treat as membrane** in the Structures tab), **Depth fade**, **Richer colours on white backgrounds** and **Matte lighting**. The look then shows "Custom". **Background** offers black, white, light grey, dark grey, a gradient, or the tomogram slice.
-- **Opacity** of a structure (Structures tab) makes it see-through, and its outline fades with it.
+  You can then change **Soft shadows** (strength and reach; they are part of the surfaces, so they never flicker in movies), **Outlines** (thin, medium, thick; dark, black or a darker shade; also between touching structures), **See-through membranes** (which structures count as membranes: **Treat as membrane** in the Structures panel), **Depth fade**, **Richer colours on white backgrounds** and **Matte lighting**. The look then shows "Custom". **Background** offers black, white, light grey, dark grey, a gradient, or the tomogram slice.
+- **Opacity** of a structure (Structures panel) makes it see-through, and its outline fades with it.
 
 ![The five looks](docs/images/21-looks.png)
 
@@ -413,6 +436,7 @@ At the end of the **Movie** tab, select the quality, the name and the folder.
 - **File size**: Balanced, Larger (best quality) or Smaller (about a quarter smaller at nearly the same quality). The resolution never changes.
 - **Codec**: H.264 plays everywhere. **H.265** gives about half the file size at the same quality; it plays on recent Macs, iPhones and in VLC, but Windows may need the HEVC extension and some PowerPoint versions cannot play it. Check before a talk.
 - Transparent backgrounds work in Keynote, Final Cut, Premiere and DaVinci Resolve. Check your presentation program before relying on it.
+- **Arrows and text: as separate transparent movies** writes the movie with the 3D picture only, plus `name_arrows.mov` (arrows, text and shapes) and `name_labels.mov` (legend, scale bar, captions, title, slice number): transparent ProRes 4444 of the same length, listed in `name_layers.json`. Lay them over the movie in a video editor, or use **File ▸ Merge layer movies** (or **Merge layers...**) to put them back together into `name_merged.mp4` with the layers you tick, without drawing anything again. Right-click an arrow ▸ **Separate layer movie** puts it on the other layer.
 - **Frame rate** 60 frames/s gives smoother motion (files about 1.6 times larger, rendering twice as long). **Motion blur** blurs fast-moving detail a little, as a camera would; it renders 4 pictures per frame, so it is used for the movie only.
 - The **estimated file sizes** for every quality and ticked format appear under these choices a few seconds after you stop changing settings. They come from a few frames of your movie; "rough" ones are scaled from HD.
 
@@ -495,6 +519,10 @@ conda activate tomoreveal
 python -m pip install --no-deps -e .
 python -m tomoreveal
 ~~~
+
+### The window is slow
+
+**Help ▸ Performance** shows whether your graphics card draws the pictures, the memory used, the graphics card's load, and where the time of one movie frame goes (`tomoreveal --diagnose` prints the same). For very large data, use **Size: half** in the Data tab and **Detail: half** for large structures. If drawing with the graphics card fails, TomoReveal tries it once more, and asks before it switches to software drawing for the session.
 
 ### The preview is black, or the application reports a graphics problem
 

@@ -110,6 +110,8 @@ def sidecar_classes(path):
 
 
 SOFTEN = (("off", 0), ("a little", 1), ("more", 2), ("much", 3))
+FLAT = 4  # 3.6 (R21): "flat sheet, even thickness" (flat_membrane.py), with classes[key]["flat"] = its settings
+SURFACES = SOFTEN + (("flat sheet, even thickness (a model)", FLAT),)
 SOFTEN_SIGMA = {1: 0.7, 2: 1.0, 3: 1.4}  # voxels; with 1.4 a membrane 2 voxels thick still stays whole (1 voxel: up to 0.6)
 SOFTEN_STEPS = {1: 30, 2: 60, 3: 120}    # extra smoothing steps (they do not shrink the surface)
 
@@ -135,13 +137,16 @@ def _keep_thin(m, g):
 KEEP_GAIN = 1.8  # a single voxel blurred by 0.5 peaks at 0.32: x 1.8 keeps it above the surface level (0.5)
 
 
-def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None):
+def surface(mask, off_zyx, smooth, step, soften=0, full_shape=None, flat=None):
     """Smoothed isosurface of a boolean (z,y,x) array, returned in (x,y,z) voxel coordinates.
     soften (1..3): the mask is blurred a little before the surface is made, which takes away the bumps and ridges a
     segmentation leaves on membranes far better than more smoothing steps (they keep the voxel layers). full_shape
     (the whole grid): where the structure is cut by the edge of the grid, the blur does not pull it back from there."""
     import pyvista as pv
     from skimage.measure import marching_cubes
+    if int(soften or 0) == FLAT:  # 3.6: a smooth sheet of even thickness, gaps filled (flat_membrane.py)
+        from .flat_membrane import flat_surface
+        return flat_surface(mask, off_zyx, full_shape, flat, smooth, step)
     sig = SOFTEN_SIGMA.get(int(soften or 0), 0.0)
     if sig <= 0:
         sub = np.pad(mask.astype(np.float32), 1); pad = 1  # pad closes surfaces at the volume edge
@@ -314,6 +319,9 @@ class Dataset:
             return int(self.smooth if v is None else v)
         if name == "detail":  # 3.6: 1 full, 2 half (surface made on every 2nd voxel: about 4 times fewer triangles)
             return 2 if v == 2 else int(self.step)
+        if name == "flat":  # 3.6: the flat-sheet settings (only used with soften FLAT)
+            from .flat_membrane import key
+            return key(v)
         return int(v or 0)
 
     def _cache_key(self, k, soften=None, params=None):
@@ -324,6 +332,9 @@ class Dataset:
         sm = int(p["smoothing"]) if "smoothing" in p else self.param(k, "smoothing")
         so = int(soften) if soften is not None else int(p["soften"]) if "soften" in p else self.param(k, "soften")
         st = (2 if p["detail"] == 2 else int(self.step)) if "detail" in p else self.param(k, "detail")
+        if so == FLAT:  # 3.6: the flat-sheet settings belong to the surface too
+            from .flat_membrane import key
+            return (c["key"], c.get("threshold"), mov, sm, so, st, key(p["flat"]) if "flat" in p else self.param(k, "flat"))
         return (c["key"], c.get("threshold"), mov, sm, so, st)
 
     MESH_CACHE = 48  # surfaces kept for settings not shown now (going back to one is then instant)
@@ -340,7 +351,7 @@ class Dataset:
         if sl is None:
             return None
         mask = self.kept_mask(k, sl, ck[2])
-        m = self._surface_of(mask, [s.start for s in sl], ck[3], ck[4], ck[5]) if mask.any() else None
+        m = self._surface_of(mask, [s.start for s in sl], ck[3], ck[4], ck[5], ck[6] if len(ck) > 6 else None) if mask.any() else None
         with self._mesh_lock:
             self._mesh_cache[ck] = m
             if len(self._mesh_cache) > self.MESH_CACHE:
@@ -349,16 +360,17 @@ class Dataset:
                     del self._mesh_cache[old]
         return m
 
-    def _surface_of(self, mask, off, smooth, soften, step=None):
+    def _surface_of(self, mask, off, smooth, soften, step=None, flat=None):
         """surface(), or the same surface kept on disk from an earlier session (3.6, surface_cache)."""
         from . import surface_cache
         step = int(self.step if step is None else step)
-        fp = surface_cache.fingerprint(mask, off, self.shape, (int(smooth), step, int(soften or 0)))
+        sett = (int(smooth), step, int(soften or 0)) + ((tuple(flat),) if int(soften or 0) == FLAT else ())
+        fp = surface_cache.fingerprint(mask, off, self.shape, sett)
         m = surface_cache.load(fp)
         if m is not None:
             self.disk_hits = getattr(self, "disk_hits", 0) + 1
             return m or None
-        m = surface(mask, off, smooth, step, soften, self.shape)
+        m = surface(mask, off, smooth, step, soften, self.shape, flat)
         self.built = getattr(self, "built", 0) + 1
         surface_cache.save(fp, m)
         return m
@@ -369,7 +381,7 @@ class Dataset:
     def set_params(self, k, **kw):
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
         key = self.classes[k]["key"]; before = self._cache_key(k)
-        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften", "detail")})
+        cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften", "detail", "flat")})
         self.params[key] = cur; self.path_cache = {}
         if self._cache_key(k) == before:
             return False
@@ -474,7 +486,7 @@ class Dataset:
     def comp_mesh(self, k, cid, soften=None):
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
         return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1,
-                       self.param(k, "soften") if soften is None else int(soften), self.shape)
+                       self.param(k, "soften") if soften is None else int(soften), self.shape, self.param(k, "flat"))
 
     def targets_box(self, tgt, pad=True):
         """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""

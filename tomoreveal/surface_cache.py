@@ -43,6 +43,9 @@ def load(fp):
                 out = pv.PolyData(z["points"], np.hstack([np.full((len(faces), 1), 3), faces]).ravel())
                 out.point_data["Normals"] = z["normals"]
                 out.point_data.active_normals_name = "Normals"
+                for name in ("thickness", "measured"):  # 3.6: what a flat membrane was made with
+                    if name in z.files:
+                        out.field_data[name] = z[name]
         os.utime(p)  # recently used
         return out
     except (OSError, KeyError, ValueError, EOFError):
@@ -63,7 +66,8 @@ def save(fp, mesh):
             faces = mesh.faces.reshape(-1, 4)[:, 1:].astype(np.int32)
             normals = mesh.point_data.get("Normals")
             normals = np.zeros((mesh.n_points, 3), np.float32) if normals is None else np.asarray(normals, np.float32)
-            np.savez(tmp, empty=False, points=np.asarray(mesh.points, np.float32), faces=faces, normals=normals)
+            extra = {n: np.asarray(mesh.field_data[n], np.float32) for n in ("thickness", "measured") if n in mesh.field_data}
+            np.savez(tmp, empty=False, points=np.asarray(mesh.points, np.float32), faces=faces, normals=normals, **extra)
         os.replace(tmp, os.path.join(d, fp + ".npz"))
         _trim(d)
     except OSError:

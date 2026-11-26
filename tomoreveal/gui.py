@@ -10,6 +10,7 @@ import traceback
 import numpy as np
 
 from .common import UserError, VIEWS
+from .flat_membrane import key as flat_key
 from .demo import make_demo
 from .movie import movie_frames, poster_path
 from .render import software_rendering_available
@@ -1070,15 +1071,24 @@ def build_gui(args):
             sm.setToolTip("Surface smoothing steps; 0 shows the raw voxel steps")
             sm.valueChanged.connect(lambda v, k=k: self._param_changed(k, "smoothing", int(v)))
             f.addRow("Smoothing", sm)
-            from .volumes import SOFTEN
+            from .volumes import FLAT, SURFACES
             so = QtW.QComboBox(); so.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            for t, _ in SOFTEN:
+            for t, _ in SURFACES:
                 so.addItem(t)
-            so.setCurrentIndex(next((i for i, (_, d) in enumerate(SOFTEN) if d == int(sc.get("soften", 0) or 0)), 0))
+            so.setCurrentIndex(next((i for i, (_, d) in enumerate(SURFACES) if d == int(sc.get("soften", 0) or 0)), 0))
             so.setToolTip("Smoother surface: takes away the bumps and ridges a segmentation leaves, for example on membranes. "
-                          "'Much' can lose parts thinner than 2 voxels")
-            so.activated.connect(lambda i, k=k: self._param_changed(k, "soften", SOFTEN[i][1])); self._soften_cb[k] = so
+                          "'Much' can lose parts thinner than 2 voxels. 'Flat sheet' (3.6): a smooth model of a membrane with "
+                          "even thickness; gaps are filled. Use the other levels to show the segmentation as it is.")
+
+            def chose(i, k=k):
+                flat_box.setVisible(SURFACES[i][1] == FLAT); self._param_changed(k, "soften", SURFACES[i][1])
+            so.activated.connect(chose); self._soften_cb[k] = so
             f.addRow("Smoother surface", so)
+            from .gui_flat import flat_rows
+            flat_box = flat_rows(self, k, sc, f); flat_box.setVisible(int(sc.get("soften", 0) or 0) == FLAT)
+            if not hasattr(self, "_flat_box"):
+                self._flat_box = {}
+            self._flat_box[k] = flat_box
             de = QtW.QComboBox(); de.addItem("full", 1); de.addItem("half (faster)", 2)
             de.setCurrentIndex(1 if sc.get("detail") == 2 else 0)
             kk = self.st.ds.id_of(k); m = self.st.ds.meshes.get(kk) if kk is not None else None
@@ -1099,7 +1109,7 @@ def build_gui(args):
             sc = self.spec["classes"].get(c["key"], {})
             return dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
                         smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
-                        soften=int(sc.get("soften", 0) or 0), detail=2 if sc.get("detail") == 2 else 1)
+                        soften=int(sc.get("soften", 0) or 0), detail=2 if sc.get("detail") == 2 else 1, flat=flat_key(sc.get("flat")))
 
         def apply_params(self):
             """Rebuild the surfaces whose speck size or smoothing changed (after the controls settle). New surfaces are
@@ -1140,11 +1150,17 @@ def build_gui(args):
 
         def sync_surface_controls(self):
             """The "Smoother surface" choice of each structure, after it was changed elsewhere (Look tab, undo)."""
-            from .volumes import SOFTEN
+            from .volumes import SURFACES
             for key, so in list(self._soften_cb.items()):
                 try:
                     v = int((self.spec["classes"].get(key) or {}).get("soften", 0) or 0)
-                    so.blockSignals(True); so.setCurrentIndex(next((i for i, (_, d) in enumerate(SOFTEN) if d == v), 0))
+                    so.blockSignals(True); so.setCurrentIndex(next((i for i, (_, d) in enumerate(SURFACES) if d == v), 0))
+                    fb = getattr(self, "_flat_box", {}).get(key)
+                    if fb is not None:
+                        from .volumes import FLAT
+                        fb.setVisible(v == FLAT)
+                        if v == FLAT:
+                            fb.refresh()
                     so.blockSignals(False)
                 except RuntimeError:  # rebuilt meanwhile
                     self._soften_cb.pop(key, None)

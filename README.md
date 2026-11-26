@@ -169,6 +169,7 @@ The **Structures** tab lists the structures with the names and colours that are 
   - **Threshold** (easymode and Ais structures only): the surface is drawn where the score of the network is above it.
   - **Remove specks smaller than** a number of voxels: leaves out small separate bits of a noisy segmentation.
   - **Smoothing**: how round the surface is; 0 shows the raw voxel steps.
+  - **Smoother surface**: off, a little, more or much takes away the bumps a segmentation leaves. **Flat sheet, even thickness** draws a membrane as a smooth sheet of the thickness measured in the segmentation (or one you type), with holes and breaks up to the **Fill gaps** size bridged. It is a model of the membrane, not the segmentation as it is: use the other levels to show what was segmented. **Flatness: less** keeps membranes that run 2 to 4 voxels apart as two sheets.
   - **Style**: Normal, Cartoon (flat colour with dark outlines), Dots, or Glossy (shiny, metallic or glass). **Apply to all** gives every structure this style.
 
 **All structures** in the Look tab fades every structure together, for a "ghost" look.

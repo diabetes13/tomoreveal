@@ -619,6 +619,9 @@ def build_gui(args):
             self.nav = Navigator(self); self.prev.nav = self.nav
             self.path_point = None; self.path_edit_paused = None; self.point_panel = PointPanel(self)
             rl.addWidget(self.prev, 1)
+            self.top_edit = None; self.prev_strip_layout = rl  # 3.6: editing a camera path from above (gui_topview)
+            from .gui_topview import strip as _top_strip
+            _top_strip(self)
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
             self.timeline.part_selected.connect(self.select_part); self.timeline.part_activated.connect(self.open_part)
@@ -1522,9 +1525,16 @@ def build_gui(args):
             plan, i = self.st.plan_frame(spec, req); frames = plan.frames
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             self.st.ren.preview_part = self.selected_part; self.st.ds.path_async = True
+            state, dspec = frames[i], spec
+            if self.top_edit is not None:  # 3.6: the path being edited, seen from above (the settings are unchanged)
+                from . import gui_topview
+                if self.parts_panel.part(self.top_edit["pid"]) is None:
+                    gui_topview.stop(self)
+                else:
+                    state, dspec = gui_topview.draw_state(self, spec, frames, i, size)
             try:
                 self.st.ren.surface_async = True; self.st.ren.text_ref_h = h  # quick (2/3) frames: text as in the full one
-                img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
+                img = self.st.ren.draw(state, dspec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
                 log_exception(type(exc), exc, exc.__traceback__)
@@ -1793,6 +1803,9 @@ def build_gui(args):
             self.say("Click the object the camera should follow.")
 
         def keyPressEvent(self, e):
+            if e.key() == QtC.Qt.Key_Escape and getattr(self, "top_edit", None) is not None:
+                from .gui_topview import stop
+                self.pen.cancel(); stop(self); self.say("Back to the camera's own view.", "ok"); return
             if e.key() == QtC.Qt.Key_Escape and self.editing_path() is not None and not (self.multi_pick or self.pick_mode or self.waypoint_pick
                                                                                          or self.path_pick or self.region_pick):
                 self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
@@ -1855,6 +1868,10 @@ def build_gui(args):
             if self.arrow_pick and self.gen is None:  # "+ Add arrow": this click is where it points
                 from .gui_annotations import add_arrow_at
                 self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); add_arrow_at(self, (fx, fy)); return
+            if self.top_edit is not None and self.gen is None and not self.top_edit.get("draw"):  # 3.6: editing from above
+                from .gui_topview import click
+                if click(self, (fx, fy)):
+                    return
             ep = self.editing_path() if not (self.pick_mode or self.region_pick) and self.gen is None else None
             if ep is not None and self.st.ren is not None:  # path editor: a click adds a point after the selected one
                 pt = self.st.ren.pick_point(fx, fy)
@@ -1903,6 +1920,12 @@ def build_gui(args):
             plan = self.timeline.canvas.plan if hasattr(self, "timeline") else None
             if not (self.spec and plan) or not (0 <= self.frame < len(plan.frames)):
                 return None
+            if getattr(self, "top_edit", None) is not None:  # 3.6: the view from above stays put while a path is edited
+                part = self.parts_panel.part(self.top_edit["pid"])
+                if part is not None:
+                    if say:
+                        self.prev.set_note("Seen from above while the path is edited. Press Esc or click 'Edit from above' to move the camera again.")
+                    return part
             pid = plan.frames[self.frame].get("part"); part = self.parts_panel.part(pid) if pid else None
             if part is None or not part.get("locked"):
                 return None

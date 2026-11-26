@@ -75,6 +75,31 @@ def points_from_poses(poses, step=0.15):
     return out
 
 
+def old_path_parts(spec):
+    """Camera paths saved before 3.6 that would move more calmly with the newer method (3.6 offer, R9)."""
+    out = []
+    for p in spec.get("shots", []):
+        if p.get("type") != "path":
+            continue
+        pts = (p.get("source") or {}).get("kind") == "points"
+        if (pts and p.get("interp") != 2) or (not pts and p.get("steadiness") is None) or not p.get("auto_flight"):
+            out.append(p)
+    return out
+
+
+def make_paths_smoother(spec):
+    """Paths through points: the 3.5 method (even speed, gentle stops); paths along a structure: the steady rail;
+    both: calm flights in and out (3.6). Returns the number of parts changed."""
+    parts = old_path_parts(spec)
+    for p in parts:
+        if (p.get("source") or {}).get("kind") == "points":
+            p["interp"] = 2
+        elif p.get("steadiness") is None:
+            p["steadiness"] = 50.0
+        p["auto_flight"] = True
+    return len(parts)
+
+
 def path_rows(panel, pid, p, form):
     win = panel.win
 
@@ -127,6 +152,30 @@ def path_rows(panel, pid, p, form):
         if why:
             n = QtW.QLabel(why); n.setStyleSheet(DIM); n.setWordWrap(True); form.addRow("", n)
     else:
+        from . import gui_topview as tv
+        above = QtW.QPushButton("Edit from above"); above.setCheckable(True); above.setChecked(tv.active(win, pid))
+        above.setToolTip("Look straight down on the tomogram while you lay out the path: click to add points, drag them to "
+                         "move them, or draw the whole path. Your view is back as it was when you switch this off (or press Esc).")
+        above.toggled.connect(lambda on: tv.start(win, pid) if on else tv.stop(win))
+        drawb = QtW.QPushButton("Draw the path"); drawb.setCheckable(True)
+        drawb.setChecked(bool(tv.active(win, pid) and win.top_edit.get("draw"))); drawb.setEnabled(tv.active(win, pid))
+        drawb.setToolTip("Then draw the path in the preview with the mouse, as with a pen: it becomes points (about one every "
+                         "30 pixels) that you can move afterwards. Replaces the points the path has now (Undo brings them back).")
+
+        def draw_on(on):
+            if tv.active(win, pid):
+                win.top_edit["draw"] = bool(on); win.prev.setCursor(QtC.Qt.CrossCursor if on else QtC.Qt.ArrowCursor)
+                if on:
+                    win.say("Draw the path in the preview, from where it starts to where it ends.")
+        drawb.toggled.connect(draw_on)
+        nz = win.st.ds.shape[0] if win.st.ds is not None else 100
+        hz = _spin(-1, nz - 1, -1 if p.get("top_height") is None else float(p["top_height"]),
+                   lambda v: panel.set(pid, "top_height", None if v < 0 else float(v)), step=1, decimals=0, prefix="height ")
+        hz.setSpecialValueText("height: on what is clicked")
+        hz.setToolTip("Height (z, in slices) of new points: 'on what is clicked' puts them on the structure or slice under the "
+                      "mouse; a number puts every new point at that height. Change single points below, or in the strip under "
+                      "the preview while editing from above.")
+        form.addRow("Lay out", _row(above, drawb, hz))
         wps = p.get("waypoints") or []
         zs, own_z = point_values(p, "zoom", 1.0)
         fs, own_f = point_values(p, "fov", float(win.spec.get("style", {}).get("fov", 30)))
@@ -160,7 +209,16 @@ def path_rows(panel, pid, p, form):
             for text, tip, fn in (("↑", "Move up", lambda _=False, m=move: m(-1)), ("↓", "Move down", lambda _=False, m=move: m(1)),
                                   ("✕", "Delete this point", lambda _=False, d=delete: d())):
                 tb = QtW.QToolButton(); tb.setText(text); tb.setToolTip(tip); tb.clicked.connect(fn); btns.append(tb)
-            form.addRow("Points" if i == 0 else "", _row(num, desc, pause, *btns))
+            hw = []
+            q = w.get("point") if w.get("point") is not None else w.get("pos")
+            if q is not None:
+                def set_z(v, i=i):
+                    w2 = part()["waypoints"][i]; key = "point" if w2.get("point") is not None else "pos"
+                    upd(i, **{key: [float(w2[key][0]), float(w2[key][1]), float(v)]})
+                hh = _spin(0, max(1, (win.st.ds.shape[0] if win.st.ds is not None else 100) - 1), float(q[2]), set_z,
+                           step=1, decimals=0, prefix="z ")
+                hh.setToolTip("Height of this point (slice number from the bottom)"); hw = [hh]
+            form.addRow("Points" if i == 0 else "", _row(num, desc, pause, *hw, *btns))
             if new_interp:
                 zl = QtW.QLabel(f"{zs[i]:.2f}x · {fs[i]:.0f}°" if own_z[i] or own_f[i] else f"<i>🔗 {zs[i]:.2f}x · {fs[i]:.0f}°</i>")
                 zl.setToolTip("Zoom and field of view here; grey with a chain: kept from an earlier point")
@@ -224,6 +282,17 @@ def path_rows(panel, pid, p, form):
     col = _combo((("unchanged", "keep"), ("grey", "grey"), ("darker", "darken"), ("hidden", "hide")), oc, colour)
     op.valueChanged.connect(lambda v: panel.set(pid, "others", sb.set_others_choice(part().get("others"), opacity=v / 100)))
     form.addRow("Other structures", _row(col, op))
+    hb = _spin(0, 3, float(p.get("pause_before", 0) or 0), lambda v: panel.set(pid, "pause_before", float(v)), step=0.25,
+               suffix=" s", decimals=2, prefix="hold at start ")
+    ha = _spin(0, 3, float(p.get("pause_after", 0) or 0), lambda v: panel.set(pid, "pause_after", float(v)), step=0.25,
+               suffix=" s", decimals=2, prefix="at end ")
+    hb.setToolTip("The camera holds still at the first point for this long before it sets off")
+    ha.setToolTip("The camera holds still at the last point for this long before the next part")
+    calm = QtW.QCheckBox("calm flights in and out"); calm.setChecked(bool(p.get("auto_flight")))
+    calm.setToolTip("The flights into and out of the path take as long as they need to turn gently (less than 2° per frame, "
+                    "up to 4 s). Off: half a second, as before 3.6. Only when the transition is set to automatic.")
+    calm.toggled.connect(lambda on: panel.set(pid, "auto_flight", bool(on) or None))
+    form.addRow("Ends", _row(hb, ha, calm))
     show = QtW.QCheckBox("show the path in the preview"); show.setChecked(bool(p.get("show_path_in_preview", True)))
     show.toggled.connect(lambda v: panel.set(pid, "show_path_in_preview", bool(v))); form.addRow("", show)
 

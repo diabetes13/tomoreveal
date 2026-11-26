@@ -259,6 +259,17 @@ class ProjectManager(QtC.QObject):
         box.addButton("Decide later", QtW.QMessageBox.RejectRole); box.exec()
         return "restore" if box.clickedButton() is b_r else "discard" if box.clickedButton() is b_d else "later"
 
+    def ask_smoother_paths(self, n):
+        """True: use the calmer camera path method for the n older path parts (asked once per project)."""
+        box = QtW.QMessageBox(self.win); box.setWindowTitle("TomoReveal"); box.setIcon(QtW.QMessageBox.Question)
+        box.setText(f"This project has {n} camera path{'s' if n > 1 else ''} made with an older version. Make "
+                    f"{'them' if n > 1 else 'it'} smoother?")
+        box.setInformativeText("Even speed, gentle starts and stops, and calm flights into and out of the path. The movie "
+                               "changes a little; Undo brings back the old path.")
+        yes = box.addButton("Make smoother", QtW.QMessageBox.AcceptRole); box.addButton("Keep as it is", QtW.QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is yes
+
     def ask_relink(self, problems):
         """problems: resolved entries that are missing or changed. Sets r["choice"] (skip / use / located) on each;
         returns False when the user cancels opening."""
@@ -394,6 +405,19 @@ class ProjectManager(QtC.QObject):
         if self._skipped:
             msg += f" Left out: {', '.join(self._skipped)}."
         w.say(msg, "ok")
+        self.offer_smoother_paths()
+
+    def offer_smoother_paths(self):
+        """3.6 (R9): once per project, offer the calmer camera path method for paths made with older versions."""
+        from .gui_paths import make_paths_smoother, old_path_parts
+        w = self.win; n = len(old_path_parts(w.spec)) if w.spec else 0
+        key = "offers/smoother_paths/" + (os.path.abspath(self.path) if self.path else "unsaved").replace("/", "|")
+        if not n or w.settings.value(key, False, type=bool):
+            return
+        w.settings.setValue(key, True)
+        if self.ask_smoother_paths(n):
+            make_paths_smoother(w.spec); w.editor.commit()
+            w.say(f"Made {n} camera path{'s' if n > 1 else ''} smoother. Undo puts {'them' if n > 1 else 'it'} back as before.", "ok")
 
     def load_failed(self):
         self.pending = None; self.refresh()

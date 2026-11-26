@@ -439,6 +439,22 @@ def auto_flight_seconds(a, b):
     return min(FLIGHT_MAX, OTHER_TRANSITION + FLIGHT_PER_DEGREE * math.hypot(d_az, d_t))
 
 
+CALM_DEG_PER_S = 40.0  # 3.6 path flights: with the gentle ease (peak 1.5 x the mean) this keeps a turn under 2° per frame
+CALM_MAX = 4.0
+
+
+def calm_flight_seconds(fr, a, b, diag):
+    """Seconds of the automatic flight into or out of a camera path (3.6, R9): long enough that the view turns less
+    than 2° per frame at 30 fps and the camera does not dash across the volume (at most CALM_MAX)."""
+    from .camera import pose_camera
+    pa, fa, _, _, _ = pose_camera(fr, a); pb, fb, _, _, _ = pose_camera(fr, b)
+    da, db = fa - pa, fb - pb
+    cosang = float(da @ db) / max(1e-9, float(np.linalg.norm(da) * np.linalg.norm(db)))
+    deg = math.degrees(math.acos(min(1.0, max(-1.0, cosang))))
+    move = float(np.linalg.norm(pb - pa)) / max(1e-6, diag)
+    return min(CALM_MAX, OTHER_TRANSITION + max(deg / CALM_DEG_PER_S, 1.5 * move))
+
+
 def with_start_ease(fn, part):
     """A part's own motion starting gently (3.6 "ease_start"): speed 0 at its first frame; unchanged without it."""
     how = (part or {}).get("ease_start", "sudden")
@@ -480,6 +496,7 @@ def new_part(kind, **fields):
         p = _common(type="path", seconds=10, source=dict(kind="follow", items=[]), waypoints=[], camera=dict(PATH_CAMERA),
                     speed="even", ease=True, reverse=False, others=dict(colour="keep", opacity=1.0), show_path_in_preview=True,
                     steadiness=50.0, interp=2)  # 3.5: a steady rail; points: even speed, zoom and field of view per point
+        p["auto_flight"] = True  # 3.6: calm flights into and out of the path
     elif kind in ("card", "title_card", "end_card"):
         title = fields.pop("title", None)
         if kind == "title_card":
@@ -506,7 +523,7 @@ NEW_IN_3_5 = {"focus": ("tilt", "ease_end", "steady_zoom", "wiggle", "each"), "s
               "path": ("steadiness", "interp")}
 # 3.6 (PLAN-3.6 phase 1): overviews keep one size while turning, turn around the middle of what is shown, start gently,
 # and fly longer into a large turn. Missing = the 3.5 behaviour.
-NEW_IN_3_6 = {"overview": ("steady_zoom", "centre", "ease_start", "auto_flight")}
+NEW_IN_3_6 = {"overview": ("steady_zoom", "centre", "ease_start", "auto_flight"), "path": ("auto_flight",)}
 WIGGLE_3_5 = dict(amplitude=5.0, frequency=0.35, shape="circle", smooth=True)  # calmer, and it starts and ends at rest
 
 
@@ -842,6 +859,9 @@ def build_plan(spec, ds):
         frame j (nn frames), for an overlap with its start. Returns the frames of the next part already shown."""
         tr = tr or transition_of({})
         p0, k0, e0, s0 = pose[0], st["k"], st["e"], st["slice"]
+        if calm_out[0] and part.get("transition") is None:  # 3.6: out of a camera path, calmly (R9)
+            seconds = max(seconds, calm_flight_seconds(fr, p0, p1, diag))
+        calm_out[0] = False
         n = round(fps * max(0.0, seconds))
         m1 = round(fps * tr["overlap_prev"]); m2 = min(round(fps * tr["overlap_next"]), n, max(0, nn - 1)) if nxt else 0
         if n <= 0 or tr["kind"] == "cut":  # a hard cut
@@ -876,6 +896,8 @@ def build_plan(spec, ds):
         st.update(target=None, e=0.0); pose[0] = p1
         return m2
 
+    calm_out = [False]  # 3.6: the part before was a camera path with calm flights (the flight out of it is calm too)
+    diag = float(np.linalg.norm(ds.shape))
     shots = spec.get("shots", [])
     for si, part in enumerate(shots):
         if not part.get("on", True):
@@ -1036,6 +1058,8 @@ def build_plan(spec, ds):
             start_fade(part)
             need_structures()
             t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
+            if part.get("auto_flight") and part.get("transition") is None:  # 3.6: calm flight into the path (R9)
+                t = max(t, calm_flight_seconds(fr, pose[0], poses[0], diag))
             m = len(poses)
             skip = go_to(poses[0], st["k"], t, tr=tr, nxt=lambda j, poses=poses: dict(pose=poses[int(round(j))]), nn=m)
             items = [(it.get("structure"), it.get("component")) for it in (part.get("source") or {}).get("items", [])]
@@ -1043,12 +1067,18 @@ def build_plan(spec, ds):
             if (part.get("source") or {}).get("kind", "follow") == "follow" and items and (oc, oo) != ("keep", 1.0):
                 st.update(target=make_target(items), others=dict(colour=oc, opacity=oo), e=1.0)
             st["caption"] = part.get("caption", "")
-            emit_main(m, lambda u, poses=poses, m=m: dict(pose=poses[int(round(u * (m - 1)))]), _mark_label(part), skip, None)
-            pose[0] = poses[-1]
+            label = _mark_label(part); pb = _pause_frames(fps, part.get("pause_before")) if not skip else 0
+            if pb:  # 3.6: hold still at the first point (it was ignored for paths)
+                emit(pb, lambda u, p0=poses[0]: dict(pose=p0), "pause", label); label = None
+            emit_main(m, lambda u, poses=poses, m=m: dict(pose=poses[int(round(u * (m - 1)))]), label, skip, None)
+            pa = _pause_frames(fps, part.get("pause_after"))
+            if pa:
+                emit(pa, lambda u, p1=poses[-1]: dict(pose=p1), "pause")
+            pose[0] = poses[-1]; calm_out[0] = bool(part.get("auto_flight"))
             if st["e"] > 0:
                 st.update(e=0.0, target=None)
         elif typ == "card":
-            ramp.clear(); last.pop("blend", None)
+            ramp.clear(); last.pop("blend", None); calm_out[0] = False
             fi = max(0, round(fps * float(part.get("fade_in", 0.6) or 0))); fo = max(0, round(fps * float(part.get("fade_out", 0.6) or 0)))
             how = part.get("transition_to_next", "fade")
             fo = 0 if how == "cut" else fo

@@ -90,6 +90,9 @@ class Pen:
         self.win = win; self.stroke = None
 
     def tool(self):
+        t = getattr(self.win, "top_edit", None)
+        if t is not None and t.get("draw"):  # 3.6: drawing a camera path from above (gui_topview)
+            return "path"
         bar = getattr(self.win, "drawbar", None)
         return bar.tool() if bar is not None else "select"
 
@@ -108,7 +111,7 @@ class Pen:
         if s is None or f is None:
             return
         s["shift"] = bool(mods & QtC.Qt.ShiftModifier)
-        if s["tool"] == "freehand":
+        if s["tool"] in ("freehand", "path"):
             s["pts"].append(tuple(f)); s["px"].append((pos.x(), pos.y()))
         else:
             s["pts"] = [s["pts"][0], tuple(f)]; s["px"] = [s["px"][0], (pos.x(), pos.y())]
@@ -142,7 +145,7 @@ class Pen:
         if s is None or len(s["pts"]) < 2:
             return
         pts = self.geometry(s); t = s["tool"]
-        if t == "freehand":
+        if t in ("freehand", "path"):
             line = np.asarray(pts, float)
         elif t == "curve":
             line = drawing.bezier(*_curve_points(self.win, pts[0], pts[-1]))
@@ -177,6 +180,9 @@ def finish(win, s):
     """Turn a finished drag into an arrow or shape (one undo step). Returns the new item, or None."""
     from .gui_annotations import _px, add_arrow_at, commit, pick_anchor
     pen = win.pen; t = s["tool"]; pts = pen.geometry(s)
+    if t == "path":
+        from .gui_topview import finish_stroke
+        return finish_stroke(win, s)
     (x0, y0), (x1, y1) = s["px"][0], s["px"][-1]
     if math.hypot(x1 - x0, y1 - y0) < CLICK_PX and t != "freehand":
         if t == "arrow":  # a click with the arrow tool: an arrow pointing there, as "+ Add arrow" does

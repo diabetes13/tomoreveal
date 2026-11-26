@@ -66,3 +66,4 @@ def private_data_dir(tmp_path_factory):
     ProjectManager.ask_save = lambda self, what: "discard"
     ProjectManager.ask_restore = lambda self, when: "later"
     ProjectManager.ask_relink = lambda self, problems: True
+    ProjectManager.ask_smoother_paths = lambda self, n: False

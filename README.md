@@ -166,7 +166,7 @@ The **Structures** tab lists the structures with the names and colours that are 
 - change the name. The legend uses this name.
 - click the **⚙** button to open the structure's settings:
   - **Opacity**: 100 % is solid; lower values let you see through it.
-  - **Threshold** (easymode and Ais structures only): the surface is drawn where the score of the network is above it.
+  - **Threshold** (easymode and Ais structures only): the surface is drawn where the score of the network is above it. It is saved with the movie, and Undo brings it back. A close-up of one object then shows the whole structure, because the objects change with the threshold.
   - **Remove specks smaller than** a number of voxels: leaves out small separate bits of a noisy segmentation.
   - **Smoothing**: how round the surface is; 0 shows the raw voxel steps.
   - **Style**: Normal, Cartoon (flat colour with dark outlines), Dots, or Glossy (shiny, metallic or glass). **Apply to all** gives every structure this style.
@@ -412,10 +412,10 @@ At the end of the **Movie** tab, select the quality, the name and the folder.
 - **File size**: Balanced, Larger (best quality) or Smaller (about a quarter smaller at nearly the same quality). The resolution never changes.
 - **Codec**: H.264 plays everywhere. **H.265** gives about half the file size at the same quality; it plays on recent Macs, iPhones and in VLC, but Windows may need the HEVC extension and some PowerPoint versions cannot play it. Check before a talk.
 - Transparent backgrounds work in Keynote, Final Cut, Premiere and DaVinci Resolve. Check your presentation program before relying on it.
-- **Frame rate** 60 frames/s gives smoother motion (files about 1.6 times larger, rendering twice as long). **Motion blur** blurs fast-moving detail a little, as a camera would; it renders 4 pictures per frame, so it is used for the movie only.
+- **Frame rate** 60 frames/s gives smoother motion (files about 1.6 times larger, rendering twice as long). **Motion blur** blurs fast-moving detail a little, as a camera would (never across a cut); it renders 4 pictures per frame, so it is used for the movie only.
 - The **estimated file sizes** for every quality and ticked format appear under these choices a few seconds after you stop changing settings. They come from a few frames of your movie; "rough" ones are scaled from HD.
 
-Click **Make movie**. The movie is exactly what the timeline shows. A bar shows the progress and the time that remains. When the movie is complete, the real sizes appear next to the estimates; click **Play movie** to open it in your video player, or **Show folder**.
+Click **Make movie**. The movie is exactly what the timeline shows. If you have just changed smoothing, a threshold, a card's text or a camera path, it first waits until they are ready, then starts by itself. Parts that can't be drawn are listed first, with the reason, and you can stop there. A bar shows the progress and the time that remains. When the movie is complete, the real sizes appear next to the estimates; click **Play movie** to open it in your video player, or **Show folder**. If the old movie is still open in a video player, the new one is saved next to it as `name (new).mp4`.
 
 ![The size estimates and the finished movie](docs/images/16-size-table.png)
 
@@ -426,7 +426,7 @@ Save the movies in a folder that is not your data folder.
 - **File > Save** (Ctrl+S) saves a project file (`.tomoreveal`). It records where your data files are, which tomogram and segmentations are switched on, and every setting of the movie. It does not copy the data. **File > Open project** (or dropping the project file on the window) brings everything back. The window title shows the project's name, with a * when there are unsaved changes; opening another project, starting over or quitting asks whether to save first. **File > Revert to saved** takes back every change since the last save.
 - If you move the data and the project together, the project still finds the files. If a file is missing or has changed, one dialog lists them: **Locate...**, **Skip**, or **Use it anyway**. Skipped files are left out; their structures and close-ups come back when you locate the file later.
 - **If TomoReveal crashes**: your tomograms, sessions and segmentation files are only ever read, so a crash cannot damage them. Your settings are autosaved a few seconds after each change and just before a movie starts; when you start TomoReveal again, it offers to **Restore** your work. Restored work counts as not saved until you save it.
-- **If a movie is interrupted** (a crash, a power cut), start TomoReveal, restore or open your project, and press **Make movie** with the same name: it offers to **continue** the movie from where it stopped, as long as the settings are the same. A movie is renamed to its final name only when it is complete, so a half-written file never looks like a finished movie.
+- **If a movie is interrupted** (a crash, a power cut, an error), start TomoReveal if needed, restore or open your project, and press **Make movie** with the same name: it offers to **continue** the movie from where it stopped (in whole steps of 300 frames), as long as the settings, the data and the program are the same. A movie is renamed to its final name only when it is complete, so a half-written file never looks like a finished movie.
 - **Help > Show log folder** opens the folder with error logs, useful when reporting a problem.
 
 ## Dark mode
@@ -541,7 +541,7 @@ tomoreveal extract session.ORSSession --masks -o segmentation_out
 tomoreveal --help
 ~~~
 
-On a Linux computer without a display, add `--headless` to the `movie` command. `--format` takes `mp4`, `mov`, `mov-transparent` and `mov-prores`; `--codec h265` and `--file-size larger|balanced|smaller` set the file size (`--crf` overrides it); `--scale-bar` adds a scale bar (`auto` or a length in nm) and `--voxel-nm` sets the voxel size when the file's header is wrong. `--frames-dir` also saves every frame as a PNG picture.
+On a Linux computer without a display, add `--headless` to the `movie` command. `--format` takes `mp4`, `mov`, `mov-transparent` and `mov-prores`; `--codec h265` and `--file-size larger|balanced|smaller` set the file size (`--crf` overrides it); `--scale-bar` adds a scale bar (`auto` or a length in nm) and `--voxel-nm` sets the voxel size when the file's header is wrong. `--frames-dir` also saves every frame as a PNG picture. Parts that can't be drawn are left out with a note that says why.
 
 `tomoreveal extract` writes the selected Dragonfly segmentation as `labels.mrc` with the names and colours in `classes.json`.
 

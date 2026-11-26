@@ -107,7 +107,7 @@ def test_chunked_movie_joins_and_resumes(studio, tmp_path):
     for i, total, _ in job:
         if i == 350:
             break
-    job.crash()
+    job.close(keep=True)  # as a crash leaves it
     rec = read_partial(out2)
     assert rec["chunks_done"] == 1 and rec["frames_done"] == 300 and not os.path.exists(out2)
     job = tr.movie_frames(studio.ren, spec, out2, poster=False, resume=True)
@@ -117,7 +117,7 @@ def test_chunked_movie_joins_and_resumes(studio, tmp_path):
     assert count_frames(out2) == 700 and read_partial(out2) is None
     # other settings: the old chunks are not used
     job = tr.movie_frames(studio.ren, spec, out2, poster=False)
-    next(job); job.crash()
+    next(job); job.close(keep=True)
     spec["style"]["bg"] = "#ffffff"
     assert tr.movie_frames(studio.ren, spec, out2, poster=False, resume=True).start == 0
 
@@ -395,8 +395,8 @@ def busy_with_playback(app, win):
 
 
 def busy_with_a_threshold(app, win):
-    cid = next(c["id"] for c in win.info["structures"] if c["kind"] == "score")
-    win._thr_changed(cid, 0.95); assert win.thr_timer.isActive()
+    key = next(c["key"] for c in win.info["structures"] if c["kind"] == "score")
+    win._thr_changed(key, 0.95); assert win.thr_timer.isActive()
 
 
 def busy_with_a_glide(app, win):
@@ -448,7 +448,7 @@ def test_new_ends_what_is_running(work, errors, busy):
     assert win.spec is None and not win.playing and not win.editor.history.can_undo
     pause(app, 1000)
     assert not errors, errors
-    assert not win._thr_pending and not win.editor.history.states and win.multi_pick is None and not win.pick_mode
+    assert not win.thr_timer.isActive() and not win.editor.history.states and win.multi_pick is None and not win.pick_mode
     assert win.label_editor is None
     assert win.prev.text().startswith("Drop files")  # nothing was drawn over the empty page
 
@@ -461,10 +461,9 @@ def test_a_threshold_never_reaches_another_structure(work):
     def threshold(p):
         return win.st._source("scores:" + win.st._norm(p))["thr"]
     before = threshold(b)
-    cid = next(c["id"] for c in win.info["structures"] if c["source"] == "scores:" + win.st._norm(a))
-    win._thr_changed(cid, 0.95)
+    win._thr_changed("scores:" + win.st._norm(a) + "#1", 0.95)
     wait(app, win, lambda: win.data.remove("scores:" + win.st._norm(a))); pause(app, 600)
-    assert threshold(b) == before and not win._thr_pending
+    assert threshold(b) == before and not win.thr_timer.isActive()
 
 
 def test_revert_has_a_question_of_its_own(work, asked, tmp_path):
@@ -777,3 +776,152 @@ def test_other_data_never_overwrites_the_kept_project(work, asked, tmp_path):
     remove = "file:" + win.st._norm(other)  # the same grid later on: an ordinary change of data
     wait(app, win, lambda: win.data.remove(remove)); wait(app, win, lambda: win.load(paths=[other]))
     assert "nothing in common" not in win.msg_lbl.text()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# thresholds of score volumes belong to the movie settings (G-41)
+# ---------------------------------------------------------------------------------------------------------------
+def two_objects(d):
+    """A score file with two objects; the first one is gone above 0.6, so the second one's number changes."""
+    from tomoreveal.volumes import load_volume, write_mrc
+    a, vox = load_volume(d["tomogram"]); s = np.full(a.shape, 0.1, np.float32)
+    s[5:15, 10:25, 10:40] = 0.6; s[25:35, 60:80, 60:90] = 0.9; s[27:33, 63:77, 63:87] = 0.97
+    p = os.path.join(os.path.dirname(d["tomogram"]), "demo__two.mrc"); write_mrc(p, s, vox)
+    return p
+
+
+class Score:
+    """The score structure of a window."""
+    def __init__(self, win, p):
+        self.win, self.source = win, "scores:" + win.st._norm(p); self.key = self.source + "#1"
+
+    def set(self, v):
+        self.win._thr_changed(self.key, v)
+
+    @property
+    def wanted(self):
+        return self.win.spec["classes"][self.key]["threshold"]
+
+    @property
+    def now(self):
+        """The threshold: what the settings, the data, its source, the lists and the picture say is the same."""
+        w = self.win; k = w.st.ds.id_of(self.key); thr = w.st.ds.classes[k]["threshold"]
+        info = next(c for c in w.info["structures"] if c["key"] == self.key)
+        assert thr == self.wanted == w.st._source(self.source)["thr"] == info["threshold"]
+        assert info["voxels"] == w.st.ds.classes[k]["voxels"] == int(w.st.ds.mask(k).sum())
+        b = np.array(w.st.ren.mesh_of(k).bounds); box = w.st.ds.bbox[k][::-1]
+        assert np.allclose(b[::2], [s.start for s in box], atol=1.5) and np.allclose(b[1::2], [s.stop - 1 for s in box], atol=1.5)
+        return thr
+
+
+@pytest.fixture
+def scored(work):
+    app, win, d = work; p = two_objects(d)
+    wait(app, win, lambda: win.load(paths=[p], features=[p])); pause(app, 800)
+    return app, win, d, Score(win, p), p
+
+
+def entry_of(data):
+    return next(e for e in data["sources"] if e["kind"] == "scores")
+
+
+def test_undo_of_a_threshold_brings_the_objects_back(scored):
+    app, win, d, sc, p = scored
+    win.editor.insert(tr.storyboard.focus_shot({"class": sc.key, "component": 2}, "one")); pause(app, 800)
+    pid = win.selected_part
+    def target():
+        return next(s for s in win.spec["shots"] if s["id"] == pid)["target"]
+    was = json.loads(json.dumps(target())); box = win.st.ds.target_box({"class": sc.key, "component": 2}); assert sc.now == 0.5
+    for wait_ms in (1300, 50):  # also an undo before the surface has followed
+        sc.set(0.95); assert sc.wanted == 0.95 and target() == {"class": sc.key}
+        pause(app, wait_ms)
+        win.editor.undo(); pause(app, 600)
+        assert sc.now == 0.5 and target() == was
+        assert np.array_equal(win.st.ds.target_box({"class": sc.key, "component": 2}), box)
+        win.editor.redo(); assert sc.now == 0.95 and target() == {"class": sc.key}
+        win.editor.undo(); assert sc.now == 0.5
+    win.editor.reset_history(); sc.set(0.8); pause(app, 1300)  # the very first change
+    assert sc.now == 0.8 and win.editor.history.can_undo
+    win.editor.undo(); assert sc.now == 0.5
+
+
+def test_a_drag_of_the_threshold_is_one_undo_step(scored):
+    app, win, d, sc, p = scored; win.editor.reset_history()
+    for v in (0.55, 0.7, 0.8, 0.95):
+        sc.set(v); pause(app, 60)
+    pause(app, 1500)
+    assert sc.now == 0.95 and len(win.editor.history.states) == 2
+
+
+@pytest.mark.parametrize("settled", [True, False])
+def test_a_threshold_is_saved_and_opened(scored, asked, tmp_path, settled):
+    app, win, d, sc, p = scored; path = str(tmp_path / "p.tomoreveal"); asked[1]["save"] = "discard"
+    sc.set(0.95); pause(app, 1300 if settled else 1)
+    assert win.project.save_to(path); data = pj.read_project(path)
+    assert entry_of(data)["threshold"] == 0.95 == data["spec"]["classes"][sc.key]["threshold"]  # 3.5.0 reads the first one
+    win.project.new(); wait(app, win, lambda: win.project.open(path)); pause(app, 300)
+    assert sc.now == 0.95 and not win.project.dirty
+    assert win.editor.history.states[0]["classes"][sc.key]["threshold"] == 0.95
+
+
+def test_saved_while_a_job_runs_has_the_new_threshold(scored, tmp_path):
+    app, win, d, sc, p = scored; path = str(tmp_path / "p.tomoreveal"); sc.set(0.95)
+    win.data.switch("labels:" + win.st._norm(d["labels"]), False); assert win.busy
+    assert win.project.save_to(path) and entry_of(pj.read_project(path))["threshold"] == 0.95
+    wait(app, win); pause(app, 600); assert sc.now == 0.95
+
+
+def test_opening_takes_the_threshold_of_the_source_entry(scored, asked, tmp_path):
+    """3.5.0 knows no threshold in the settings: it changes the source entry and carries the other one along."""
+    app, win, d, sc, p = scored; path = str(tmp_path / "p.tomoreveal"); asked[1]["save"] = "discard"
+    sc.set(0.8); pause(app, 1300); assert win.project.save_to(path); saved = pj.read_project(path)
+    for enabled in (True, False):
+        data = json.loads(json.dumps(saved)); entry_of(data)["threshold"] = 0.95
+        data["segmentation_enabled"][sc.source] = enabled; pj.write_atomic(path, data)
+        wait(app, win, lambda: win.project.open(path)); pause(app, 300)
+        assert sc.wanted == 0.95 and not win.project.dirty
+        if not enabled:
+            wait(app, win, lambda: win.data.switch(sc.source, True)); pause(app, 300)
+        assert sc.now == 0.95
+    data = json.loads(json.dumps(saved)); del data["spec"]["classes"][sc.key]["threshold"]  # as saved by 3.5.0
+    entry_of(data)["threshold"] = 0.7; pj.write_atomic(path, data)
+    wait(app, win, lambda: win.project.open(path)); pause(app, 300)
+    assert sc.now == 0.7 and not win.project.dirty
+    assert win.editor.history.states[0]["classes"][sc.key]["threshold"] == 0.7
+
+
+def test_a_file_that_comes_back_gets_the_threshold_of_the_movie(scored):
+    app, win, d, sc, p = scored; sc.set(0.95); pause(app, 1300)
+    wait(app, win, lambda: win.data.remove(sc.source)); assert win.st.ds.id_of(sc.key) is None
+    wait(app, win, lambda: win.load(paths=[p], features=[p])); pause(app, 300); assert sc.now == 0.95
+    wait(app, win, lambda: win.data.switch(sc.source, False))
+    wait(app, win, lambda: win.data.switch(sc.source, True)); pause(app, 300); assert sc.now == 0.95
+
+
+def test_a_threshold_waits_while_a_movie_is_made(scored):
+    app, win, d, sc, p = scored; k = win.st.ds.id_of(sc.key)
+    win.gen = iter(())  # a movie is being made: its data must not change under it
+    try:
+        sc.set(0.95); pause(app, 900); assert win.st.ds.classes[k]["threshold"] == 0.5
+        win.editor.undo(); pause(app, 600); assert sc.now == 0.5
+        sc.set(0.8); pause(app, 600)
+    finally:
+        win.gen = None
+    pause(app, 900); assert sc.now == 0.8
+
+
+def test_a_look_preset_never_changes_a_threshold(scored):
+    from tomoreveal.gui_presets import apply_preset, preset_of
+    app, win, d, sc, p = scored; sc.set(0.95); pause(app, 1300); preset = preset_of(win.spec)
+    sc.set(0.8); pause(app, 1300); apply_preset(win.spec, preset); win.build_controls(); pause(app, 800)
+    assert sc.now == 0.8
+
+
+def test_a_kept_movie_is_saved_with_its_threshold(scored, tmp_path):
+    app, win, d, sc, p = scored; path = str(tmp_path / "p.tomoreveal")
+    for key in ("file:" + win.st._norm(d["tomogram"]), "labels:" + win.st._norm(d["labels"])):
+        wait(app, win, lambda: win.data.remove(key))
+    sc.set(0.95); wait(app, win, lambda: win.data.remove(sc.source)); assert win.spec is None and win.project.loaded
+    assert win.project.save_to(path); data = pj.read_project(path)
+    assert entry_of(data)["threshold"] == 0.95 == data["spec"]["classes"][sc.key]["threshold"]
+    wait(app, win, lambda: win.load(paths=[p], features=[p])); pause(app, 300); assert sc.now == 0.95

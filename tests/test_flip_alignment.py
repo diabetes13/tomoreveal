@@ -60,3 +60,52 @@ def test_label_file_on_dragonfly_grid_is_used_as_it_is_with_a_note(setup):
     assert "export_labels.mrc: used as it is" in st.match_note
     st.set_segmentation_enabled(next(x["key"] for x in st.seg_sources if x["kind"] == "dragonfly"), False, log=quiet, make_renderer=False)
     assert "export_labels.mrc: used as it is" in st.match_note  # still there after another update
+
+
+# ---- the tomogram shown is always the one that is loaded (G-32, N-04) ----
+def same(a, b):
+    return a is not None and a.shape == b.shape and np.corrcoef(a.ravel(), b.ravel())[0, 1] > 0.999
+
+
+def test_a_tomogram_file_written_anew_is_read_anew(setup, tmp_path):
+    p = str(tmp_path / "t.mrc"); st = tr.Studio(headless=True); a = setup["tomo"].astype(np.float32); b = np.ascontiguousarray(a[::-1])
+    write_mrc(p, a, 10.0); st.add_files([p], as_tomogram=[p], log=quiet, make_renderer=False)
+    assert same(st.ds.tomo, a)
+    write_mrc(p, b, 10.0); st.add_files([p], as_tomogram=[p], log=quiet, make_renderer=False)  # without removing it first
+    assert same(st.ds.tomo, b)
+    before = st.ds.tomo; lab = str(tmp_path / "lab.mrc"); write_mrc(lab, setup["lab"].astype(np.int8), 10.0)
+    st.add_files([lab], as_labels=[lab], log=quiet, make_renderer=False)
+    assert st.ds.tomo is before  # nothing is put in again without need
+    st.remove_source("file:" + st._norm(p), log=quiet, make_renderer=False)
+    assert st.ds.tomo is None and not st.has_tomogram
+    st.add_files([p], as_tomogram=[p], log=quiet, make_renderer=False); assert same(st.ds.tomo, b)
+
+
+def test_a_file_written_anew_is_lined_up_again(setup, tmp_path):
+    p = str(tmp_path / "t.mrc"); st = tr.Studio(headless=True); tomo = setup["tomo"].astype(np.float32)
+    write_mrc(p, np.ascontiguousarray(tomo[:, ::-1]), setup["vox"])
+    st.add_files([setup["ses"], p], as_tomogram=[p], log=quiet, make_renderer=False)
+    assert "flipped in Y" in st.match_note and same(st.ds.tomo, tomo)
+    st.remove_source("file:" + st._norm(p), log=quiet, make_renderer=False)
+    write_mrc(p, tomo * 2 + 5, setup["vox"])  # not flipped this time
+    st.add_files([p], as_tomogram=[p], log=quiet, make_renderer=False)
+    assert "same grid" in st.match_note and abs(float(st.ds.tomo.mean()) - float(tomo.mean() * 2 + 5)) < 0.01
+
+
+def test_a_session_added_after_the_tomogram_shows_the_same_as_both_at_once(setup):
+    both = tr.Studio(headless=True); both.add_files([setup["mine"], setup["ses"]], log=quiet, make_renderer=False)
+    st = tr.Studio(headless=True)
+    st.add_files([setup["mine"]], as_tomogram=[setup["mine"]], log=quiet, make_renderer=False); raw = st.ds.tomo.copy()
+    st.add_files([setup["ses"]], log=quiet, make_renderer=False)
+    assert st.match_note == both.match_note and "flipped in Y" in st.match_note
+    assert np.array_equal(st.ds.tomo, both.ds.tomo) and same(st.ds.tomo, setup["tomo"]) and st.ds.vox == both.ds.vox
+    st.remove_source("session:" + st._norm(setup["ses"]), log=quiet, make_renderer=False)  # the file as it is again
+    assert np.array_equal(st.ds.tomo, raw)
+
+
+def test_flipping_keeps_the_tomogram_and_the_segmentation_together(setup):
+    st = tr.Studio(headless=True); st.add_files([setup["mine"]], as_tomogram=[setup["mine"]], log=quiet, make_renderer=False)
+    st.set_flip(("x",), log=quiet, make_renderer=False)
+    st.add_files([setup["ses"]], log=quiet, make_renderer=False)
+    assert same(st.ds.tomo, setup["tomo"][:, :, ::-1])
+    st.set_flip((), log=quiet, make_renderer=False); assert same(st.ds.tomo, setup["tomo"])

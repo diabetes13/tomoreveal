@@ -1,9 +1,22 @@
 """Reading volumes, recognising what a file is, surfaces, and the loaded dataset."""
+import copy
+import hashlib
+import itertools
+import json
 import os
+import threading
 
 import numpy as np
 
 from .common import PALETTE, UserError, label_dtype, read_json
+
+_VERSIONS = itertools.count(1)
+
+
+def new_version():
+    """A number for voxels that have just been read or placed. It never comes again, also not after a failed load, so what
+    was made from other voxels can always be told apart."""
+    return next(_VERSIONS)
 
 
 def clean_labels(a, path):
@@ -178,16 +191,44 @@ class Dataset:
     def __init__(self, smooth=15, step=1):
         self.tomo = None; self.vox = None; self._shape = None
         self._tomo_vox = self._seg_vox = None  # each source's own voxel size: the tomogram's wins
-        self.tomo_name = self.seg_name = ""
+        self.tomo_name = self.seg_name = ""; self.tomo_version = None
+        self.flip = ()  # axes of the volume shown flipped (3.5): a subset of "x", "y", "z"
         self.classes, self.bbox, self.meshes, self.scores, self._comp, self._lev = {}, {}, {}, {}, {}, {}
         self._labels = {}      # structure id -> (label array of its source, label value)
-        self._mesh_cache = {}  # (structure key, threshold, min object size, smoothing, soften) -> surface, kept while sources change
-        import threading
-        self._mesh_lock = threading.Lock()  # surfaces are also made in a worker thread of the window
+        self._mesh_cache = {}  # _cache_key() -> surface, kept while sources change
+        self._mesh_lock = threading.Lock()  # surfaces and paths are also made in worker threads of the window: frozen()
         self.smooth, self.step = smooth, step
         self.params = {}       # structure key -> {"min_object_voxels": N, "smoothing": iterations, "soften": 0..3} (the user's choices)
         self.path_cache = {}   # camera paths along structures (paths.centre_line), computed once per change
         self.path_async = False  # the window computes missing paths in a worker thread instead of in build_plan
+        self._fp = None        # (versions and flip, fingerprint()) of the voxels it was worked out for
+
+    def frozen(self):
+        """This dataset as it is now, for work that may last while the data changes (worker threads): keys, voxels, boxes and
+        grid that belong together. Nothing is copied, because these dicts are never changed but replaced, all of them at once
+        under _mesh_lock. Its caches of objects and paths are those of now, so a late result never reaches newer data."""
+        with self._mesh_lock:
+            return copy.copy(self)
+
+    FINGERPRINT_VOXELS = 1_000_000
+
+    def fingerprint(self):
+        """What a movie shows of the data, to tell whether an interrupted movie can be continued (encode.settings_hash):
+        the grid, the voxel size, the voxel count of each label structure, and about a million voxels of the tomogram and of
+        each segmentation, taken as arr[::s, ::s, ::s] (nothing else is copied). The same voxels loaded again give the same
+        answer. Thresholds and the flip are in the settings. Kept until the voxels or the flip change."""
+        key = (self.tomo_version, tuple(sorted({str(c["data"]) for c in self.classes.values()})), self.flip)
+        if self._fp is not None and self._fp[0] == key:
+            return self._fp[1]
+        counts = {c["key"]: c["voxels"] for c in self.classes.values() if c["kind"] == "label"}
+        h = hashlib.sha256(json.dumps(dict(shape=self.shape, vox=self.vox, counts=counts), sort_keys=True, default=str).encode())
+        arrays = {id(a): a for a in [lab for lab, _ in self._labels.values()] + [f["arr"] for f in self.scores.values()]}
+        for a in ([self.tomo] if self.tomo is not None else []) + list(arrays.values()):
+            s = max(1, round((a.size / self.FINGERPRINT_VOXELS) ** (1 / 3)))
+            sample = np.ascontiguousarray(a[::s, ::s, ::s])
+            h.update(f"{sample.dtype.str}{sample.shape}".encode()); h.update(sample.tobytes())
+        self._fp = (key, h.hexdigest()[:16])
+        return self._fp[1]
 
     @property
     def shape(self):
@@ -196,6 +237,7 @@ class Dataset:
 
     def set_tomogram(self, arr, vox, name):
         self._tomo_vox = vox if arr is not None else None; self.vox = self._tomo_vox or self._seg_vox
+        self.tomo_version = new_version() if arr is not None else None
         if arr is None:
             self.tomo = None; self._lev = {}; self.tomo_name = ""
             return
@@ -239,19 +281,20 @@ class Dataset:
         """sources: list of dicts in display order, each either
              dict(kind="labels", key, title, arr (int label volume on the grid), classes {label: {name, color}}), or
              dict(kind="scores", key, title, arr, scale, thr, name, color) for one easymode / Ais score volume.
-        A label source may carry "_stats" = label_stats(arr); it is computed and stored there when missing."""
-        self._comp, self.meshes, self.classes, self.bbox, self.scores, self._labels = {}, {}, {}, {}, {}, {}
-        self.path_cache = {}
-        self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
-        self.seg_name = ", ".join(s.get("title", "") for s in sources); self._seg_vox = vox; self.vox = self._tomo_vox or vox
+        A label source may carry "_stats" = label_stats(arr); it is computed and stored there when missing. "version" names
+        the voxels in arr (new_version()); together with the flip it is the "data" of each structure."""
+        structs, bbox, scores, labels = {}, {}, {}, {}
         k = 0
         for src in sources:
+            if src.get("version") is None:
+                src["version"] = new_version()
+            data = (src["version"], self.flip)
             if src["kind"] == "scores":
-                k += 1; self.scores[k] = src
-                self.classes[k] = dict(key=f"{src['key']}#1", name=src["name"], color=src.get("color") or PALETTE[(k - 1) % len(PALETTE)],
-                                       kind="score", threshold=float(src["thr"]), background=False, hidden=False, named=True, voxels=0, label=1,
-                                       source=src["key"], source_title=src.get("title", ""))
-                self._rescore(k)
+                k += 1; scores[k] = dict(src)  # its own: the source's arr may be replaced while a worker reads this one
+                voxels, bbox[k] = self._score_box(src, src["thr"])
+                structs[k] = dict(key=f"{src['key']}#1", name=src["name"], color=src.get("color") or PALETTE[(k - 1) % len(PALETTE)],
+                                  kind="score", threshold=float(src["thr"]), background=False, hidden=False, named=True,
+                                  voxels=voxels, label=1, source=src["key"], source_title=src.get("title", ""), data=data)
                 continue
             lab = src["arr"]
             if not np.issubdtype(lab.dtype, np.integer):
@@ -265,15 +308,20 @@ class Dataset:
                 k += 1
                 c = dict(dict(name=f"class {v}", color=PALETTE[(v - 1) % len(PALETTE)]), **(classes.get(v) or {}))
                 c.update(key=f"{src['key']}#{v}", voxels=int(counts[v]), kind="label", label=v, source=src["key"],
-                         source_title=src.get("title", ""))
+                         source_title=src.get("title", ""), data=data)
                 c["background"] = bool((not keep_background) and (c["name"].lower() in ("background", "bg") or counts[v] > 0.5 * lab.size))
                 c["hidden"] = c.get("visible") is False and not c["background"]  # switched off in Dragonfly
                 c["named"] = c.get("named", True)
-                self.classes[k] = c; self.bbox[k] = boxes[v - 1]; self._labels[k] = (lab, v)
-        for k, c in self.classes.items():  # surfaces made earlier for the same structure are reused
-            m = self._mesh_cache.get(self._cache_key(k))
-            if m is not None:
-                self.meshes[k] = m
+                structs[k] = c; bbox[k] = boxes[v - 1]; labels[k] = (lab, v)
+        with self._mesh_lock:
+            self.classes, self.bbox, self.scores, self._labels = structs, bbox, scores, labels
+            self._shape = tuple(shape) if shape is not None else (tuple(sources[0]["arr"].shape) if sources else None)
+            self.seg_name = ", ".join(s.get("title", "") for s in sources); self._seg_vox = vox; self.vox = self._tomo_vox or vox
+            self._comp, self.path_cache, self.meshes = {}, {}, {}
+            for k in structs:  # surfaces made earlier for the same structure are reused
+                m = self._mesh_cache.get(self._cache_key(k))
+                if m is not None:
+                    self.meshes[k] = m
 
     def param(self, k, name):
         """A structure's surface setting: minimum object size (voxels), smoothing iterations, or soften (0..3)."""
@@ -283,45 +331,57 @@ class Dataset:
         return int(v or 0)
 
     def _cache_key(self, k, soften=None, params=None):
-        """The settings a surface is made with. soften: another level than the structure's own (a part's own, 3.5);
-        params: {"min_object_voxels", "smoothing", "soften"} wanted instead of the current ones."""
+        """The data and the settings a surface is made with. soften: another level than the structure's own (a part's own,
+        3.5); params: {"min_object_voxels", "smoothing", "soften"} wanted instead of the current ones."""
         c = self.classes[k]; p = params or {}
         mov = int(p["min_object_voxels"]) if "min_object_voxels" in p else self.param(k, "min_object_voxels")
         sm = int(p["smoothing"]) if "smoothing" in p else self.param(k, "smoothing")
         so = int(soften) if soften is not None else int(p["soften"]) if "soften" in p else self.param(k, "soften")
-        return (c["key"], c.get("threshold"), mov, sm, so)
+        return (c["key"], c["data"], c.get("threshold"), mov, sm, so)
 
-    MESH_CACHE = 48  # surfaces kept for settings not shown now (going back to one is then instant)
+    MESH_CACHE = 48  # surfaces kept (with many structures: all four levels of each), so going back to one is instant
 
-    def make_surface(self, k, soften=None, params=None):
-        """The surface of structure k with its settings (or this soften level, or these settings), from the cache or
-        made now. Does not change which surface is shown, so it may run in a worker thread while the window draws."""
-        ck = self._cache_key(k, soften, params)
+    def make_surface(self, ref, soften=None, params=None):
+        """The surface of a structure (its number now, or its key) with its settings (or this soften level, or these
+        settings), from the cache or made now; None for a structure that is not loaded. Does not change which surface is
+        shown, so it may run in a worker thread while the window draws or the data changes; a worker gives the key."""
+        ds = self.frozen(); k = ds.id_of(ref)
+        if k is None:
+            return None
+        ck = ds._cache_key(k, soften, params)
         with self._mesh_lock:
             if ck in self._mesh_cache:
                 m = self._mesh_cache[ck] = self._mesh_cache.pop(ck)  # recently used
                 return m
-        sl = self.bbox.get(k)
+        sl = ds.bbox.get(k)
         if sl is None:
             return None
-        mask = self.kept_mask(k, sl, ck[2])
-        m = surface(mask, [s.start for s in sl], ck[3], self.step, ck[4], self.shape) if mask.any() else None
+        *_, specks, smooth, soft = ck
+        mask = ds.kept_mask(k, sl, specks)
+        m = surface(mask, [s.start for s in sl], smooth, self.step, soft, ds._shape) if mask.any() else None
         with self._mesh_lock:
             self._mesh_cache[ck] = m
-            if len(self._mesh_cache) > self.MESH_CACHE:
-                shown = {id(x) for x in list(self.meshes.values())}
-                for old in [c for c, v in self._mesh_cache.items() if id(v) not in shown][:len(self._mesh_cache) - self.MESH_CACHE]:
+            most = max(self.MESH_CACHE, 4 * len(self.classes))
+            if len(self._mesh_cache) > most:
+                kept = {id(x) for x in list(self.meshes.values())}
+                for old in [c for c, v in self._mesh_cache.items() if id(v) not in kept][:len(self._mesh_cache) - most]:
                     del self._mesh_cache[old]
         return m
 
     def surface_ready(self, k, soften=None, params=None):
         return self._cache_key(k, soften, params) in self._mesh_cache
 
+    def needs_surface(self, k, params=None):
+        """True when structure k is drawn and its surface (with these settings) has still to be made."""
+        return self.bbox.get(k) is not None and (k in self.meshes or not self.classes[k]["background"]) and \
+            not self.surface_ready(k, params=params)
+
     def set_params(self, k, **kw):
         """Change a structure's minimum object size and / or smoothing; rebuilds its surface. Returns True if it changed."""
         key = self.classes[k]["key"]; before = self._cache_key(k)
         cur = dict(self.params.get(key) or {}); cur.update({n: v for n, v in kw.items() if n in ("min_object_voxels", "smoothing", "soften")})
-        self.params[key] = cur; self.path_cache = {}
+        with self._mesh_lock:
+            self.params = {**self.params, key: cur}; self.path_cache = {}
         if self._cache_key(k) == before:
             return False
         had = self.meshes.pop(k, None) is not None
@@ -345,17 +405,21 @@ class Dataset:
             m = ~small[lbl]
         return m
 
-    def _rescore(self, k):
+    @staticmethod
+    def _score_box(src, thr):
+        """(Number of voxels, box or None) of a score volume at this threshold."""
         from scipy import ndimage
-        m = self.mask(k); n = int(m.sum())
-        self.classes[k]["voxels"] = n
-        self.bbox[k] = ndimage.find_objects(m.astype(np.uint8))[0] if n else None
-        self._comp.pop(k, None); self.meshes.pop(k, None); self.path_cache = {}
+        m = src["arr"] >= thr * src["scale"]; n = int(m.sum())
+        return n, ndimage.find_objects(m.astype(np.uint8))[0] if n else None
 
     def set_threshold(self, k, thr):
         thr = min(0.99, max(0.01, float(thr)))
-        self.scores[k]["thr"] = thr; self.classes[k]["threshold"] = thr
-        self._rescore(k); self._mesh(k)
+        voxels, box = self._score_box(self.scores[k], thr)
+        with self._mesh_lock:
+            self.scores = {**self.scores, k: dict(self.scores[k], thr=thr)}; self.bbox = {**self.bbox, k: box}
+            self.classes = {**self.classes, k: dict(self.classes[k], threshold=thr, voxels=voxels)}
+            self._comp = {j: v for j, v in self._comp.items() if j != k}; self.path_cache = {}
+        self.meshes.pop(k, None); self._mesh(k)
 
     def _mesh(self, k, force=False):
         """Build the surface of structure k; background structures only when asked for (force)."""
@@ -374,8 +438,9 @@ class Dataset:
 
     def forget(self, source_key):
         """Drop cached surfaces of a source that was removed."""
-        for ck in [ck for ck in self._mesh_cache if ck[0].rsplit("#", 1)[0] == source_key]:
-            del self._mesh_cache[ck]
+        with self._mesh_lock:
+            for ck in [ck for ck in self._mesh_cache if ck[0].rsplit("#", 1)[0] == source_key]:
+                del self._mesh_cache[ck]
 
     def levels(self, p_lo, p_hi):
         if self.tomo is None:
@@ -389,11 +454,12 @@ class Dataset:
 
     # connected objects inside a structure, for click-to-focus
     def components(self, k):
-        if k not in self._comp:
+        ds = self.frozen()
+        if k not in ds._comp:
             from scipy import ndimage
-            lbl, _ = ndimage.label(self.mask(k, self.bbox[k]), structure=np.ones((3, 3, 3), bool))
-            self._comp[k] = (lbl, ndimage.find_objects(lbl), np.bincount(lbl.ravel()))
-        return self._comp[k]
+            lbl, _ = ndimage.label(ds.mask(k, ds.bbox[k]), structure=np.ones((3, 3, 3), bool))
+            ds._comp[k] = (lbl, ndimage.find_objects(lbl), np.bincount(lbl.ravel()))
+        return ds._comp[k]
 
     def pick_component(self, k, xyz, r=4):
         lbl, _, _ = self.components(k); sl = self.bbox[k]
@@ -416,7 +482,7 @@ class Dataset:
     def comp_mesh(self, k, cid, soften=None):
         lbl, objs, _ = self.components(k); o = objs[cid - 1]; sl = self._comp_slices(k, cid)
         return surface(lbl[o] == cid, [s.start for s in sl], self.param(k, "smoothing"), 1,
-                       self.param(k, "soften") if soften is None else int(soften), self.shape)
+                       self.param(k, "soften") if soften is None else int(soften), self._shape)
 
     def targets_box(self, tgt, pad=True):
         """The box containing the boxes of every item of a close-up target (one or several objects / structures)."""

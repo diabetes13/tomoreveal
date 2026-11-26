@@ -3,7 +3,7 @@ Parts are always found by their id, never by their position in the list."""
 import copy
 
 from .common import UserError
-from .storyboard import build_plan, main_range, merge_settings, migrate_spec, new_id
+from .storyboard import build_plan, main_range, make_target, merge_settings, migrate_spec, new_id, target_items
 
 
 def _index(spec, part_id):
@@ -70,6 +70,21 @@ def split_part(spec, ds, part_id, frame):
             second["structures"] = "keep"
     spec["shots"][i:i + 1] = [first, second]
     return spec
+
+
+def whole_structure(spec, key):
+    """Close-ups of single objects of this structure show all of it (its object numbers are about to change). Returns how
+    many there were."""
+    n = 0
+    for p in spec["shots"]:
+        tgt = p.get("target") or {}
+        if p["type"] == "focus" and tgt.get("class") == key and tgt.get("component") is not None:
+            p["target"] = {"class": key}; n += 1
+        elif p["type"] == "focus" and "items" in tgt:
+            items = target_items(tgt)
+            if any(k == key and c is not None for k, c in items):
+                p["target"] = make_target(list(dict.fromkeys((k, None if k == key else c) for k, c in items))); n += 1
+    return n
 
 
 class History:

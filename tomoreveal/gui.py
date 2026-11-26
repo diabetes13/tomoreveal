@@ -11,9 +11,11 @@ import numpy as np
 
 from .common import UserError, VIEWS
 from .demo import make_demo
-from .movie import movie_frames, poster_path
+from .edits import whole_structure
+from .movie import poster_path
+from .paths import missing_paths, work_out
 from .render import software_rendering_available
-from .storyboard import flip_spec, focus_shot, merge_settings, shot_tomogram
+from .storyboard import clip_box, flip_spec, focus_shot, merge_settings, shot_tomogram
 from .studio import Studio
 from .webapp import cmd_app
 
@@ -55,6 +57,7 @@ def build_gui(args):
     from .look import look_settings, AA_MOVIE, ensure as ensure_look
     from .gui_look import LookControls, style_rows
     from .gui_export import ExportControls
+    from .gui_render import movie_steps, start_surfaces, surfaces_wanted
     from .encode import output_paths
     from .gui_widgets import Preview, RangeSlider, TipFilter, Worker, fmt_time, to_qimage
     QUALITY = [("Draft 960 x 540 (fast)", (960, 540)), ("HD 1920 x 1080", (1920, 1080)), ("4K 3840 x 2160 (slow)", (3840, 2160)),
@@ -74,14 +77,15 @@ def build_gui(args):
             self.region_pick = None    # (part id or None for a new close-up, insert after) while drawing a frame
             self.path_pick = None      # part id while clicking the object a camera path follows
             self._path_worker = None
-            self.busy = False; self.gen = None; self.pick_mode = False; self.worker = None; self._drag0 = None
-            self._thr_pending = {}; self.vox_lbl = {}; self.last_movie = None
+            self.busy = False; self.gen = self.job = None; self.pick_mode = False; self.worker = None; self._drag0 = None
+            self._thr_reset = 0; self.last_movie = None
             self._struct_open = set()  # structures whose settings are open in the Structures tab
             self._param_pending = {}; self._soften_cb = {}; self._surf_worker = None
+            self._surf_failed = {}  # structure key -> (the settings (a cache key) whose surface could not be made, why)
             self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
             self.prev_timer = QtC.QTimer(self); self.prev_timer.setSingleShot(True); self.prev_timer.timeout.connect(self.do_preview)
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
-            self.thr_timer.timeout.connect(self.apply_thresholds)
+            self.thr_timer.timeout.connect(self._thr_settled)
             self.param_timer = QtC.QTimer(self); self.param_timer.setSingleShot(True); self.param_timer.setInterval(500)
             self.param_timer.timeout.connect(self.apply_params)
             self.render_timer = QtC.QTimer(self); self.render_timer.setInterval(0); self.render_timer.timeout.connect(self._render_step)
@@ -541,14 +545,13 @@ def build_gui(args):
             elif paths:
                 e.acceptProposedAction(); self.load(paths=paths)
 
-        def run_job(self, fn, msg="Reading the files and building 3D surfaces. This can take a minute for large tomograms ..."):
-            """Run a Studio call that returns info() in the Worker thread; the renderer is made afterwards on this thread."""
+        def run_job(self, fn, msg="Reading the files and building 3D surfaces. This can take a minute for large tomograms ...", then=None):
+            """Run a Studio call that returns info() in the Worker thread; the renderer is made afterwards on this thread.
+            then: what has to change together with the data, done here first, only if the job succeeds; returns a problem or ""."""
             if self.busy or self.gen is not None:
                 return
-            if self._thr_pending:  # now, while the structures still have these numbers
-                self.thr_timer.stop(); self.apply_thresholds()
             self.editor.record_pending(); self.project.hold(); self.set_busy(True, msg)
-            self.worker = Worker(fn)
+            self.worker = Worker(fn); self._then = then
             self.worker.log.connect(lambda m: (self.say(m), self.data.log(m)))
             self.worker.done.connect(self._loaded); self.worker.failed.connect(self._load_failed)
             self.worker.start()
@@ -586,64 +589,60 @@ def build_gui(args):
             return out
 
         def flip_volume(self, axes):
-            """Show the volume flipped (Data tab, 3.5). The settings' points move along; the objects in focus are found
-            again after the flip by one of their voxels (their numbers change when the volume is flipped)."""
+            """Show the volume flipped (Data tab, 3.5). The settings change when the data have."""
             axes = tuple(a for a in "xyz" if a in axes)
             if self.busy or self.gen is not None or not self.spec or not self.info:
                 self.data.refresh(self.st.info()); return
             toggled = set(self.st.flip) ^ set(axes)
             if not toggled:
                 return
-            ds = self.st.ds; nz, ny, nx = ds.shape; n = {"x": nx, "y": ny, "z": nz}; fix = []
-            for ref, field in self._object_refs():
-                k = ds.id_of(ref.get(field))
-                try:
-                    sl = ds._comp_slices(k, int(ref["component"])); lbl, objs, _ = ds.components(k)
-                    o = objs[int(ref["component"]) - 1]; vox = np.argwhere(lbl[o] == int(ref["component"]))
-                    z, y, x = vox[len(vox) // 2] + np.array([s.start for s in sl])
-                except (KeyError, IndexError, TypeError, ValueError):
-                    continue
-                p = {"x": float(x), "y": float(y), "z": float(z)}
-                for a in toggled:
-                    p[a] = n[a] - 1 - p[a]
-                fix.append((ref, field, (p["x"], p["y"], p["z"])))
-            flip_spec(self.spec, ds.shape, toggled)
-            if axes:
-                self.spec["flip"] = list(axes)
-            else:
-                self.spec.pop("flip", None)
-            self._flip_fix = fix
-            self.run_job(lambda log: self.st.set_flip(axes, log=log, make_renderer=False), "Flipping the volume and building 3D surfaces ...")
+            before = self.st.ds.frozen()
+            self.run_job(lambda log: self.st.set_flip(axes, log=log, make_renderer=False),
+                         "Flipping the volume and building 3D surfaces ...", lambda: self._flip_settings(before, toggled, axes))
 
-        def _refind_objects(self):
-            """After a flip: each object in focus by the voxel it had, now flipped."""
-            fix, self._flip_fix = getattr(self, "_flip_fix", None), None
-            if not fix:
-                return
-            ds = self.st.ds; lost = 0
-            for ref, field, xyz in fix:
-                k = ds.id_of(ref.get(field)); cid = None
+        def _flip_settings(self, before, toggled, axes):
+            """After a flip: the settings' points move along, and the objects in focus are found again by one of their
+            voxels, as their numbers change. before: the dataset before the flip. Returns a message if some are lost."""
+            ds, n, lost = self.st.ds, dict(zip("zyx", before.shape)), 0
+            for ref, field in self._object_refs():
+                k, cid = before.id_of(ref.get(field)), ref.get("component")
                 try:
-                    cid = ds.pick_component(k, xyz, r=2) if k is not None else None
+                    sl = before._comp_slices(k, int(cid)); lbl, objs, _ = before.components(k)
+                    vox = np.argwhere(lbl[objs[int(cid) - 1]] == int(cid))
+                    p = dict(zip("zyx", vox[len(vox) // 2] + np.array([s.start for s in sl])))
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue  # it was not there before either
+                xyz = [float(n[a] - 1 - p[a] if a in toggled else p[a]) for a in "xyz"]
+                try:
+                    cid = ds.pick_component(ds.id_of(ref.get(field)), xyz, r=2)
                 except (KeyError, IndexError, TypeError, ValueError):
                     cid = None
                 if cid:
                     ref["component"] = int(cid)
                 else:
                     lost += 1
-            if lost:
-                self.say(f"{lost} object{'s' if lost != 1 else ''} in focus could not be found again after the flip; "
-                         "choose them again in their close-up.", "err")
+            flip_spec(self.spec, before.shape, toggled); self.spec.pop("flip", None)
+            if axes:
+                self.spec["flip"] = list(axes)
+            return f"{lost} object{'s' if lost != 1 else ''} in focus could not be found again after the flip; " \
+                   "choose them again in their close-up." if lost else ""
 
         def _loaded(self, info):
+            then, self._then = self._then, None
+            try:
+                problem = then() if then is not None else ""
+            except Exception as exc:  # the data are there all the same
+                traceback.print_exc(); problem = f"{type(exc).__name__}: {exc}"
             try:
                 self.st.ensure_renderer()
             except Exception as exc:
                 traceback.print_exc(); self.set_busy(False); self.say(f"Could not start the 3D renderer: {exc}", "err"); return
             self.set_busy(False); self.apply_info(info)
+            if problem:
+                self.say(problem, "err")
 
         def _load_failed(self, msg):
-            self.set_busy(False); msg = self.project.load_failed() + msg
+            self._then = None; self.set_busy(False); msg = self.project.load_failed() + msg
             try:
                 self.st.ensure_renderer()
                 self.apply_info(self.st.info(), keep_message=True)
@@ -669,18 +668,18 @@ def build_gui(args):
                 le.hide(); le.deleteLater()
             for t in (self.thr_timer, self.param_timer, self.prev_timer, self.editor.hist_timer, self.nav.anim):
                 t.stop()
-            self._thr_pending = {}; self._param_pending = {}; self.nav._anim = None
+            self._thr_reset = 0; self._param_pending = {}; self.nav._anim = None
             self.st.reset(); self.info = self.spec = None
             self.editor.reset_history(); self.data.refresh(self.st.info()); self.project.forget(); self.show_empty()
 
         def apply_info(self, info, keep_message=False):
             prev = self.info
             self.info = info; self.data.refresh(info)
+            self.st.ds.path_async = True  # the window plans without waiting for paths (it may be a new dataset)
             if not info.get("can_show"):
                 if not keep_message:
                     self.say(info.get("message", ""))
-                self._thr_pending = {}; self.thr_timer.stop()  # for structures that are not there now
-                self.spec = None; self.project.nothing_shown(); self.show_empty(); return
+                self.thr_timer.stop(); self.spec = None; self.project.nothing_shown(); self.show_empty(); return
             kept, note = self.project.take_kept(info)
             if kept is not None:
                 self.spec, prev = kept.spec, kept.info
@@ -699,12 +698,11 @@ def build_gui(args):
                 self.name_le.setText(re.sub(r"\.[^.]+$", "", info.get("tomo_name") or "tomogram")[:60] + "_reveal")
             for i in (self.TAB_STRUCT, self.TAB_EXPLORE, self.TAB_MOVIE, self.TAB_LOOK, self.TAB_PRESETS):
                 self.tabs.setTabVisible(i, True)
-            self.explore.set_data(info)
+            self._sync_thresholds(); self.explore.set_data(info)
             self.timeline.setVisible(True); self.go_btn.setEnabled(True); self.toolbar.setVisible(True)
             self.build_controls()
             if not keep_message:
                 self.say(note or "Loaded. Change anything on the left; the preview follows.", "ok")
-            self._refind_objects()
             if same and prev.get("dims") == info.get("dims") and prev.get("flip") == info.get("flip"):
                 self.editor.history.merge(info["spec"]); self.editor.refresh_buttons()
             else:  # older steps belong to another movie, another grid, or name objects whose numbers have changed
@@ -726,8 +724,8 @@ def build_gui(args):
             f.addRow("Opacity", slider(0, 100, 100 * float(sc.get("opacity", 1.0)), lambda x: f"{x} %",
                                        lambda x, k=k: self._class_set(k, "opacity", x / 100)))
             if c["kind"] == "score":
-                f.addRow("Threshold", slider(1, 19, (c["threshold"] or 0.5) * 20, lambda x: f"{x / 20:.2f}",
-                                             lambda x, cid=c["id"]: self._thr_changed(cid, x / 20)))
+                f.addRow("Threshold", slider(1, 19, (sc.get("threshold") or c["threshold"] or 0.5) * 20, lambda x: f"{x / 20:.2f}",
+                                             lambda x, k=k: self._thr_changed(k, x / 20)))
             sp = QtW.QSpinBox(); sp.setRange(0, 10_000_000); sp.setSingleStep(10); sp.setSuffix(" voxels"); sp.setSpecialValueText("keep all")
             sp.setValue(int(sc.get("min_object_voxels", 0) or 0))
             sp.setToolTip("Leave out separate bits smaller than this. Helps with noisy segmentations.")
@@ -754,8 +752,8 @@ def build_gui(args):
         def _param_changed(self, key, name, v):
             self.spec["classes"][key][name] = v; self._param_pending[key] = True; self.param_timer.start(); self.schedule()
 
-        def _wanted_params(self, c):
-            sc = self.spec["classes"].get(c["key"], {})
+        def _wanted_params(self, c, spec):
+            sc = spec["classes"].get(c["key"], {})
             return dict(min_object_voxels=int(sc.get("min_object_voxels", 0) or 0),
                         smoothing=int(sc["smoothing"]) if sc.get("smoothing") is not None else self.st.ds.smooth,
                         soften=int(sc.get("soften", 0) or 0))
@@ -767,31 +765,21 @@ def build_gui(args):
                 self.param_timer.start(); return
             if not self.spec or not self.info:
                 return
-            ds = self.st.ds; todo = []
-            for c in self.info.get("structures", []):
-                k = c["id"]; want = self._wanted_params(c)
-                if k in ds.classes and any(ds.param(k, n) != v for n, v in want.items()) and not ds.surface_ready(k, params=want) \
-                        and (k in ds.meshes or not ds.classes[k]["background"]):
-                    todo.append((k, want))
+            todo = [t for t in surfaces_wanted(self, self.spec) if self._surf_failed.get(t[0], (None,))[0] != t[2]]
             if not todo:
                 return self._params_ready()
-            self.say("Making the new surfaces ..."); self._param_pending = {}
-
-            def work(log):
-                for k, want in todo:
-                    ds.make_surface(k, params=want)
-                return True
-            self._surf_worker = Worker(work)
-            self._surf_worker.done.connect(lambda _r: (self.say(""), self._params_ready()))
-            self._surf_worker.failed.connect(lambda msg: (self.say(msg, "err"), self._params_ready()))
-            self._surf_worker.start()
+            self._param_pending = {}; start_surfaces(self, todo)
 
         def _params_ready(self):
-            """Swap in the surfaces of the current settings (made already: quick) and bring the controls in line."""
             if self.busy or self.gen is not None:
                 self.param_timer.start(); return
+            if self.spec is not None:
+                self.swap_surfaces(self.spec)
+
+        def swap_surfaces(self, spec):
+            """Swap in the surfaces of these settings (made already: quick) and bring the controls in line."""
             self._param_pending = {}
-            if self._sync_params():
+            if self._sync_params(ready_only=True, spec=spec):
                 self.sync_surface_controls()
             if hasattr(self, "look35"):
                 self.look35.sync()
@@ -808,24 +796,26 @@ def build_gui(args):
                 except RuntimeError:  # rebuilt meanwhile
                     self._soften_cb.pop(key, None)
 
-        def _sync_params(self, ready_only=False):
+        def _sync_params(self, ready_only=False, spec=None):
             """Bring the surfaces in line with the settings (after a change, undo, or opening a project). ready_only:
             only those whose new surface is made already; the others are made in a worker thread (apply_params)."""
             if not self.spec or not self.info:
                 return False
-            changed = False; later = False
+            changed = False; later = False; ds = self.st.ds
             for c in self.info.get("structures", []):
-                k = c["id"]; want = self._wanted_params(c)
-                if any(self.st.ds.param(k, n) != v for n, v in want.items()):
-                    if ready_only and not self.st.ds.surface_ready(k, params=want):
-                        later = True; continue  # made in the worker thread first (apply_params)
+                k = c["id"]; want = self._wanted_params(c, spec or self.spec)
+                if not any(ds.param(k, n) != v for n, v in want.items()):
+                    self._surf_failed.pop(c["key"], None)
+                else:
+                    if ready_only and ds.needs_surface(k, want):  # made in the worker thread first (apply_params)
+                        later |= self._surf_failed.get(c["key"], (None,))[0] != ds._cache_key(k, params=want); continue
                     try:
                         r = self.st.set_structure_params(c["key"], **want)
                     except UserError as exc:
                         self.say(str(exc), "err"); continue
                     c.update(mesh=r["mesh"]); changed = True
             if later:
-                self.param_timer.start(0)
+                QtC.QTimer.singleShot(0, self.apply_params)  # (the timer keeps its pause)
             return changed
 
         def build_controls(self):
@@ -842,7 +832,7 @@ def build_gui(args):
                         w = lay.takeAt(0).widget()
                         if w:
                             w.setParent(None); w.deleteLater()
-            self.vox_lbl = {}; r = 0
+            r = 0
             structs = self.info.get("structures", [])
             self.struct_note.setVisible(not structs); self.pick_btn.setEnabled(bool(structs))
             several = len({c["source"] for c in structs}) > 1; src = None
@@ -854,7 +844,7 @@ def build_gui(args):
                 colb = QtW.QPushButton(); colb.setFixedSize(30, 22); self._paint(colb, sc["color"])
                 colb.clicked.connect(lambda _=False, k=k, b=colb: self.pick_color(k, b))
                 ne = QtW.QLineEdit(sc["name"]); ne.setMinimumWidth(70); ne.textChanged.connect(lambda t, k=k: self._class_set(k, "name", t))
-                v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); v.setAlignment(QtC.Qt.AlignRight | QtC.Qt.AlignVCenter); self.vox_lbl[c["id"]] = v
+                v = QtW.QLabel(f"{c['voxels']:,}"); v.setStyleSheet(DIM); v.setAlignment(QtC.Qt.AlignRight | QtC.Qt.AlignVCenter)
                 cb.setToolTip("Show or hide this structure in the preview and the movie")
                 colb.setToolTip("Choose the colour of this structure"); ne.setToolTip("The name shown in the legend")
                 zb = QtW.QPushButton("Zoom"); zb.setToolTip("Add a close-up of this structure to the movie")
@@ -1018,43 +1008,58 @@ def build_gui(args):
                 self.say(f"Could not write the demo data: {exc}", "err"); return
             self.load(paths=[p["tomogram"], p["labels"]])
 
-        def _thr_changed(self, cid, v):
-            self._thr_pending[cid] = v; self.thr_timer.start()
+        def _thr_changed(self, key, v):
+            """The threshold slider: the settings change at once, the data when the slider rests (thr_timer). Object numbers
+            change with the threshold: close-ups of single objects show the whole structure again."""
+            self.spec["classes"][key]["threshold"] = v; self._thr_reset += whole_structure(self.spec, key)
+            self.thr_timer.start(); self.schedule()
 
-        def apply_thresholds(self):
+        def _thr_settled(self):
+            if self._sync_thresholds():
+                self.thresholds_set()
+            elif not self.thr_timer.isActive():  # not put off
+                self._thr_reset = 0
+
+        def thresholds_set(self):
+            """After the threshold slider: say what changed and show the new numbers."""
+            n, self._thr_reset = self._thr_reset, 0
+            self.say("Threshold updated." + (f" {n} close-up{'s' if n > 1 else ''} of one object now show{'' if n > 1 else 's'} "
+                                             "the whole structure, because the objects changed." if n else ""), "ok")
+            self.build_controls(); self.schedule(0)
+
+        def thresholds_wanted(self, spec):
+            """(structure key, threshold) of the score structures whose threshold in the settings is not the data's."""
+            ds, todo = self.st.ds, []
+            for k in ds.scores if spec is not None else ():
+                try:
+                    v = min(0.99, max(0.01, float(spec["classes"][ds.key_of(k)]["threshold"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if abs(v - ds.classes[k]["threshold"]) > 1e-9:
+                    todo.append((ds.key_of(k), v))
+            return todo
+
+        def _sync_thresholds(self):
+            """Bring the data in line with the thresholds in the settings, which go back with undo and come back with a
+            project or a file. Put off while a job or a movie needs the data as they are. True when something changed."""
+            todo = self.thresholds_wanted(self.spec)
+            if not todo:
+                return False
             if self.busy or self.gen is not None:
-                self.thr_timer.start(); return
-            pend, self._thr_pending = self._thr_pending, {}
-            if self.spec is None:
-                return
-            reset = 0  # close-ups of single objects set back to the whole structure
+                self.thr_timer.start(); return False
+            return self.set_thresholds(todo)
+
+        def set_thresholds(self, todo):
             QtW.QApplication.setOverrideCursor(QtC.Qt.WaitCursor)
             try:
-                for cid, v in pend.items():
-                    r = self.st.set_threshold(cid, v)
-                    key = None
+                for key, v in todo:
+                    r = self.st.set_threshold(key, v)
                     for c in self.info["structures"]:
-                        if c["id"] == cid:
-                            c.update(threshold=r["threshold"], voxels=r["voxels"], mesh=r["mesh"]); key = c["key"]
-                    if cid in self.vox_lbl:
-                        self.vox_lbl[cid].setText(f"{r['voxels']:,}")
-                    # object numbers change with the threshold: those close-ups show the whole structure again
-                    from .storyboard import make_target, target_items
-                    for s in self.spec["shots"]:
-                        if s["type"] == "focus" and (s.get("target") or {}).get("class") == key and s["target"].get("component") is not None:
-                            s["target"] = {"class": key}; reset += 1
-                        elif s["type"] == "focus" and "items" in (s.get("target") or {}):
-                            its = target_items(s["target"])
-                            if any(k2 == key and c is not None for k2, c in its):
-                                new = list(dict.fromkeys((k2, None if k2 == key else c) for k2, c in its))
-                                s["target"] = make_target(new); reset += 1
-                self.say("Threshold updated." + (f" {reset} close-up{'s' if reset > 1 else ''} of one object now show{'' if reset > 1 else 's'} "
-                                                 "the whole structure, because the objects changed." if reset else ""), "ok")
-            except UserError as exc:
-                self.say(str(exc), "err")
+                        if c["key"] == key:
+                            c.update(threshold=r["threshold"], voxels=r["voxels"], mesh=r["mesh"])
             finally:
                 QtW.QApplication.restoreOverrideCursor()
-            self.build_controls(); self.editor.record(); self.schedule(0)
+            return True
 
         # ---------- view and preview ----------
         def _main_req(self):
@@ -1111,7 +1116,7 @@ def build_gui(args):
             spec = self.spec_for(); req = self.req or {"t": self.frame / max(1, self.total - 1)}; self.req = None
             plan, i = self.st.plan_frame(spec, req); frames = plan.frames
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
-            self.st.ren.preview_part = self.selected_part; self.st.ds.path_async = True
+            self.st.ren.preview_part = self.selected_part
             try:
                 self.st.ren.surface_async = True
                 img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
@@ -1157,12 +1162,12 @@ def build_gui(args):
             ren = self.st.ren
             if ren is None or not ren.surfaces_pending or (self._surf_worker is not None and self._surf_worker.isRunning()):
                 return
-            todo = sorted(ren.surfaces_pending); ren.surfaces_pending = set(); ds = self.st.ds
+            ds = self.st.ds; todo = [(ds.key_of(k), lvl) for k, lvl in sorted(ren.surfaces_pending) if k in ds.classes]
+            ren.surfaces_pending = set()
 
             def work(log):
-                for k, lvl in todo:
-                    if k in ds.classes:
-                        ds.make_surface(k, lvl)
+                for key, lvl in todo:
+                    ds.make_surface(key, lvl)
                 return True
             self.prev.set_note("Making smoother membranes for this part ...")
             self._surf_worker = Worker(work)
@@ -1178,22 +1183,11 @@ def build_gui(args):
             """Centre lines of camera paths are worked out in a worker thread (a large membrane can take seconds)."""
             if self._path_worker is not None and self._path_worker.isRunning():
                 return
-            from .paths import centre_line, path_key
-            from .storyboard import clip_box
-            ds = self.st.ds; cb = clip_box(spec, ds.shape); todo = []
-            for p in spec["shots"]:
-                if p.get("type") == "path" and (p.get("source") or {}).get("kind", "follow") == "follow":
-                    items = [(it.get("structure"), it.get("component")) for it in p["source"].get("items", [])]
-                    if items and path_key(items, cb) not in ds.path_cache:
-                        todo.append(items)
+            ds = self.st.ds.frozen(); cb = clip_box(spec, ds.shape); todo = missing_paths(spec, ds)  # a late line never reaches newer data
 
             def work(log):
                 for items in todo:
-                    log("working out the camera path ...")
-                    try:
-                        ds.path_cache[path_key(items, cb)] = centre_line(ds, items, cb)
-                    except UserError as exc:
-                        ds.path_cache[path_key(items, cb)] = exc
+                    log("working out the camera path ..."); work_out(ds, items, cb)
                 return True
             self._path_worker = Worker(work); self._path_worker.log.connect(self.say)
             self._path_worker.done.connect(lambda _r: (self.say(""), self.parts_panel.sync(force=True), self.schedule(0)))
@@ -1550,19 +1544,19 @@ def build_gui(args):
                 self.say(f"Cannot use that folder: {exc}", "err"); return
             self.settings.setValue("outdir", folder)
             self.stop_play(); self.project.autosave_now(); self.export.stop()
-            try:
-                self.gen = movie_frames(self.st.ren, spec, path, resume=resume)
-            except Exception as exc:
-                traceback.print_exc(); self.say(f"Could not start the movie: {exc}", "err"); return
-            self.render_path = path; self.gen_paths = dict(self.gen.paths); self.t0 = time.time()
-            self._rendering(True); self.progress.setMaximum(len(self.gen)); self.progress.setValue(self.gen.start); self.status_lbl.setText("Starting ..." if not self.gen.start else
-                                                           f"Continuing after frame {self.gen.start} ..."); self.render_timer.start()
+            self.job = None; self.gen = movie_steps(self, spec, path, resume); self._rendering(True)
+            self._render_step()  # at once; the timer only after it, so that a question in it can't lead back into the generator
+            if self.gen is not None:
+                self.render_timer.start()
+
+        def ask_left_out(self, text):
+            return QtW.QMessageBox.question(self, "TomoReveal", text) == QtW.QMessageBox.Yes
 
         def ask_resume(self, part, same):
             """An interrupted movie of this name: True = continue, False = start again, None = do nothing."""
             if not same:
-                r = QtW.QMessageBox.question(self, "TomoReveal", "A movie of this name was interrupted, but the settings have changed "
-                                             "since. Start it again from the beginning?")
+                r = QtW.QMessageBox.question(self, "TomoReveal", "A movie of this name was interrupted, but the settings, the data or the "
+                                             "program have changed since. Start it again from the beginning?")
                 return False if r == QtW.QMessageBox.Yes else None
             box = QtW.QMessageBox(self); box.setWindowTitle("TomoReveal")
             box.setText(f"A movie was interrupted after {part['frames_done']} of {part['total']} frames. Continue it or start again?")
@@ -1572,51 +1566,64 @@ def build_gui(args):
 
         def _rendering(self, on):
             # everything is locked while the movie is made, except Cancel (in the Make the movie box)
-            for i, page in enumerate(self.pages):
-                if i != self.TAB_MOVIE:
+            for page in self.pages:  # (in the order they were made, which is not that of the tabs)
+                if not page.isAncestorOf(self.cancel_btn):
                     page.setEnabled(not on)
             for g in (self.view_group, self.clip_group, self.movie_group):
                 g.setEnabled(not on)
             self.timeline.setEnabled(not on); self.play_btn.setEnabled(not on)
-            for w in (self.quality_cb, self.name_le, self.folder_le, self.aa_movie, *self.export.fmt.values(), self.export.size_cb, self.export.codec_cb):
+            for w in (self.quality_cb, self.name_le, self.folder_le, self.aa_movie, self.fps_cb, self.blur_cb, *self.export.fmt.values(), self.export.size_cb, self.export.codec_cb):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)
             if on:
                 self.progress.setValue(0)
+            else:
+                self.export.sync()  # the size and codec of ProRes files can't be chosen
 
         def _render_step(self):
             try:
-                i, n, img = next(self.gen)
+                step = next(self.gen)
             except StopIteration:
                 return self._render_done()
             except Exception as exc:
-                traceback.print_exc(); self._render_stop()
-                self.say(f"Making the movie failed: {exc}", "err"); self.status_lbl.setText(""); return
+                text = str(exc)
+                if not isinstance(exc, UserError):
+                    traceback.print_exc(); text = f"Making the movie failed: {exc}"
+                self._render_stop(); self.say(text, "err"); self.status_lbl.setText(""); self.schedule(0); return
+            self.render_timer.setInterval(50 if step is None else 0)
+            if step is None:  # waiting
+                return
+            i, n, img = step
             self.progress.setMaximum(n); self.progress.setValue(i)
-            el = time.time() - self.t0; done = max(1, i - self.gen.start)
+            el = time.time() - self.t0; done = max(1, i - self.job.start)
             self.status_lbl.setText(f"frame {i} of {n} \u00b7 about {fmt_time(el / done * (n - i))} left")
             if i % 6 == 1 or i == n:
                 self.prev.set_image(to_qimage(img))
 
         def _render_stop(self):
             self.render_timer.stop()
-            if self.gen is not None:
-                self.gen.close(); self.gen = None
-            self._rendering(False)
+            gen, self.gen, self.job = self.gen, None, None
+            try:
+                if gen is not None: gen.close()
+            finally:  # the window is unlocked, also when the files can't be tidied up
+                self._rendering(False)
 
         def cancel_render(self):
             self._render_stop()  # deletes the partial files and the new poster; the old movie and poster are left alone
             self.status_lbl.setText("Cancelled."); self.schedule(0)
 
         def _render_done(self):
-            self.render_timer.stop(); self.gen = None; self._rendering(False)
-            el = time.time() - self.t0
-            outs = self.gen_paths if hasattr(self, "gen_paths") else {"mp4": self.render_path}
+            job = self.job
+            if job is None:  # a question was answered with No
+                return self.cancel_render()
+            self.render_timer.stop(); self.gen = self.job = None; self._rendering(False)
+            el = time.time() - self.t0; outs = job.paths
             self.last_movie = next(iter(outs.values())); self.open_btn.setEnabled(True)
-            n = self.progress.maximum(); secs = n / int(self.spec["output"].get("fps", 30))
+            n = len(job); secs = n / job.fps
             sizes = self.export.log_true_size(self.quality_cb.currentIndex(), outs)
-            self.status_lbl.setText(f"Finished in {fmt_time(el)} \u00b7 {secs:.1f} s movie \u00b7 {sizes} \u00b7 saved in {os.path.dirname(self.last_movie)}")
-            self.say("Movie saved.", "ok"); self.schedule(0)
+            where = (f"saved as {os.path.basename(self.last_movie)} in " if job.note else "saved in ") + os.path.dirname(self.last_movie)
+            self.status_lbl.setText(f"Finished in {fmt_time(el)} \u00b7 {secs:.1f} s movie \u00b7 {sizes} \u00b7 {where}")
+            self.say(job.note or "Movie saved.", None if job.note else "ok"); self.schedule(0)
 
         def _open(self, path):
             if path and os.path.exists(path):

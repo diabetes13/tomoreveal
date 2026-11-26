@@ -2,6 +2,7 @@
 membranes, coloured text boxes, arrows kept on the picture (2D), smooth arrows, own and locked views of slides and
 holds, turning around the X or Y axis, and the volume shown flipped."""
 import numpy as np
+import pytest
 
 import tomoreveal as tr
 from tomoreveal import annotations as an
@@ -41,15 +42,16 @@ def test_a_part_can_have_smoother_membranes(studio):
     base_m, base_o = ds.meshes[mem], ds.meshes[other]
     try:
         ren.draw([f for f in fr if f.get("part") == b["id"]][-1], spec, (320, 180))
-        assert ds.meshes[mem] is not base_m and ds.meshes[mem] is ds.make_surface(mem, 3)  # the membrane: smoother here
-        assert ds.meshes[other] is base_o  # not a membrane: as it was
-        assert ren.actors[mem].mapper.GetInput() is ds.meshes[mem]
-        ren.draw([f for f in fr if f.get("part") == a["id"]][3], spec, (320, 180))
+        assert ren.mesh_of(mem) is not base_m and ren.mesh_of(mem) is ds.make_surface(mem, 3)  # the membrane: smoother here
+        assert ren.mesh_of(other) is base_o  # not a membrane: as it was
+        assert ren.actors[mem].mapper.GetInput() is ren.mesh_of(mem)
         assert ds.meshes[mem] is base_m and ds.param(mem, "soften") == 0  # the Structures tab's own setting is unchanged
+        ren.draw([f for f in fr if f.get("part") == a["id"]][3], spec, (320, 180))
+        assert ren.mesh_of(mem) is base_m
         ren.surface_async = True; ds._mesh_cache.pop(ds._cache_key(mem, 2), None)
         spec2, _, b2 = two_parts(ds, second_look={"soften": 2})
         ren.draw([f for f in sb.build_plan(spec2, ds).frames if f.get("part") == b2["id"]][-1], spec2, (320, 180))
-        assert (mem, 2) in ren.surfaces_pending and ds.meshes[mem] is base_m  # the window makes it in a worker thread first
+        assert (mem, 2) in ren.surfaces_pending and ren.mesh_of(mem) is base_m  # the window makes it in a worker thread first
     finally:
         ren.surface_async = False; ren.surfaces_pending = set()
         ren.draw([f for f in fr if f.get("part") == a["id"]][3], spec, (320, 180))
@@ -174,3 +176,117 @@ def test_locked_parts_keep_their_view_and_the_window_finds_flipped_objects(windo
         loop.exec()
     pump(app, 40)
     assert "flip" not in win.spec and not errs, errs
+
+
+# ---- a part's own smoothing with many structures (G-16) ----
+def many_membranes(folder, n):
+    """A label file with n small objects, all of them membranes."""
+    import json
+    from tomoreveal.volumes import write_mrc
+    lab = np.zeros((16, 8 * (n // 10 + 1), 88), np.int16)
+    for i in range(n):
+        y, x = 8 * (i // 10) + 2, 8 * (i % 10) + 2
+        lab[5:10, y:y + 5, x:x + 5] = i + 1
+    p = str(folder / "many_membranes.mrc"); write_mrc(p, lab, 10.0)
+    with open(str(folder / "many_membranes.json"), "w") as f:
+        json.dump({str(i + 1): {"name": f"membrane {i + 1}"} for i in range(n)}, f)
+    return p
+
+
+@pytest.mark.parametrize("n", [30, 60])
+def test_a_later_part_has_the_usual_surfaces(tmp_path, needs_3d, n):
+    st = tr.Studio(headless=True); st.add_files([many_membranes(tmp_path, n)], log=lambda *a: None); ds, ren = st.ds, st.ren
+    try:
+        spec, a, b = two_parts(ds, second_look={"soften": 3}); fr = sb.build_plan(spec, ds).frames
+        one, two = ([f for f in fr if f.get("part") == p["id"]][-1] for p in (a, b)); usual = dict(ds.meshes)
+        for _ in range(2):
+            ren.draw(two, spec, (160, 90))
+            assert all(ren.actors[k].mapper.GetInput() is ds.make_surface(k, 3) for k in usual)
+            ren.draw(one, spec, (160, 90))
+            assert all(ren.actors[k].mapper.GetInput() is m for k, m in usual.items())
+            assert all(ds.meshes[k] is m and ren.mesh_of(k) is m for k, m in usual.items())  # no part changes the data's own
+    finally:
+        st._drop_renderer()
+
+
+@pytest.mark.parametrize("n", [30, 60])
+def test_the_window_asks_for_a_parts_surfaces_once(tmp_path, needs_3d, n):
+    from test_structure_settings import run_for, wait_for
+    app, win = build_window(tmp_path)
+    try:
+        wait_for(win, lambda: win.load(paths=[many_membranes(tmp_path, n)])); pump(app, 30)
+        win.spec, _, b = two_parts(win.st.ds, second_look={"soften": 3}); asked = []; real = win._make_part_surfaces
+        win._make_part_surfaces = lambda: (asked.append(len(win.st.ren.surfaces_pending)), real())
+        win.req = {"t": 1.0}; win.do_preview(); assert asked == [n]; win._surf_worker.wait(60000); run_for(app, 0.5)
+        win.req = {"t": 1.0}; win.do_preview(); run_for(app, 0.5)
+        assert not any(asked[1:]) and all(win.st.ren.mesh_of(k) is win.st.ds.make_surface(k, 3) for k in win.st.ds.classes)
+    finally:
+        win.close()
+
+
+def build_window(folder):
+    import argparse
+    from tomoreveal.gui import build_gui
+    return build_gui(argparse.Namespace(files=[], outdir=str(folder), headless=True))
+
+
+# ---- a flip changes the data and the settings together (G-38) ----
+def one_particle(win, number=1):
+    ds = win.st.ds; key = next(c["key"] for c in ds.classes.values() if c["name"] == "particles")
+    f = sb.new_part("focus", target={"class": key, "component": number}); win.editor.insert(f, "start")
+    return f["id"]
+
+
+def test_a_failed_flip_changes_nothing(window, monkeypatch):
+    import json
+    from tomoreveal.volumes import Dataset
+    from test_structure_settings import run_for, wait_for
+    app, win, errs = window; ds = win.st.ds; one_particle(win); win.spec["annotations"] = [an.new_arrow([10.0, 20.0, 30.0])]
+    win.spec["shots"].append(sb.new_part("focus", region=dict(lo=[10, 20, 30], hi=[20, 30, 40]))); run_for(app, 1.0)
+    spec, tomo, boxes = json.dumps(win.spec, default=str), ds.tomo, dict(ds.bbox)
+
+    def broken(*a, **k):
+        raise MemoryError("not enough memory")
+    monkeypatch.setattr(Dataset, "set_segmentation", broken)
+    wait_for(win, lambda: win.flip_volume(("x", "z"))); pump(app, 40)
+    assert json.dumps(win.spec, default=str) == spec and win.st.flip == () and ds.tomo is tomo and ds.bbox == boxes
+    assert "not enough memory" in win.msg_lbl.text() and not win.data.flip_cb["x"].isChecked()
+    assert win.st.ren is not None and win.st.ren.actors
+    monkeypatch.undo(); wait_for(win, lambda: win.flip_volume(("x",))); pump(app, 40)  # and the next flip works, once
+    assert win.spec["flip"] == ["x"] and np.array_equal(win.st.ds.tomo, tomo[:, :, ::-1])
+    nx = ds.shape[2]; r = win.spec["shots"][-1]["region"]
+    assert (r["lo"][0], r["hi"][0]) == (nx - 1 - 20, nx - 1 - 10) and not errs, errs
+
+
+def test_history_after_a_flip_starts_with_the_new_object_numbers(window):
+    from test_structure_settings import run_for, wait_for
+    app, win, errs = window; pid = one_particle(win); run_for(app, 1.0)
+    changed = 0
+    for axes in (("z",), ("y", "z"), ("x",)):
+        was = win.parts_panel.part(pid)["target"]["component"]
+        wait_for(win, lambda: win.flip_volume(axes)); run_for(app, 1.2)
+        changed += win.parts_panel.part(pid)["target"]["component"] != was
+        assert not win.editor.history.can_undo and len(win.editor.history.states) == 1
+    assert changed and not errs, errs
+
+
+def test_the_flip_stays_with_the_movie(window, demo):
+    from test_structure_settings import run_for, wait_for
+    app, win, errs = window; st = win.st; files = [demo["tomogram"], demo["labels"]]; tomo = st.ds.tomo
+
+    def again(before_last=lambda: None):
+        for key in [s["key"] for s in st.seg_sources]:
+            wait_for(win, lambda: win.data.remove(key)); pump(app, 30)
+        before_last(); wait_for(win, lambda: win.data.remove("file:" + st._norm(demo["tomogram"]))); pump(app, 30)
+        assert win.spec is None
+        wait_for(win, lambda: win.load(paths=files)); pump(app, 40)
+    win.spec["shots"].append(sb.new_part("focus", region=dict(lo=[10, 20, 30], hi=[20, 30, 40])))
+    wait_for(win, lambda: win.flip_volume(("x",))); pump(app, 40); lo = list(win.spec["shots"][-1]["region"]["lo"])
+    again()
+    assert win.spec["flip"] == ["x"] == win.st.info()["flip"] and np.array_equal(win.st.ds.tomo, tomo[:, :, ::-1])
+    assert win.spec["shots"][-1]["region"]["lo"] == lo
+    win.project.ask_save = lambda what: "discard"
+    again(lambda: win.project.mark_saved())  # nothing to lose, so the movie is not kept; the new one records the data's flip
+    assert win.spec.get("flip") == ["x"] == win.st.info()["flip"]
+    win.project.new(); wait_for(win, lambda: win.load(paths=files)); pump(app, 40)
+    assert "flip" not in win.spec and win.st.flip == () and np.array_equal(win.st.ds.tomo, tomo) and not errs, errs

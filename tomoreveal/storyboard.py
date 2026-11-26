@@ -559,6 +559,11 @@ def build_plan(spec, ds):
     return Plan(frames, segments, marks, fps, problems)
 
 
+def left_out(spec, plan):
+    """[(part number, reason)] of the parts that are switched on but can't be drawn."""
+    return [(i, plan.problems[p["id"]]) for i, p in enumerate(spec.get("shots", []), 1) if p.get("id") in plan.problems]
+
+
 def build_timeline(spec, ds):
     """Settings -> (list of per-frame states, (frame, label) marks for the scrubber). See build_plan."""
     plan = build_plan(spec, ds)

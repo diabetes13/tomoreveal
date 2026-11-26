@@ -21,11 +21,12 @@ from .matching import apply_match, match_volume
 from .movie import render_movie
 from .render import Renderer
 from .storyboard import build_plan, build_timeline, class_spec, default_spec
-from .volumes import Dataset, clean_labels, guess_kind, load_volume, looks_like_scores, regrid, score_scale, sidecar_classes
+from .volumes import (Dataset, clean_labels, guess_kind, load_volume, looks_like_scores, new_version, regrid, score_scale,
+                      sidecar_classes)
 
 # what _init_sources creates: the whole state of the loaded sources, which a failed change puts back
 _SOURCE_STATE = ("ds", "sessions", "tomo_files", "seg_sources", "hidden", "tomo_source", "_tomo_auto", "_tomo_loaded",
-                 "_seg_loaded", "_matches", "_stale", "match_note", "flip")
+                 "_seg_loaded", "_matches", "_stale", "match_note")
 
 
 def _atomic(method):
@@ -46,9 +47,16 @@ def _keep(v):
 
 
 def _put_back(v, saved):
-    if saved is not None:  # in place, so everything that refers to this dict or list sees the old contents
+    # in place, so everything that refers to this dict or list sees the old contents; one that was not changed is left
+    # alone, because a worker may be reading it (Dataset.frozen)
+    if saved is not None and not _same(v, saved):
         v.clear(); (v.update if isinstance(v, dict) else v.extend)(saved)
     return v
+
+
+def _same(v, saved):
+    a, b = (list(x.items()) if isinstance(x, dict) else [(None, y) for y in x] for x in (v, saved))
+    return len(a) == len(b) and all(n == m and x is y for (n, x), (m, y) in zip(a, b))
 
 
 class Studio:
@@ -120,7 +128,7 @@ class Studio:
         for other in ("file:", "labels:", "scores:"):  # the same file dropped again, perhaps as something else
             self._drop(other + p)
         if kind == "tomogram":
-            self.tomo_files[p] = dict(arr=a, vox=vox)
+            self.tomo_files[p] = dict(arr=a, vox=vox, version=new_version())
             return
         src = dict(key=f"{kind}:{p}", kind=kind, path=p, group=os.path.basename(p), enabled=True, native=tuple(a.shape), vox=vox, raw=a)
         if kind == "labels":
@@ -135,6 +143,7 @@ class Studio:
 
     def _drop(self, key):
         if key.startswith("file:"):
+            self._matches = {k: v for k, v in self._matches.items() if k[0] != key[5:]}
             if self.tomo_files.pop(key[5:], None) is not None and self.tomo_source == key:
                 self.tomo_source = None; self._tomo_auto = True
             return
@@ -258,9 +267,9 @@ class Studio:
                 log(f"comparing your tomogram file with the image stored in {os.path.basename(p)} ...")
                 try:
                     v, notes, r, tf = match_volume(f["arr"], f["vox"], ses.read_image(imgs[0]), imgs[0]["voxel"], log)
-                    self._matches[mkey] = dict(session=p, v=v, notes=notes, r=r, tf=tf, error=None, vox=imgs[0]["voxel"])
+                    self._matches[mkey] = dict(key=mkey, v=v, notes=notes, r=r, tf=tf, error=None, vox=imgs[0]["voxel"])
                 except UserError as exc:
-                    self._matches[mkey] = dict(session=p, v=None, notes=[], r=0.0, tf=None, error=str(exc))
+                    self._matches[mkey] = dict(key=mkey, v=None, notes=[], r=0.0, tf=None, error=str(exc))
             m = self._matches[mkey]
             if m["error"] is None:
                 return m
@@ -271,7 +280,7 @@ class Studio:
         """Put the chosen tomogram into the dataset; returns the transform used for files made from the original file."""
         if self._tomo_auto:
             self.tomo_source = self._default_tomogram()
-        src, tf, self.match_note = self.tomo_source, None, ""
+        src, tf, m, self.match_note = self.tomo_source, None, None, ""
         if src and src.startswith("file:"):
             fpath = src[5:]; m = self._match(fpath, log) if self.sessions else None
             if m is not None and m["error"] and self._tomo_auto and self._default_session_image():
@@ -283,12 +292,20 @@ class Studio:
                 tf = m["tf"] if not m["tf"]["identity"] else None
                 self.match_note = (f"Your tomogram file was lined up with Dragonfly's copy: {'; '.join(m['notes'])} (similarity {m['r']:.2f})."
                                    if m["notes"] else "Your tomogram file and Dragonfly's copy are on the same grid.")
-        if src != self._tomo_loaded:
+        # what is shown: the source, the version of the file, how it was lined up (None: as it is, or a session's image) and
+        # the flip. None: no tomogram. Anything else than what was put in last time is put in anew.
+        if src is None:
+            want = None
+        elif src.startswith("file:"):
+            want = (src, self.tomo_files[src[5:]]["version"], m["key"] if m is not None and m["error"] is None else None, self.flip)
+        else:
+            want = (src, None, None, self.flip)
+        if want != self._tomo_loaded:
             if src is None:
                 self.ds.set_tomogram(None, None, "")
             elif src.startswith("file:"):
-                fpath = src[5:]; f = self.tomo_files[fpath]; m = self._match(fpath, lambda *a: None) if self.sessions else None
-                if m is not None and m["error"] is None:
+                fpath = src[5:]; f = self.tomo_files[fpath]
+                if want[2] is not None:
                     self.ds.set_tomogram(self._flipped(m["v"]), m["vox"] if not m["tf"]["identity"] else (f["vox"] or m["vox"]),
                                          os.path.basename(fpath))
                 else:
@@ -297,7 +314,7 @@ class Studio:
                 p, i = src[8:].rsplit(":", 1); im = self.sessions[p].images()[int(i)]
                 log(f"reading image '{im['title']}' from the session ...")
                 self.ds.set_tomogram(self._flipped(self.sessions[p].read_image(im)), im["voxel"], im["title"])
-            self._tomo_loaded = src
+            self._tomo_loaded = want
         return tf
 
     def _default_session_image(self):
@@ -324,7 +341,7 @@ class Studio:
             if s.get("arr") is None and s["enabled"]:
                 log(f"reading segmentation '{s['title']}' ...")
                 lab, classes = self.sessions[s["path"]].read_selection([s["obj"]])
-                s.update(arr=lab, classes=classes, _stats=None)
+                s.update(arr=lab, classes=classes, _stats=None, version=new_version())
             return
         raw = s["raw"]; key = (tuple(ref), (tf["s"], tf["flip"], tf["off"]) if tf else None)
         if tf and tf["flip"] and s["kind"] == "labels" and raw.shape == tuple(ref) == tuple(tf["src_shape"]):
@@ -351,7 +368,7 @@ class Studio:
             s["usable"] = False
             s["reason"] = f"{self._grid_text(raw.shape)} voxels, but {ref_name} is {self._grid_text(ref)}"
             return
-        s.update(arr=arr, placed=key, _stats=None)
+        s.update(arr=arr, placed=key, _stats=None, version=new_version())
 
     def _update(self, log=print, make_renderer=True):
         tf = self._load_tomogram(log)
@@ -363,16 +380,14 @@ class Studio:
         for s in self.seg_sources:
             self._place(s, ref, ref_name, tf, log)
         use = [s for s in self.seg_sources if s["enabled"] and s["usable"]]
-        sig = (tuple((s["key"], id(s["arr"])) for s in use), tuple(ref) if ref is not None else None, self.keep_background, self.flip)
+        sig = (tuple((s["key"], s["version"]) for s in use), tuple(ref) if ref is not None else None, self.keep_background, self.flip)
         if sig != self._seg_loaded:
             parts = []
             for s in use:
                 if self.flip:  # shown flipped: a copy of the source's settings with the flipped volume (statistics of its own)
                     parts.append(dict(s, arr=self._flipped(s["arr"]), _stats=None, **({} if s["kind"] in ("labels", "scores") else {"kind": "labels"})))
-                elif s["kind"] == "scores":
-                    parts.append(s)  # the source itself carries arr, scale and thr, so a threshold change persists
                 else:
-                    parts.append(s if s["kind"] == "labels" else dict(s, kind="labels"))
+                    parts.append(s if s["kind"] in ("labels", "scores") else dict(s, kind="labels"))
             self.ds.set_segmentation(parts, vox=next((s["vox"] for s in use if s.get("vox")), None),
                                      keep_background=self.keep_background, shape=ref)
             for s, part in zip(use, parts):  # keep label statistics for the next rebuild
@@ -430,7 +445,9 @@ class Studio:
                 setattr(self, n, _put_back(*kept))
             for kept in sources:
                 _put_back(*kept)
-            self.ds.__dict__.clear(); self.ds.__dict__.update({n: _put_back(*kept) for n, kept in ds.items()})
+            with self.ds._mesh_lock:  # workers may be asking: every value is overwritten, none is ever missing
+                self.ds.__dict__.update({n: _put_back(*kept) for n, kept in ds.items()})
+                self.ds._comp, self.ds.path_cache = {}, {}  # a worker may have put something of the failed state into them
             raise
 
     def _init_sources(self):
@@ -438,21 +455,30 @@ class Studio:
         self.sessions = {}; self.tomo_files = {}; self.seg_sources = []; self.hidden = {}
         self.tomo_source = None; self._tomo_auto = True; self._tomo_loaded = None; self._seg_loaded = None
         self._matches = {}; self._stale = False; self.match_note = ""
-        self.flip = ()  # axes of the volume shown flipped (3.5): a subset of "x", "y", "z"
 
     FLIP_AXES = {"z": 0, "y": 1, "x": 2}  # numpy axis of each (arrays are z, y, x)
+
+    @property
+    def flip(self):
+        """The axes the volume is shown flipped in (kept in the dataset, so a failed change puts them back)."""
+        return self.ds.flip
+
+    @flip.setter
+    def flip(self, axes):
+        self.ds.flip = tuple(axes)
 
     def _flipped(self, arr):
         """The volume as shown: flipped in the chosen axes (a view, nothing is copied and the files are not changed)."""
         ax = tuple(sorted(self.FLIP_AXES[a] for a in self.flip))
         return np.flip(arr, ax) if ax and arr is not None else arr
 
+    @_atomic
     def set_flip(self, axes, log=print, make_renderer=True):
         """Show the tomogram and every segmentation flipped in these axes ("x", "y", "z"); surfaces are made again."""
         axes = tuple(a for a in "xyz" if a in (axes or ()))
         if axes == self.flip:
             return self.info()
-        self.flip = axes; self.ds._mesh_cache.clear(); self.ds.meshes = {}; self._tomo_loaded = None; self._seg_loaded = None
+        self.flip = axes
         self._drop_renderer()
         log("flipping the volume and building 3D surfaces ...")
         return self._update(log, make_renderer)
@@ -467,7 +493,7 @@ class Studio:
             raise UserError("only structures loaded from score volumes have a threshold")
         self.ds.set_threshold(k, value)
         src = self._source(self.ds.scores[k].get("key"))
-        if src is not None and src is not self.ds.scores[k]:  # a flipped copy (3.5): the source keeps the threshold too
+        if src is not None:  # the dataset has a copy: the source keeps the threshold for the next rebuild and the project
             src["thr"] = self.ds.scores[k]["thr"]
         if self.ren is not None:
             self.ren.update_class(k)

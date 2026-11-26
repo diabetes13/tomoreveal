@@ -126,7 +126,8 @@ TEXTS = {
     "label:File size": "Smaller files at the same resolution. Balanced is a good choice.",
     "label:Codec": "H.264 plays everywhere. H.265 is about half the size but plays in fewer programs.",
     "label:Smooth edges": "Smooth edges in the movie. Best looks cleanest; Off is fastest.",
-    "text:Make movie": "Render the movie and save it. You can keep looking at the window while it runs.",
+    "text:Make movie": "Render the movie and save it. It first waits for surfaces, thresholds and camera paths you have just changed. "
+                       "You can keep looking at the window while it runs.",
     "text:Cancel": "Stop making the movie; its unfinished files are deleted.",
     "text:Play movie": "Open the finished movie in your video player.",
     "text:Show folder": "Open the folder with the movie files.",

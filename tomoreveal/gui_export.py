@@ -8,6 +8,7 @@ from PySide6 import QtCore as QtC, QtWidgets as QtW
 from . import encode
 from .estimate import FORMAT_NAMES, QUALITIES, Estimator, human
 from .gui_theme import DIM
+from .paths import missing_paths
 
 FORMAT_TIPS = {
     "mp4": "MP4 (plays everywhere): H.264 video.",
@@ -77,7 +78,7 @@ class ExportControls(QtC.QObject):
         self.size_cb.setCurrentIndex(max(0, self.size_cb.findData(o.get("file_size", "balanced"))))
         self.codec_cb.setCurrentIndex(max(0, self.codec_cb.findData(o.get("codec", "h264"))))
         h26x = any(f in ("mp4", "mov") for f in formats)
-        self.size_cb.setEnabled(h26x); self.codec_cb.setEnabled(h26x)
+        self.size_cb.setEnabled(h26x and w.gen is None); self.codec_cb.setEnabled(h26x and w.gen is None)
         notes = []
         if o.get("codec") == "h265" and h26x:
             notes.append(H265_NOTE)
@@ -117,6 +118,8 @@ class ExportControls(QtC.QObject):
             return self.show(self.cache[k])
         if not self.visible():
             return
+        if missing_paths(w.spec_for(), w.st.ds):  # worked out in the background: try again in 2 s
+            return self.wait.start()
         self.est_lbl.setText("<span style='color:palette(placeholder-text)'>estimating file sizes ...</span>")
         sp = w.spec_for(); self.est = Estimator(w.st.ren, sp); self.est_gen = self.est.steps(); self._k = k
         self.tick.start()
@@ -128,19 +131,19 @@ class ExportControls(QtC.QObject):
         try:
             next(self.est_gen)
         except StopIteration:
-            res = (self.est.result, set(self.est.rough)); self.cache[self._k] = res; self.stop(); self.show(res)
+            res = (self.est.result, set(self.est.rough), len(self.est.frames) / self.est.fps); self.cache[self._k] = res
+            self.stop(); self.show(res)
             w.schedule(0)  # the shared renderer drew other sizes: draw the preview again
         except Exception as exc:
             self.stop(); self.est_lbl.setText(f"Could not estimate the file sizes: {exc}")
 
     def show(self, res):
-        result, rough = res; self.last = res
+        result, rough, secs = res; self.last = res  # secs: the length of the movie
         cur = self.win.quality_cb.currentIndex(); lines = []
         for i, (q, _) in enumerate(QUALITIES):
             parts = [f"{FORMAT_NAMES[f]} {human(b, q in rough)}" for f, b in result.get(q, {}).items()]
             line = f"{q}: " + " · ".join(parts)
             lines.append(f"<b>{line}</b>" if i == cur else line)
-        secs = len(self.est.frames) / self.est.fps if self.est else None
         pm = [f for f in result.get("HD", {}) if f in ("mov-transparent", "mov-prores")]
         if pm and secs:
             lines.append(" · ".join(f"{FORMAT_NAMES[f]} per minute: {human(result['HD'][f] / secs * 60)}" for f in pm) + " (HD)")

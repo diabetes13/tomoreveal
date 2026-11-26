@@ -169,3 +169,39 @@ def test_voxel_size_follows_the_tomogram_in_use(demo, tmp_path):
     st.add_files([seg], as_labels=[seg], log=quiet, make_renderer=False)
     st.set_tomogram_source("file:" + st._norm(a), log=quiet, make_renderer=False); assert st.ds.vox == pytest.approx(10.0)
     st.set_tomogram_source(None, log=quiet, make_renderer=False); assert st.ds.vox == pytest.approx(30.0)  # the segmentation's
+
+
+def test_surfaces_belong_to_the_grid_they_were_made_on(tmp_path):
+    """G-12: score data of one grid, then a tomogram of another: the surface of the old grid was drawn."""
+    z, y, x = np.indices((64, 64, 64)); blob = np.exp(-((z - 44) ** 2 + (y - 44) ** 2 + (x - 44) ** 2) / 60.0).astype(np.float32)
+    sc, tomo = str(tmp_path / "t__blob.mrc"), str(tmp_path / "t.mrc")
+    write_mrc(sc, blob, 10.0); write_mrc(tomo, np.random.default_rng(0).normal(size=(32, 32, 32)).astype(np.float32), 20.0)
+    st = tr.Studio(headless=True)
+    st.add_files([sc], as_features=[sc], log=quiet, make_renderer=False)
+    assert max(st.ds.meshes[1].bounds) > 44
+    st.add_files([tomo], as_tomogram=[tomo], log=quiet, make_renderer=False)
+    assert st.ds.shape == (32, 32, 32) and max(st.ds.meshes[1].bounds) < 32
+    sl = st.ds.bbox[1]; b = np.array(st.ds.meshes[1].bounds).reshape(3, 2)
+    assert np.allclose(b[:, 0], [s.start for s in sl[::-1]], atol=1.5) and np.allclose(b[:, 1], [s.stop - 1 for s in sl[::-1]], atol=1.5)
+
+
+def test_a_change_of_data_makes_only_the_surfaces_it_needs(demo, extra, monkeypatch):
+    from tomoreveal import volumes
+    made = []; real = volumes.surface
+    monkeypatch.setattr(volumes, "surface", lambda *a, **k: made.append(1) or real(*a, **k))
+
+    def count(fn):
+        made.clear(); fn(); return len(made)
+    st = tr.Studio(headless=True); other = "labels:" + st._norm(extra["other"])
+    training = f"dragonfly:{st._norm(extra['session'])}:training data"
+    kw = dict(log=quiet, make_renderer=False)
+    assert count(lambda: st.add_files([demo["tomogram"], demo["labels"]], **kw)) == 4
+    assert count(lambda: st.add_files([extra["other"]], **kw)) == 2
+    assert count(lambda: st.add_files([extra["session"]], **kw)) == 4
+    assert count(lambda: st.set_segmentation_enabled(training, True, **kw)) == 4  # its first tick: only its own
+    for key in (other, training):
+        for on in (False, True):
+            assert count(lambda: st.set_segmentation_enabled(key, on, **kw)) == 0
+    st.set_segmentation_enabled(training, False, **kw)
+    assert count(lambda: st.set_flip(("x",), **kw)) == 10
+    assert count(lambda: st.set_flip((), **kw)) == 0  # flipping back is instant

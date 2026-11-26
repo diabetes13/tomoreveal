@@ -178,7 +178,7 @@ def test_threshold_change_keeps_single_object_closeups(tmp_path, demo, needs_3d)
         c = win.info["structures"][0]; assert c["kind"] == "score"
         win.editor.insert(sb.focus_shot({"class": c["key"], "component": 1}, "one vesicle")); win.do_preview(); pump(app)
         pid = win.selected_part
-        win._thr_changed(c["id"], 0.6); win.thr_timer.stop(); win.apply_thresholds(); win.do_preview(); pump(app)  # the app applies once, from this timer
+        win._thr_changed(c["key"], 0.6); win.thr_timer.stop(); win._thr_settled(); win.do_preview(); pump(app)  # the app applies once, from this timer
         part = win.parts_panel.part(pid)
         assert part is not None and part["target"] == {"class": c["key"]}  # whole structure now, the part stays
         assert "whole structure" in win.msg_lbl.text()

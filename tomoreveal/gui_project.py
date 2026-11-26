@@ -410,7 +410,7 @@ class ProjectManager(QtC.QObject):
         w = self.win; sp = pj.project_spec(data, p.resolved)
         if sp:
             from .storyboard import merge_settings
-            w.spec = merge_settings(sp, w.info["spec"], same_grid=True)
+            w.spec = merge_settings(sp, w.info["spec"], same_grid=True); w._sync_thresholds()
         ui = data.get("ui") or {}
         for key, le in (("movie_name", w.name_le), ("movie_folder", w.folder_le)):
             if ui.get(key):

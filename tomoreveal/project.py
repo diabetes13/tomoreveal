@@ -148,11 +148,16 @@ def card_pictures(spec):
 
 def make_project(state, spec, ui=None, extra=None):
     """Project data for what is loaded (source_state) plus the movie settings, with plain entries (see with_file_facts).
-    `extra`: unknown keys read earlier, kept."""
+    `extra`: unknown keys read earlier, kept. The thresholds of score volumes are those of the settings (the data may
+    follow a moment later); the entries have them too, for 3.5.0."""
     data = dict(extra or {}); pictures = [dict(key="image:" + p, kind="image", path=p) for p in card_pictures(spec)]
+    sources = [dict(e) for e in state["sources"]]
+    for e in sources:
+        thr = ((spec or {}).get("classes") or {}).get(f"{e['key']}#1", {}).get("threshold") if e["kind"] == "scores" else None
+        if isinstance(thr, (int, float)):
+            e["threshold"] = float(thr)
     data.update(state, format=FORMAT, schema=SCHEMA, app_version=__version__,
-                saved=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                sources=[dict(e) for e in state["sources"]] + pictures,
+                saved=datetime.datetime.now().astimezone().isoformat(timespec="seconds"), sources=sources + pictures,
                 spec=json.loads(json.dumps(spec, default=float)), ui=dict(ui or {}))
     return data
 
@@ -287,7 +292,7 @@ def _load_into(st, data, resolved, log):
     for key, c in (remap((data.get("spec") or {}).get("classes") or {}, mapping)).items():  # surfaces built as saved
         kw = {n: c[n] for n in ("min_object_voxels", "smoothing", "soften") if c.get(n) is not None}
         if kw:
-            st.ds.params[key] = kw
+            st.ds.params = {**st.ds.params, key: kw}
     enabled = remap(data.get("segmentation_enabled") or {}, mapping)
     for s in st.seg_sources:
         if s["key"] in enabled:
@@ -300,10 +305,16 @@ def _load_into(st, data, resolved, log):
 
 
 def project_spec(data, resolved):
-    """The project's movie settings with keys rewritten for files found elsewhere."""
+    """The project's movie settings with keys rewritten for files found elsewhere. The threshold in the entry of a score
+    file wins over the one in the settings: 3.5.0 changes only the entry."""
     if not data.get("spec"):
         return None
-    m = path_mapping(resolved); sp = remap(copy.deepcopy(data["spec"]), m)
+    sp = copy.deepcopy(data["spec"])
+    for e in data.get("sources") or []:
+        c = (sp.get("classes") or {}).get(f"{e.get('key')}#1") if e.get("kind") == "scores" else None
+        if c is not None and e.get("threshold") is not None:
+            c["threshold"] = float(e["threshold"])
+    m = path_mapping(resolved); sp = remap(sp, m)
     for p in sp.get("shots", []):  # pictures on cards that were found somewhere else
         if p.get("type") == "card":
             bg = p.get("background") or {}

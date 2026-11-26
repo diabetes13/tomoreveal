@@ -63,14 +63,23 @@ class Estimator:
                     box = {}
                     alpha = encode.FORMATS[fmt][2]
                     frames = imgs if alpha else [encode.composite(im, bg) if im.shape[2] == 4 else im for im in imgs]
-                    t = threading.Thread(target=lambda: box.update(n=encode.encode_sample(frames, size, self.fps, args, alpha)), daemon=True)
+                    t = threading.Thread(target=self._encode, args=(box, frames, size, args, alpha), daemon=True)
                     t.start()
                     while t.is_alive():
                         if self.cancelled:
                             return
                         yield
-                    self.per_frame[(res_name, fmt, kind)] = box.get("n", 0) / max(1, len(imgs))
+                    if "error" in box:  # (the window says "Could not estimate the file sizes: ...")
+                        raise box["error"]
+                    self.per_frame[(res_name, fmt, kind)] = box["n"] / max(1, len(imgs))
         self.result = self.totals()
+
+    def _encode(self, box, frames, size, args, alpha):
+        """In a thread: the number of bytes, or the error, goes into box."""
+        try:
+            box["n"] = encode.encode_sample(frames, size, self.fps, args, alpha)
+        except Exception as exc:
+            box["error"] = exc
 
     def totals(self):
         out = {}

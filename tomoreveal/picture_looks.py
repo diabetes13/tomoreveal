@@ -18,7 +18,7 @@ class PictureLooks:
         """Soft shadows baked into the vertex colours (the colour each actor has now, times the shadow factor)."""
         from .look import SHADOW_DARKEST, BakedShadows
         on = L35["shadow"] != "none"
-        acts = [(kk, act, self.ds.meshes.get(kk)) for kk, act in self.actors.items()]
+        acts = [(kk, act, self.mesh_of(kk)) for kk, act in self.actors.items()]
         if not on:
             for _, act, _ in acts:
                 if act.mapper.GetScalarVisibility():

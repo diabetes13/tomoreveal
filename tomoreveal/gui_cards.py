@@ -102,11 +102,11 @@ def card_rows(panel, pid, p, form):
             ed.setToolTip("The text of this block. The preview follows as you type.")
             timer = QtC.QTimer(ed); timer.setSingleShot(True); timer.setInterval(300)
 
-            def typed(i=i, ed=ed):
+            def typed(i=i, ed=ed, timer=timer):  # into the settings at once; the preview follows when the typing stops
                 q = part()
                 if q is not None and i < len(q["blocks"]):
-                    q["blocks"][i]["text"] = ed.toPlainText(); changed(); panel.refresh_line(pid)
-            timer.timeout.connect(typed); ed.textChanged.connect(timer.start); v.addWidget(ed)
+                    q["blocks"][i]["text"] = ed.toPlainText(); timer.start()
+            timer.timeout.connect(lambda: (changed(), panel.refresh_line(pid))); ed.textChanged.connect(typed); v.addWidget(ed)
             size = QtW.QDoubleSpinBox(); size.setRange(0.3, 3.3); size.setSingleStep(0.1); size.setValue(float(b.get("size", 1.2)))
             size.setPrefix("size "); size.setToolTip("Text size (3.3 is the largest: 8 % of the picture height)")
             size.valueChanged.connect(lambda val, i=i: (part()["blocks"][i].update(size=float(val)), changed()))

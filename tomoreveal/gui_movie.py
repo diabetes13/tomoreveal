@@ -237,7 +237,7 @@ class MovieEditor(QtC.QObject):
     def _restore(self, spec):
         if spec is None:
             return
-        self.hist_timer.stop(); self.win.spec = spec
+        self.hist_timer.stop(); self.win.spec = spec; self.win._sync_thresholds()
         self.win.build_controls(); self.win.schedule(0); self.refresh_buttons()
 
     # ---- timeline gestures ----

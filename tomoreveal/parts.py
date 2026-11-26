@@ -83,6 +83,9 @@ def flip_spec(spec, shape, axes):
             for key in ("point", "pos", "focal"):
                 if isinstance(w, dict) and w.get(key) is not None:
                     w[key] = pt(w[key])
+        cam = p.get("camera")  # beside a path: still beside the same thing (z does not change which side is left)
+        if isinstance(cam, dict) and cam.get("side") in ("left", "right") and ("x" in axes) != ("y" in axes):
+            cam["side"] = "right" if cam["side"] == "left" else "left"
         if p.get("type") == "slide" and "z" in axes:
             for key in ("from", "to"):
                 v = p.get(key)
@@ -342,12 +345,13 @@ def migrate_spec(spec):
 
 def default_spec(ds):
     return dict(
-        classes={c["key"]: dict(name=c["name"], color=c["color"], show=not (c["background"] or c.get("hidden"))) for c in ds.classes.values()},
+        classes={c["key"]: dict(name=c["name"], color=c["color"], show=not (c["background"] or c.get("hidden")),
+                                **({"threshold": c["threshold"]} if c["kind"] == "score" else {})) for c in ds.classes.values()},
         view=dict(tilt=42, az=0, zoom=1.0),
         style=dict(bg="#000000", legend=True, slice_label=True, title="", contrast=[1, 99], invert=False, ortho=False, fov=30,
                    tomogram=dict(show=True, opacity=1.0)),
         shots=default_parts(),
-        return_to_overview=True, z_range=None, clip=None,
+        return_to_overview=True, z_range=None, clip=None, **({"flip": list(ds.flip)} if ds.flip else {}),
         output=dict(size=[1920, 1080], fps=30, aa=True, formats=["mp4"], codec="h264", file_size="balanced"))
 
 
@@ -358,6 +362,9 @@ def merge_settings(spec, new, same_grid=True):
     until the structure is back."""
     old = spec.get("classes") or {}
     spec["classes"] = {k: old.get(k) or v for k, v in new["classes"].items()}
+    for k, v in new["classes"].items():  # settings of an older version have none
+        if "threshold" in v:
+            spec["classes"][k].setdefault("threshold", v["threshold"])
     for k, v in old.items():  # settings of structures that are not loaded now are kept, for when they come back
         spec["classes"].setdefault(k, v)
     migrate_spec(spec)

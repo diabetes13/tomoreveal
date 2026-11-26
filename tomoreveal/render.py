@@ -86,10 +86,11 @@ class Renderer(PreviewPicking, PictureLooks):
         for p in self.cplanes[:4]:
             self.slice_actor.mapper.AddClippingPlane(p)
         self.actors, self.comp_actors, self._fonts = {}, {}, {}
+        self._shown = {}  # structure id -> the surface its actor shows: the structure's own, or a part's (3.5)
         self.bar_actor, self.last_rects = None, {}
         self._card_cache, self._next_cache = {}, {}
         for k, m in ds.meshes.items():
-            self.actors[k] = self._add(m)
+            self.actors[k] = self._add(m); self._shown[k] = m
 
     def _add(self, mesh, front=False):
         a = self.pl.add_mesh(mesh, color="white", smooth_shading=True, specular=0.2, specular_power=15, ambient=0.25, diffuse=0.8)
@@ -104,7 +105,7 @@ class Renderer(PreviewPicking, PictureLooks):
     def _use_surfaces(self, spec, level):
         """The surfaces this frame needs: a part may smooth its membranes more or less than the Structures tab (3.5).
         In the window (surface_async) a surface not made yet is asked for (surfaces_pending) and the usual one is drawn
-        meanwhile; in a movie it is made at once."""
+        meanwhile; in a movie it is made at once. The structure's own surface (ds.meshes) is never changed here."""
         ds = self.ds; now = {}
         for kk, act in self.actors.items():
             lvl = None
@@ -114,20 +115,20 @@ class Renderer(PreviewPicking, PictureLooks):
                     self.surfaces_pending.add((kk, lvl)); lvl = None
             if lvl is not None:
                 now[kk] = lvl
-            ck = ds._cache_key(kk, lvl)
-            if getattr(act, "_surf_key", None) == ck and ds.meshes.get(kk) is getattr(act, "_surf_mesh", None):
+            own = ds.make_surface(kk, lvl) if lvl is not None else None
+            mesh = own if own is not None else ds.meshes.get(kk)
+            if mesh is None or mesh is self._shown.get(kk):
                 continue
-            mesh = ds.make_surface(kk, lvl) if (lvl is not None or ds.surface_ready(kk)) else ds.meshes.get(kk)
-            if mesh is None:
-                continue
-            if ds.meshes.get(kk) is not mesh or getattr(act, "_surf_mesh", None) is not mesh:
-                ds.meshes[kk] = mesh; act.mapper.SetInputData(mesh); act._shown_mesh = mesh; act._ao_key = None
-                for key in [key for key in self.comp_actors if key[0] == kk]:  # objects in focus: made again with this level
-                    c = self.comp_actors.pop(key)
-                    if c is not None:
-                        self.pl.remove_actor(c)
-            act._surf_key, act._surf_mesh = ck, mesh
+            self._shown[kk] = mesh; act.mapper.SetInputData(mesh); act._shown_mesh = mesh; act._ao_key = None
+            for key in [key for key in self.comp_actors if key[0] == kk]:  # objects in focus: made again with this level
+                c = self.comp_actors.pop(key)
+                if c is not None:
+                    self.pl.remove_actor(c)
         self._soften_now = now
+
+    def mesh_of(self, k):
+        """The surface of structure k that is drawn now (None: there is none)."""
+        return self._shown.get(k)
 
     def _comp_actor(self, k, cid):
         key = (k, cid)
@@ -462,7 +463,7 @@ class Renderer(PreviewPicking, PictureLooks):
     def _fx_mesh(self, k, cid, kind="item"):
         """Surfaces used by the effects, cached: the item itself, the item with outward-facing polygons (for capped
         clipping), and the rest of a structure without one of its objects."""
-        src = self.ds.meshes.get(k); key = (k, cid, kind, id(src), tuple(sorted(self._soften_now.items())))
+        src = self.mesh_of(k); key = (k, cid, kind, id(src), tuple(sorted(self._soften_now.items())))
         if key not in self._fx_meshes or self._fx_meshes[key][0] is not src:
             ds = self.ds
             if kind == "rest":
@@ -471,7 +472,7 @@ class Renderer(PreviewPicking, PictureLooks):
                 m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step,
                             self._soften_now.get(k, ds.param(k, "soften")), ds.shape)
             else:
-                m = ds.meshes.get(k) if cid is None else ds.comp_mesh(k, int(cid), self._soften_now.get(k))
+                m = src if cid is None else ds.comp_mesh(k, int(cid), self._soften_now.get(k))
                 if m is not None and kind == "outward":
                     m = m.compute_normals(flip_normals=True, split_vertices=False)  # our surfaces are wound inwards
             self._fx_meshes[key] = (src, m)
@@ -481,7 +482,7 @@ class Renderer(PreviewPicking, PictureLooks):
         """(body, cap) of an item cut by a plane on the CPU (the six OpenGL clipping planes are all in use); cached by the
         plane's position rounded to 0.5 voxel."""
         n = np.asarray(normal, float); o = np.round(np.asarray(origin, float) * 2) / 2
-        src = self.ds.meshes.get(k); key = (k, cid, tuple(np.round(n, 3)), tuple(o), id(src))
+        src = self.mesh_of(k); key = (k, cid, tuple(np.round(n, 3)), tuple(o), id(src))
         if key in self._cut_cache and self._cut_cache[key][2] is src:
             return self._cut_cache[key][:2]
         vtk, pv = self.vtk, self.pv
@@ -514,7 +515,7 @@ class Renderer(PreviewPicking, PictureLooks):
             a.SetVisibility(False)
         for kk, act in self.actors.items():  # the structure's own surface again (a cut may have swapped it)
             if getattr(act, "_rest", False):
-                act.mapper.SetInputData(self.ds.meshes[kk]); act._rest = False; act._shown_mesh = self.ds.meshes[kk]
+                act.mapper.SetInputData(self.mesh_of(kk)); act._rest = False; act._shown_mesh = self.mesh_of(kk)
         if not fx or not items:
             return False
         ds = self.ds; translucent = False
@@ -636,7 +637,7 @@ class Renderer(PreviewPicking, PictureLooks):
                 pr.SetAmbient(0.5); pr.SetDiffuse(0.62); pr.SetSpecular(0.12); pr.SetSpecularPower(6)
             elif xray:  # X-ray: luminous rather than lit, with a small glint
                 pr.SetAmbient(0.7); pr.SetDiffuse(0.35); pr.SetSpecular(0.3); pr.SetSpecularPower(25)
-            mesh = ds.meshes.get(kk)
+            mesh = self.mesh_of(kk)
             if kind == "dots" and mesh is not None:
                 pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))
                 dm = self._dots_mesh(kk, mesh, float(st["point_size"]))
@@ -700,8 +701,8 @@ class Renderer(PreviewPicking, PictureLooks):
     def _visible_points(self):
         out = []
         for kk, act in self.actors.items():
-            if act.GetVisibility() and act.GetProperty().GetOpacity() > 0.02 and kk in self.ds.meshes:
-                out.append((kk, self.ds.meshes[kk]))
+            if act.GetVisibility() and act.GetProperty().GetOpacity() > 0.02 and self.mesh_of(kk) is not None:
+                out.append((kk, self.mesh_of(kk)))
         return out
 
     def _apply_slice_texture(self, s, spec, lk, show_slice, cb):
@@ -841,7 +842,7 @@ class Renderer(PreviewPicking, PictureLooks):
 
     def update_class(self, k):
         """Swap in the new surface of one structure (after a threshold change)."""
-        a = self.actors.pop(k, None)
+        a = self.actors.pop(k, None); self._shown.pop(k, None)
         if a is not None:
             self.pl.remove_actor(a)
         for key in [key for key in self.comp_actors if key[0] == k]:
@@ -859,7 +860,7 @@ class Renderer(PreviewPicking, PictureLooks):
         self._fx_meshes = {key: v for key, v in self._fx_meshes.items() if key[0] != k}
         self._cut_cache = {key: v for key, v in self._cut_cache.items() if key[0] != k}
         if k in self.ds.meshes:
-            self.actors[k] = self._add(self.ds.meshes[k])
+            self.actors[k] = self._add(self.ds.meshes[k]); self._shown[k] = self.ds.meshes[k]
 
     def close(self):
         try:

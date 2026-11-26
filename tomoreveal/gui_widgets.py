@@ -46,19 +46,19 @@ def wheel_to_panel(obj, e):
 
 
 class Worker(QtC.QThread):
-    """Runs file reading and surface building off the window's thread."""
+    """Runs file reading and surface building off the window's thread. error: the exception it ended with."""
     done = QtC.Signal(object); failed = QtC.Signal(str); log = QtC.Signal(str)
 
     def __init__(self, fn):
-        super().__init__(); self.fn = fn
+        super().__init__(); self.fn = fn; self.error = None
 
     def run(self):
         try:
             self.done.emit(self.fn(self.log.emit))
         except UserError as exc:
-            self.failed.emit(str(exc))
+            self.error = exc; self.failed.emit(str(exc))
         except Exception as exc:
-            traceback.print_exc(); self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.error = exc; traceback.print_exc(); self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class Preview(QtW.QLabel):

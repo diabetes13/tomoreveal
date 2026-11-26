@@ -26,12 +26,12 @@ import sys
 
 import numpy as np
 
-from .common import UserError, VIEWS, __version__, read_json
+from .common import UserError, VIEWS, __version__, hex2rgb, read_json
 from .dragonfly import OrsSession, describe_session, guess_roi
 from .gui import cmd_demo, cmd_gui, cmd_icon
 from .movie import render_movie
 from .render import get_font
-from .storyboard import build_plan, default_spec, focus_shot, main_range
+from .storyboard import build_plan, default_spec, focus_shot, left_out, main_range
 from .studio import Studio
 from .volumes import write_mrc
 from .webapp import cmd_app
@@ -148,6 +148,8 @@ def cmd_movie(args):
         if hits[0] not in ds.meshes:
             raise UserError(f"--focus '{name}': no such structure. Available: {', '.join(c['name'] for k, c in ds.classes.items() if k in ds.meshes)}")
         spec["shots"].append(focus_shot({"class": ds.key_of(hits[0])}, ds.classes[hits[0]]["name"], seconds=args.focus_seconds))
+    for i, why in left_out(spec, build_plan(spec, ds)):
+        print(f"note: part {i} is left out: {why}", file=sys.stderr)
     views = parse_views(args.view); base, ext = os.path.splitext(args.out)
     for name, tilt, az in views:
         out = args.out if len(views) == 1 else f"{base}_{name}{ext or '.mp4'}"
@@ -168,6 +170,8 @@ def cmd_movie(args):
 def cmd_preview(args):
     from PIL import Image, ImageDraw
     st, _ = cli_studio(args); spec = cli_spec(st, args)
+    if args.z is not None and not 0 <= args.z < st.ds.shape[0]:
+        raise UserError(f"--z needs a slice number from 0 to {st.ds.shape[0] - 1}")
     spec["style"].update(legend=False, slice_label=False)
     views = parse_views(args.view) if args.view != "oblique" else [(n, *v) for n, v in VIEWS.items()]
     size = (640, 360) if args.size[0] >= args.size[1] else (360, 640)
@@ -319,6 +323,17 @@ def validate_args(args):
         sys.exit("tomoreveal: --fps needs at least 1 frame per second")
     if not 1 <= getattr(args, "fov", 30) <= 179:
         sys.exit("tomoreveal: --fov needs an angle from 1 to 179 degrees")
+    bg, bar = getattr(args, "bg", None), getattr(args, "scale_bar", None)
+    try:
+        hex2rgb(bg or "#000000")
+    except ValueError:
+        sys.exit(f"tomoreveal: --bg needs a colour name or #rrggbb, for example black or #202020 (not {bg})")
+    try:
+        bar_ok = bar in (None, "auto") or float(bar) > 0
+    except ValueError:
+        bar_ok = False
+    if not bar_ok:
+        sys.exit(f"tomoreveal: --scale-bar needs 'auto' or a length in nm, for example 100 (not {bar})")
     if size is not None and (size[0] % 2 or size[1] % 2):
         print(f"note: the size is rounded down to {size[0] // 2 * 2}x{size[1] // 2 * 2} (the video needs even numbers)")
     if getattr(args, "cmd", None) == "preview" and not os.path.splitext(args.out)[1]:

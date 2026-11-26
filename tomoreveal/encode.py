@@ -12,7 +12,10 @@ import subprocess
 
 import numpy as np
 
+from .common import __version__
+
 CHUNK_FRAMES = 300
+PICTURE_VERSION = 1  # raised when the same settings and data give other pictures (the app's version may stay the same)
 
 # name: (file suffix, extension, pixel format fed to FFmpeg, encoder arguments)
 SIZES = {"larger": 18, "balanced": 20, "smaller": 23}
@@ -24,8 +27,16 @@ def ffmpeg_exe():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+# Encoded and tagged as BT.709, as HD players expect (the -color_* options alone leave primaries and transfer unknown)
+BT709 = ["-vf", "scale=out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"]
+
+
 def video_args(fmt="mp4", codec="h264", size="balanced", crf=None, preset="slow"):
     """FFmpeg output arguments for one format. crf overrides the size choice (H.264 / H.265 only)."""
+    return _codec_args(fmt, codec, size, crf, preset) + BT709
+
+
+def _codec_args(fmt, codec, size, crf, preset):
     if fmt == "mov-transparent":
         return ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "apl0"]
     if fmt == "mov-prores":
@@ -55,9 +66,10 @@ def output_paths(out, formats):
 
 
 def settings_hash(spec, ds):
-    """Fingerprint of what a movie shows: its settings and the data's grid and structures."""
-    s = json.dumps(dict(spec=spec, shape=list(ds.shape), tomo=ds.tomo_name, keys=sorted(c["key"] for c in ds.classes.values())),
-                   sort_keys=True, default=str)
+    """Fingerprint of what a movie shows: its settings, the data (grid, structures, voxels) and the program that draws it.
+    An interrupted movie is continued only when this is the same."""
+    s = json.dumps(dict(spec=spec, shape=list(ds.shape), tomo=ds.tomo_name, keys=sorted(c["key"] for c in ds.classes.values()),
+                        data=ds.fingerprint(), program=[__version__, PICTURE_VERSION]), sort_keys=True, default=str)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
@@ -146,6 +158,19 @@ class Pipe:
             pass
 
 
+def new_name(path, k=1):
+    """name (new).mp4, name (new 2).mp4, ...: where a new movie goes when the old one can't be replaced (3-D3)."""
+    base, ext = os.path.splitext(path)
+    return f"{base} (new{'' if k == 1 else ' %d' % k}){ext}"
+
+
+def free_new_name(path, taken=os.path.exists):
+    k = 1
+    while taken(new_name(path, k)):
+        k += 1
+    return new_name(path, k)
+
+
 def join(chunks, path):
     """Join chunk files into one without re-encoding."""
     lst = path + ".list.txt"
@@ -176,7 +201,7 @@ class ChunkedWriter:
         self.paths = output_paths(out, self.formats)
         self.record = dict(settings=settings, total=self.total, fps=self.fps, size=list(self.size), chunk_frames=self.chunk_frames,
                            formats=list(self.formats), chunks_done=self.chunk)
-        self.pipes = None
+        self.pipes, self.notes = None, []
         self._save_record()
 
     def _save_record(self):
@@ -208,23 +233,38 @@ class ChunkedWriter:
             self._close_chunk()
 
     def close(self):
-        """Finish: join the chunks of every format and rename them to the final names."""
+        """Finish: join the chunks of every format, then put each file in place. An old movie that can't be replaced (open
+        in a player) stays, and the new one is saved next to it (new_name): self.paths holds where each format went, and
+        self.notes says so. When a join fails or a format can't be saved at all, the chunks stay and it is an error."""
         if self.pipes is not None:
             self._close_chunk()
-        for f, path in self.paths.items():
-            chunks = [_partial(path, i) for i in range(self.chunk)]
-            tmp = _partial(path)
-            if len(chunks) == 1:
-                os.replace(chunks[0], tmp)
-            else:
-                join(chunks, tmp)
-            try:
-                os.replace(tmp, path)
-            except OSError as exc:  # Windows: the old movie is open in a player
-                from .common import UserError
-                raise UserError(f"could not replace {os.path.basename(path)} (is it open in another program?); "
-                                f"the new movie is saved as {os.path.basename(tmp)}") from exc
+        tmps = {f: _partial(p) for f, p in self.paths.items()}
+        try:
+            for f, path in self.paths.items():  # one chunk is joined too (a copy): every chunk stays until all are saved
+                join([_partial(path, i) for i in range(self.chunk)], tmps[f])
+            for f in list(self.paths):
+                self.paths[f] = self._put(tmps[f], self.paths[f])
+        finally:
+            for t in tmps.values():
+                if os.path.exists(t):
+                    os.remove(t)
         remove_partial(self.out, list(self.formats))
+
+    def _put(self, tmp, path):
+        from .common import UserError
+        try:
+            os.replace(tmp, path)
+            return path
+        except OSError:  # Windows: the old movie is open in a player
+            alt = free_new_name(path)
+        try:
+            os.replace(tmp, alt)
+        except OSError as exc:
+            raise UserError(f"The new movie could not be saved as {os.path.basename(path)} or {os.path.basename(alt)} "
+                            f"(is it open in another program?): {exc}") from exc
+        self.notes.append(f"Could not replace {os.path.basename(path)} (is it open in another program?), so the new movie "
+                          f"is saved as {os.path.basename(alt)}.")
+        return alt
 
     def kill(self):
         """Stop at once and leave the files as they are (what a crash leaves behind; used by tests)."""

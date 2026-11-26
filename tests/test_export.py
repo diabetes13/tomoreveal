@@ -10,6 +10,7 @@ import pytest
 import tomoreveal as tr
 from tomoreveal import encode
 from tomoreveal.estimate import Estimator
+from test_movie_output import window  # noqa: F401 (fixture)
 
 
 def short_spec(ds, seconds=0.5, size=(320, 180), fps=10, **out):
@@ -69,7 +70,7 @@ def test_resume_with_prores_and_h264(studio, tmp_path):
     for i, _, _ in job:
         if i == 30:
             break
-    job.crash()
+    job.close(keep=True)  # as a crash leaves it
     job = tr.movie_frames(studio.ren, spec, out, poster=False, resume=True, chunk_frames=20)
     assert job.start == 20
     for _ in job:
@@ -122,3 +123,82 @@ def test_estimate_in_the_window_stops_when_settings_change(tmp_path, demo):
         assert not errs, errs
     finally:
         sys.excepthook = old; win.close()
+
+
+RED = (225, 87, 89)
+
+
+def colour_tags(path):
+    """(range, matrix/primaries/transfer) as FFmpeg reads them from the file, e.g. ("tv", "bt709")."""
+    import re
+    err = subprocess.run([encode.ffmpeg_exe(), "-hide_banner", "-i", path], capture_output=True).stderr.decode(errors="replace")
+    m = re.search(r"Video: .*?\((tv|pc), ([\w/]+)", err)
+    return (m.group(1), m.group(2)) if m else (None, err[-300:])
+
+
+def decoded_bt709(path, n, w, h):
+    """Frame n as RGB, decoded with the BT.709 matrix that HD players use."""
+    raw = subprocess.run([encode.ffmpeg_exe(), "-v", "error", "-i", path, "-vf",
+                          f"select=eq(n\\,{n}),scale=in_color_matrix=bt709:in_range=tv", "-vframes", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(h, w, 3)
+
+
+@pytest.mark.parametrize("fmt", list(encode.FORMATS))
+def test_movies_are_tagged_and_encoded_as_bt709(tmp_path, fmt):
+    """Before, FFmpeg converted with BT.601 and wrote no tags, and players showed the colours shifted (G-39). Five frames in
+    chunks of two, stopped after three and continued: the joined movie keeps the tags."""
+    w, h, alpha = 64, 36, encode.FORMATS[fmt][2]; out = str(tmp_path / "c.mp4")
+    img = np.zeros((h, w, 4 if alpha else 3), np.uint8); img[..., :3] = RED
+    if alpha:
+        img[..., 3] = 255
+    for start, n in ((0, 3), (1, 3)):
+        wr = encode.ChunkedWriter(out, {fmt: encode.video_args(fmt)}, (w, h), 10, 5, "s", chunk_frames=2, start_chunk=start)
+        for _ in range(n):
+            wr.write(img)
+        wr.kill() if start == 0 else wr.close()
+    path = wr.paths[fmt]
+    assert encode.count_frames(path) == 5 and colour_tags(path) == ("tv", "bt709")
+    for n in (0, 4):
+        got = decoded_bt709(path, n, w, h)[4:-4, 4:-4].reshape(-1, 3).mean(0)
+        assert np.abs(got - RED).max() <= 4, (n, got)
+
+
+def broken_encoder(*a, **k):
+    raise RuntimeError("the encoder broke")
+
+
+def test_an_encoder_error_ends_the_estimate(studio, monkeypatch):
+    """Before, an error in the encoder's thread was lost and the estimate said 0 MB (G-62)."""
+    monkeypatch.setattr(encode, "encode_sample", broken_encoder)
+    e = Estimator(studio.ren, short_spec(studio.ds, seconds=0.3))
+    with pytest.raises(RuntimeError, match="encoder broke"):
+        for _ in e.steps():
+            pass
+    assert e.result is None
+
+
+def estimate(app, win, seconds=120):
+    import time
+    from test_movie_output import run_for
+    win.tabs.setCurrentIndex(win.TAB_MOVIE); win.prev_timer.stop(); win.export.wait.stop(); win.export.start()
+    end = time.monotonic() + seconds
+    while win.export.est_gen is not None:
+        assert time.monotonic() < end
+        run_for(app, 0.02)
+    return win.export.est_lbl.text()
+
+
+def test_the_window_says_why_there_is_no_estimate(window, monkeypatch):
+    app, win, errs = window; monkeypatch.setattr(encode, "encode_sample", broken_encoder)
+    assert estimate(app, win) == "Could not estimate the file sizes: the encoder broke" and win.export.cache == {}
+    assert not errs, errs
+
+
+def test_prores_sizes_per_minute_are_shown(window):
+    """Before, the length of the movie was gone when the result was shown, so "per minute" never was (G-59)."""
+    app, win, errs = window; win.export.fmt["mov-prores"].setChecked(True)
+    assert "Editing MOV per minute: about" in estimate(app, win)
+    win.export.stop(); win.export.est_lbl.setText(""); win.export.start()  # from the cache
+    assert win.export.est is None and "Editing MOV per minute: about" in win.export.est_lbl.text()
+    assert not errs, errs

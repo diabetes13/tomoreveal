@@ -6,6 +6,7 @@ through the middle of the voxels at each position along it. Lines are smoothed a
 """
 import json
 import math
+import traceback
 from collections import deque
 
 import numpy as np
@@ -17,8 +18,8 @@ TOO_SMALL = "This object is too small or too compact to follow. Use points inste
 
 
 def _items_mask(ds, items, clip=None, max_voxels=4_000_000):
-    """Boolean mask of the items (z, y, x) in their joint bounding box, binned so it has at most max_voxels voxels.
-    Returns (mask, offset (x, y, z) of the box, bin factor)."""
+    """Boolean mask of the items (z, y, x) in their joint bounding box, binned so it has at most max_voxels voxels, as it
+    is in the files (not flipped). Returns (mask, offset (x, y, z) of the box there, bin factor)."""
     boxes = []
     for key, comp in items:
         k = ds.id_of(key)
@@ -44,6 +45,10 @@ def _items_mask(ds, items, clip=None, max_voxels=4_000_000):
             sub = tuple(slice(max(s.start, b.start) - b.start, min(s.stop, b.stop) - b.start) for s, b in zip(sl, bb))
             tgt = tuple(slice(max(s.start, b.start) - s.start, min(s.stop, b.stop) - s.start) for s, b in zip(sl, bb))
             m[tgt] |= lbl[sub] == int(comp)
+    flipped = [i for i, a in enumerate("zyx") if a in ds.flip]  # shown flipped (3.5): back, before anything depends on it
+    m = np.flip(m, flipped)
+    for i in flipped:
+        lo[i] = ds._shape[i] - hi[i]
     f = 1
     while m.size / f ** 3 > max_voxels:
         f += 1
@@ -109,7 +114,8 @@ def smooth_resample(line, n=None, smooth=None):
 
 
 def centre_line(ds, items, clip=None):
-    """Evenly spaced points (x, y, z voxels) along the middle of the items, from one end to the other."""
+    """Evenly spaced points (x, y, z voxels) along the middle of the items, from one end to the other. Worked out in the
+    files' coordinates and then mirrored if the volume is shown flipped, so the path and its direction stay the same."""
     m, off, f = _items_mask(ds, items, clip)
     if m.sum() < 20:
         raise UserError(TOO_SMALL)
@@ -133,7 +139,11 @@ def centre_line(ds, items, clip=None):
             line = None
     if line is None:
         line = _spine(pts)
-    return smooth_resample(line)
+    line = smooth_resample(line)
+    for i, a in enumerate("xyz"):
+        if a in ds.flip:
+            line[:, i] = ds._shape[2 - i] - 1 - line[:, i]
+    return line
 
 
 def catmull_rom(points, samples_per_segment=40):
@@ -333,17 +343,45 @@ def path_key(items, cb):
     return json.dumps([list(i) for i in items]) + json.dumps(cb, default=list)
 
 
+def path_items(part):
+    """(structure, object) of what a path part follows; [] when it goes through points or nothing is chosen yet."""
+    src = part.get("source") or {}
+    if src.get("kind", "follow") != "follow":
+        return []
+    return [(it.get("structure"), it.get("component")) for it in src.get("items", []) if it.get("structure") is not None]
+
+
+def work_out(ds, items, cb):
+    """Work out the centre line of the items and keep it on the dataset, or why there is none: a failure of any kind is
+    that path's, is not tried again until the structures change, and never ends the others. Returns the line or the error."""
+    cache = ds.path_cache
+    try:
+        r = centre_line(ds, items, cb)
+    except UserError as exc:
+        r = exc
+    except Exception as exc:
+        traceback.print_exc(); r = UserError(f"the path could not be worked out ({type(exc).__name__}: {exc})")
+    cache[path_key(items, cb)] = r
+    return r
+
+
+def missing_paths(spec, ds):
+    """The items of every path part that is switched on and whose centre line has still to be worked out."""
+    from .storyboard import clip_box
+    cb, out = clip_box(spec, ds.shape), {}
+    for p in spec.get("shots", []):
+        items = path_items(p) if p.get("type") == "path" and p.get("on", True) else []
+        if items and path_key(items, cb) not in ds.path_cache:
+            out[path_key(items, cb)] = items
+    return list(out.values())
+
+
 def path_line(ds, items, cb):
     """The centre line of the items (cached on the dataset). The window computes it in a worker (PathPending)."""
-    key = path_key(items, cb)
-    if key not in ds.path_cache:
-        if ds.path_async:
-            raise PathPending(key)
-        try:
-            ds.path_cache[key] = centre_line(ds, items, cb)
-        except UserError as exc:
-            ds.path_cache[key] = exc
-    r = ds.path_cache[key]
+    key, cache = path_key(items, cb), ds.path_cache
+    if key not in cache and ds.path_async:
+        raise PathPending(key)
+    r = cache[key] if key in cache else work_out(ds, items, cb)
     if isinstance(r, Exception):
         raise r
     return r
@@ -539,7 +577,7 @@ def path_poses(part, ds, fr, spec, n, fps, cb):
     src = part.get("source") or {}; cam = dict(PATH_CAMERA, **(part.get("camera") or {}))
     v = spec.get("view", {}); main_dir, main_up = fr.axes(float(v.get("tilt", 42)), float(v.get("az", 0)))
     if src.get("kind", "follow") == "follow":
-        items = [(it.get("structure"), it.get("component")) for it in src.get("items", []) if it.get("structure") is not None]
+        items = path_items(part)
         if not items:
             raise UserError("Choose the structure the camera should follow.")
         line = path_line(ds, items, cb)

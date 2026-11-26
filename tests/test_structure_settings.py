@@ -127,3 +127,84 @@ def surfaces_made(app, win):
                 loop.exec()
         for _ in range(20):
             app.processEvents()
+
+
+# ---- surfaces made in the background (G-54) ----
+from test_tidy_panels import pump, window  # noqa: E402, F401 (fixture)
+
+
+def run_for(app, seconds):
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents(); time.sleep(0.005)
+
+
+def no_surfaces_on_this_thread(monkeypatch):
+    """Surfaces made on the window's thread from now on (there should be none)."""
+    import threading
+    from tomoreveal import volumes
+    here = []; real = volumes.surface
+    monkeypatch.setattr(volumes, "surface", lambda *a, **k: here.append(threading.current_thread() is threading.main_thread()) or real(*a, **k))
+    return here
+
+
+def test_surfaces_are_made_in_the_background_and_the_pause_stays(window, monkeypatch):
+    app, win, errs = window; made = no_surfaces_on_this_thread(monkeypatch)
+    ds = win.st.ds; keys = [ds.key_of(2), ds.key_of(4)]; pause = win.param_timer.interval()
+    for key in keys:
+        win._param_changed(key, "smoothing", 7)
+    win.apply_params(); win._param_changed(keys[0], "smoothing", 3)  # changed again while the first is being made
+    run_for(app, 2.5)
+    assert ds.param(ds.id_of(keys[0]), "smoothing") == 3 and ds.param(ds.id_of(keys[1]), "smoothing") == 7
+    win.editor.undo(); run_for(app, 1.5)  # the next change that is noticed without the timer
+    assert made and not any(made) and win.param_timer.interval() == pause == 500
+    assert not errs, errs
+
+
+def count_applied(app, win, seconds=1.0):
+    runs = []; real = win.apply_params
+    win.apply_params = lambda: (runs.append(1), real())[1]
+    try:
+        win.param_timer.stop(); win.build_controls(); run_for(app, seconds)
+    finally:
+        del win.apply_params
+    return len(runs)
+
+
+def test_asking_for_surfaces_comes_to_an_end(window, monkeypatch, tmp_path):
+    from tomoreveal.volumes import write_mrc
+    app, win, errs = window; ds = win.st.ds
+    made = no_surfaces_on_this_thread(monkeypatch)
+    # a background structure that is not drawn
+    k = ds.id_of(ds.key_of(1)); ds.classes[k]["background"] = True; ds.meshes.pop(k); win.st.ren.update_class(k)
+    win.spec["classes"][ds.key_of(1)]["smoothing"] = 4
+    assert count_applied(app, win) <= 2 and ds.param(k, "smoothing") == 4 and k not in ds.meshes
+    # a worker that fails: the message is shown, and it is asked again only when the setting changes
+    key = ds.key_of(2); k = ds.id_of(key); real = ds.make_surface; calls = []
+
+    def broken(ref, *a, **kw):
+        if ds.id_of(ref) == k:
+            calls.append(1); raise MemoryError("not enough memory")
+        return real(ref, *a, **kw)
+    monkeypatch.setattr(ds, "make_surface", broken)
+    win.spec["classes"][key]["smoothing"] = 5; win.spec["classes"][ds.key_of(4)]["smoothing"] = 5
+    assert count_applied(app, win) <= 2 and len(calls) == 1 and "not enough memory" in win.msg_lbl.text()
+    assert ds.param(ds.id_of(ds.key_of(4)), "smoothing") == 5  # the others are swapped in
+    win.build_controls(); run_for(app, 0.8); assert len(calls) == 1
+    monkeypatch.setattr(ds, "make_surface", real)
+    win._param_changed(key, "smoothing", 6); run_for(app, 1.5); assert ds.param(k, "smoothing") == 6
+    # a score structure with nothing above its threshold
+    low, vox = np.zeros(ds.shape, np.float32), 10.0
+    low[20:24, 20:24, 20:24] = 0.3; p = str(tmp_path / "demo__low.mrc"); write_mrc(p, low, vox)
+    wait_for(win, lambda: win.load(paths=[p], features=[p])); pump(app, 40); ds = win.st.ds
+    key = next(c["key"] for c in win.info["structures"] if c["kind"] == "score"); assert ds.id_of(key) not in ds.meshes
+    win.spec["classes"][key]["smoothing"] = 4
+    assert count_applied(app, win) <= 2 and ds.param(ds.id_of(key), "smoothing") == 4
+    assert not any(made) and not errs, errs
+
+
+def wait_for(win, start):
+    start()
+    if win.worker is not None and win.worker.isRunning():
+        loop = QtCore.QEventLoop(); win.worker.finished.connect(loop.quit); loop.exec()

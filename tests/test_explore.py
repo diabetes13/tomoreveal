@@ -122,9 +122,9 @@ def test_overlay_follows_a_threshold_change(tmp_path, demo, needs_3d):
     for _ in range(40):
         app.processEvents()
     ex = win.explore; ex.go(24)
-    cid = [c["id"] for c in win.info["structures"] if c["kind"] == "score"][0]
+    key = [c["key"] for c in win.info["structures"] if c["kind"] == "score"][0]
     first = ex.image_2d(win.spec_for()).copy()
-    win._thr_pending = {cid: 0.9}; win.apply_thresholds()
+    win._thr_changed(key, 0.9); win._thr_settled()
     after = ex.image_2d(win.spec_for())
     assert not np.array_equal(first, after)
     assert np.array_equal(after, slice_image(win.st.ds, win.spec_for(), 24, ex.overlay_cb.currentData(), ex.alpha_s.value() / 100))

@@ -1,5 +1,9 @@
 # Change log
 
+## 3.6.1 (2026-11-28)
+
+- **Large, much-edited Dragonfly segmentations open again.** A multi-ROI that had been edited a lot (for example a U-Net result cleaned up by hand) could be refused with "decoded … labelled voxels … but Dragonfly records …". Dragonfly had freed more pieces of it than its list of free pieces holds; TomoReveal now follows the pieces in their stored order instead, and still checks the voxel and piece counts against what Dragonfly records.
+
 ## 3.6.0 (2026-11-26)
 
 What older projects notice: only one fix changes how an older project plays: a spin around X or Y right after a top view no longer swings the picture round first (reported as "the transition rotates the tomogram again" and "the full spin breaks after I rotate"). Older camera paths play as before unless you accept the one-time offer to make them smoother. Everything else new is a setting that older projects do not have, so their movies stay the same; the test movies (golden plan and frames) did not need to be made again.

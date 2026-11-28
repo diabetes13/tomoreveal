@@ -16,11 +16,12 @@ def _record(buf, data):
 def write_session(path, dims=(6, 5, 4), runs=((0, 9, 1), (20, 29, 2), (60, 61, 3)),
                   names=("ER", "Membrane", "background"), colors=(0x0000FF, 0x00FF00, 0xFF0000),
                   visible=(1, 1, 0), title="Segmentation SegWiz test", data_types=(4, 4, 9, 5, 5, 8, 4), image=None, labels=None,
-                  extra_title=None, slot0=None, slots_override=None, layout=2022, spare=0, image_dtype="<f4"):
+                  extra_title=None, slot0=None, slots_override=None, layout=2022, spare=0, image_dtype="<f4", freed=0):
     """image: optional (nz, ny, nx) array stored as the session's image (image_dtype "<f4" or "<u2").
     labels: optional int (nz, ny, nx) array; its runs replace `runs`. extra_title: also store a copy titled this.
     layout 2025: Dragonfly 2025 'CAIFZ' file. spare: unused tree nodes after the runs, holding junk, with
-    LastFree="0" and a junk free stack (as Dragonfly 2025 writes them)."""
+    LastFree="0" and a junk free stack (as Dragonfly 2025 writes them). freed: junk nodes mixed in among the runs (in
+    reverse order), only half of them on the free stack, and the runs linked Head -> Next -> Tail (3.6.1)."""
     buf = bytearray(b"ORSZ" + b"\0" * 8)
     nx, ny, nz = dims
     if labels is not None:
@@ -28,9 +29,16 @@ def write_session(path, dims=(6, 5, 4), runs=((0, 9, 1), (20, 29, 2), (60, 61, 3
         edges = np.flatnonzero(np.diff(np.concatenate([[0], flat, [0]])) != 0)
         runs = [(int(b), int(e) - 1, int(flat[b])) for b, e in zip(edges[:-1], edges[1:]) if flat[b] > 0]
     junk = [7] * spare
-    lab = np.array([0] + [r[2] for r in runs] + junk, "<u4")
-    beg = np.array([0] + [r[0] for r in runs] + junk, "<u4")
-    end = np.array([0] + [r[1] for r in runs] + junk, "<u4")
+    nodes, at, gone = [None] + list(runs), list(range(1, len(runs) + 1)), []
+    if freed:  # node 0 unused, then the runs last first, with a junk node after each of the first `freed` of them
+        nodes, at = [None], [0] * len(runs)
+        for j in range(len(runs) - 1, -1, -1):
+            at[j] = len(nodes); nodes.append(runs[j])
+            if len(gone) < freed:
+                gone.append(len(nodes)); nodes.append((3, 3, 7))
+    lab = np.array([0] + [r[2] if r else 0 for r in nodes[1:]] + junk, "<u4")
+    beg = np.array([0] + [r[0] if r else 0 for r in nodes[1:]] + junk, "<u4")
+    end = np.array([0] + [r[1] if r else 0 for r in nodes[1:]] + junk, "<u4")
     offs = {k: _record(buf, a.tobytes()) for k, a in (("Labels", lab), ("BeginInt", beg), ("EndInt", end))}
     n = len(names) + 1
     strings = b"".join(struct.pack("<Q", k) + nm.encode("utf-16-be") + b"\0\0" for k, nm in enumerate(names, 1))
@@ -51,7 +59,12 @@ def write_session(path, dims=(6, 5, 4), runs=((0, 9, 1), (20, 29, 2), (60, 61, 3
     box = "".join(f' direction{i}Size="{d * 1e-9}" direction{i}Spacing="1e-9"' for i, d in enumerate(dims))
     ld = "".join(f"<{k}><RecordOffset>{o}</RecordOffset><size>{len(lab)}</size></{k}>" for k, o in offs.items())
     tree = f'ElementCount="{len(lab)}" IntervalCount="{len(runs)}"'
-    if spare:
+    if freed:
+        nxt = np.zeros(len(nodes), "<u4"); nxt[at[:-1]] = at[1:]
+        tree += (f' Head="{at[0]}" Tail="{at[-1]}" LastFree="{len(gone)}"><RecordOffsetN>{_record(buf, nxt.tobytes())}'
+                 f'</RecordOffsetN><RecordOffsetFS>{_record(buf, np.array([0] + gone[:len(gone) // 2], "<u4").tobytes())}'
+                 f'</RecordOffsetFS></TreeData')
+    elif spare:
         tree += f' LastFree="0"><RecordOffsetFS>{_record(buf, np.array([0, 1, 1, 2] * spare, "<u4").tobytes())}</RecordOffsetFS></TreeData'
     else:
         tree += "/"

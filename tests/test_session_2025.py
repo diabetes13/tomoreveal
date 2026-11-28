@@ -109,3 +109,21 @@ def test_an_unknown_file_names_both_headers(tmp_path):
     p = tmp_path / "s.ORSSession"; p.write_bytes(b"XXXX" + b"\0" * 40)
     with pytest.raises(UserError, match="CAIFZ"):
         OrsSession(str(p))
+
+
+def test_more_freed_nodes_than_the_free_stack_holds(tmp_path):
+    """3.6.1: a big edited multi-ROI had freed nodes mixed in among the runs, more than its free stack listed. The runs
+    are then read by following the tree's Next links from Head to Tail (exactly IntervalCount of them)."""
+    for p in _both(tmp_path, freed=4):
+        ses = OrsSession(p); (o,) = ses.objects()
+        lab, classes = ses.read_selection([o])
+        assert np.array_equal(lab, _labels()) and classes[2]["name"] == "Membrane"
+
+
+def test_a_broken_next_chain_is_refused(tmp_path, monkeypatch):
+    p = write_session(str(tmp_path / "s.ORSSession"), dims=DIMS, labels=_labels(), freed=4)
+    xml = open(p, "rb").read(); i = xml.rindex(b'Tail="'); j = xml.index(b'"', i + 6)
+    open(p, "wb").write(xml[:i + 6] + b"2" + xml[j:])  # node 2 is a freed one: the chain from Head never reaches it
+    ses = OrsSession(p)
+    with pytest.raises(UserError, match="Dragonfly records"):
+        ses.read_selection(ses.objects())

@@ -237,10 +237,23 @@ class OrsSession:
         def packed():  # Dragonfly 2025, nothing ever freed: the intervals are nodes 1 .. IntervalCount
             return np.arange(1, n_int + 1) if td.attrib.get("LastFree") == "0" and n_int < n_el else None
 
-        for rule in (free_stack, packed):
+        def linked():  # more nodes freed than the free stack holds (3.6.1): follow the runs in order, Head .. Tail
+            head, tail, off = td.attrib.get("Head"), td.attrib.get("Tail"), td.findtext("RecordOffsetN")
+            if head is None or tail is None or off is None or n_int < 1:
+                return None
+            nxt = self._array(int(off)).tolist(); i, tail = int(head), int(tail); out = []
+            while len(out) < n_int and 0 < i < len(nxt):
+                out.append(i)
+                if i == tail:
+                    break
+                i = nxt[i]
+            return np.array(out, np.int64) if out and out[-1] == tail and len(out) == n_int else None
+
+        first = None
+        for rule in (free_stack, packed, linked):
             idx = rule()
             if idx is None:
-                break
+                continue
             b = arr["BeginInt"][idx].astype(np.int64); e = arr["EndInt"][idx].astype(np.int64); l = arr["Labels"][idx].astype(np.int64)
             s = np.argsort(b); b, e, l = b[s], e[s], l[s]
             total = int((e - b + 1).sum())
@@ -248,8 +261,10 @@ class OrsSession:
                 and total == obj["voxels"]
             if ok:
                 break
+            first = first or (total, len(b))
         if not ok:
-            raise UserError(f"'{obj['title']}': decoded {total} labelled voxels in {len(b)} runs, but Dragonfly records "
+            total, got = first
+            raise UserError(f"'{obj['title']}': decoded {total} labelled voxels in {got} runs, but Dragonfly records "
                             f"{obj['voxels']} voxels in {n_int} runs. This session's layout differs from what the reader "
                             "understands; export the multi-ROI from Dragonfly as a TIFF stack and drop that instead.")
         return b, e, l

@@ -435,7 +435,7 @@ Save the movies in a folder that is not your data folder.
 
 ## Dark mode
 
-In the **View** menu, or in the Look tab under **Window**, choose the theme: **System** (follow the desktop), **Light** or **Dark**. TomoReveal remembers the choice. The theme changes only the window; the background of the movie is set separately in the Look tab.
+In the **View** menu, or in the Look tab under **Window**, choose the theme: **System** (follow the desktop), **Light** or **Dark**. TomoReveal remembers the choice. Light and Dark also set the title bar and the program's own dialogs (with Qt 6.8 or later). The theme changes only the window; the background of the movie is set separately in the Look tab.
 
 ![Dark mode](docs/images/08-dark.png)
 

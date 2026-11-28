@@ -136,7 +136,7 @@ TEXTS = {
     "text:Fit": "Fit the whole movie into the timeline.",
     "text:+ Add part": "Add a part after the one under the playhead.",
     "text:Layout boxes": "Draw dashed boxes around every item on the picture, also hidden ones, so you can find and move them.",
-    "label:Theme": "Light or dark window. This does not change the movie.",
+    "label:Theme": "Light or dark window and title bar. This does not change the movie.",
     # dialogs
     "text:Locate...": "Show TomoReveal where the file is now.",
     "text:Skip": "Open the project without this file. Its structures come back when you locate it later.",

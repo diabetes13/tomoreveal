@@ -142,7 +142,8 @@ def build_gui(args):
                               ("nav/invert_wheel", "Turn the mouse wheel the other way to zoom in")):
                 a = QtG.QAction(text, self, checkable=True); a.setChecked(self.settings.value(key, False, type=bool))
                 a.toggled.connect(lambda on, key=key: self.settings.setValue(key, bool(on))); nm.addAction(a)
-            nm.addSeparator(); nm.addAction("Undo view change", lambda: self.nav.undo()); nm.addAction("Redo view change", lambda: self.nav.redo())
+            nm.addSeparator(); u = nm.addAction("Undo view change", lambda: self.nav.undo()); r = nm.addAction("Redo view change", lambda: self.nav.redo())
+            nm.aboutToShow.connect(lambda: (u.setEnabled(self.nav.ready()), r.setEnabled(self.nav.ready())))  # greyed out during a movie
 
         @property
         def theme(self):
@@ -426,8 +427,8 @@ def build_gui(args):
             end = f >= last
             # Frames that take longer to draw than the movie gives them: show every n-th frame, evenly spaced, rather
             # than whichever frame the clock reached (that skipped 1, then 4, then 2 ... and looked jittery).
-            step = p.get("step", 1)
-            f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
+            step = p.get("step", 1); base = p.get("base", p["f0"])  # (lined up from where the step last changed)
+            f = min(base + (f - base) // step * step, last) if not end else last
             if f != p["last"]:
                 t0 = time.monotonic()
                 try:
@@ -440,8 +441,12 @@ def build_gui(args):
                 if p["drawn"] >= 2:
                     if p["avg"] * p["fps"] > 2.5 and p["size"] == p["full"]:  # slow: a smaller picture (scaled up to fit)
                         p["size"] = p["small"]; p["avg"] = None
-                    else:
-                        p["step"] = max(1, min(10, int(np.ceil(p["avg"] * p["fps"] * 1.1))))
+                    else:  # grows at once; shrinks only when clearly faster, and not onto a border (it flipped there)
+                        need = p["avg"] * p["fps"] * 1.1
+                        new = step if step - 1.5 <= need <= step else int(np.ceil(need if need > step else need + 0.5))
+                        new = max(1, min(10, new))
+                        if new != step:
+                            p["step"], p["base"] = new, f
                 skipped = p["last"] is not None and f - p["last"] > 1
                 p["last"] = f; p["drawn"] += 1
                 if skipped and not p.get("noted"):  # 3.5: judge smoothness from the movie, not from the preview
@@ -1498,21 +1503,11 @@ def build_gui(args):
                 import faulthandler
                 self._hang_watch.stop(); faulthandler.cancel_dump_traceback_later()
             if self.worker is not None and self.worker.isRunning():  # let the load end, but never make a renderer for it
-                for sig in (self.worker.done, self.worker.failed, self.worker.log):
-                    try:
-                        sig.disconnect()
-                    except (RuntimeError, TypeError):  # nothing connected
-                        pass
-                self.hide(); self.worker.wait()
+                self.worker.let_go(); self.hide(); self.worker.wait()
             self.param_timer.stop()
             for wk in (self._surf_worker, self._path_worker):  # surfaces and camera paths being worked out: let them end
                 if wk is not None and wk.isRunning():
-                    for sig in (wk.done, wk.failed, wk.log):
-                        try:
-                            sig.disconnect()
-                        except (RuntimeError, TypeError):
-                            pass
-                    self.hide(); wk.wait()
+                    wk.let_go(); self.hide(); wk.wait()
             self.project.clean_exit(); self.st._drop_renderer(); e.accept()
 
     app = QtW.QApplication.instance() or QtW.QApplication(sys.argv[:1])

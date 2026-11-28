@@ -57,6 +57,24 @@ def test_steady_on_a_noisy_tube(noisy_tube):
     assert shake(np.array([p["pos"] for p in old])) > 3 * shake(pos)  # the old way follows every wobble
 
 
+def offset_along(poses):
+    """Where the camera is, seen from the point it looks at, along the path (+ ahead, - behind), sideways (+ right) and up."""
+    pos = np.array([p["pos"] for p in poses]); c = np.array([p["c"] for p in poses])
+    T = np.gradient(c, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True) + 1e-12
+    R = np.cross(T, [0.0, 0.0, 1.0]); R /= np.linalg.norm(R, axis=1, keepdims=True)
+    off = pos - c; off /= np.linalg.norm(off, axis=1, keepdims=True); m = slice(len(poses) // 4, 3 * len(poses) // 4)
+    return float(np.mean(np.sum(off * T, 1)[m])), float(np.mean(np.sum(off * -R, 1)[m])), float(np.mean(off[m, 2]))
+
+
+def test_behind_in_an_old_follow_path_is_behind(noisy_tube):
+    """N-11: a follow path from before 3.5 (no steadiness) drew the side "behind" exactly as "right"."""
+    cam = lambda side: dict(paths.PATH_CAMERA, side=side)
+    along, right, up = offset_along(follow(noisy_tube, "labels:tube#1", steadiness=None, camera=cam("behind"))[2])
+    assert along < -0.5 and abs(right) < 0.2 and up > 0.2
+    for side, want in (("right", 1), ("left", -1)):  # the other sides as before
+        assert offset_along(follow(noisy_tube, "labels:tube#1", steadiness=None, camera=cam(side))[2])[1] * want > 0.5
+
+
 @pytest.mark.parametrize("side", ["above", "left", "behind"])
 def test_upright_and_limited_turning(studio, side):
     ds = studio.ds

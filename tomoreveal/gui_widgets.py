@@ -60,6 +60,13 @@ class Worker(QtC.QThread):
         except Exception as exc:
             self.error = exc; traceback.print_exc(); self.failed.emit(f"{type(exc).__name__}: {exc}")
 
+    def let_go(self):
+        """Nothing hears its signals any more (the window closes). Only those with something connected: PySide warns
+        about the others ("Failed to disconnect"), and a warning can't be caught."""
+        for sig in (self.done, self.failed, self.log):
+            if self.isSignalConnected(QtC.QMetaMethod.fromSignal(sig)):
+                sig.disconnect()
+
 
 class Preview(QtW.QLabel):
     clicked = QtC.Signal(float, float); dragged = QtC.Signal(int, int); released = QtC.Signal(); wheel = QtC.Signal(int)

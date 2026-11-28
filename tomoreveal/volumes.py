@@ -60,7 +60,17 @@ def looks_like_labels(a):
     if not np.issubdtype(a.dtype, np.integer) and not (np.isfinite(sub).all() and np.array_equal(sub, np.rint(sub)) and sub.max() > 1):
         return False
     vals, counts = np.unique(sub, return_counts=True)
-    return len(vals) <= 64 and vals[counts.argmax()] == 0 and counts.max() >= 0.3 * sub.size
+    if not (vals[counts.argmax()] == 0 and counts.max() >= 0.3 * sub.size):
+        return False
+    return len(vals) <= 64 or _patches_of_one_number(a)
+
+
+def _patches_of_one_number(a):
+    """Many numbers (an instance segmentation): labels are patches of one number, a tomogram is noise. Measured: label
+    files 0.997 to 1.0 of neighbouring non-zero voxels equal, tomograms with a zero border at most 0.19 (denoised 8-bit)."""
+    s = a[::max(1, a.shape[0] // 16)]
+    left, right = s[:, :, :-1], s[:, :, 1:]; both = (left != 0) & (right != 0)
+    return bool(both.any()) and float((left[both] == right[both]).mean()) >= 0.8
 
 
 def score_scale(a):

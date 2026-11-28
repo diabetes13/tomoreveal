@@ -9,8 +9,20 @@ _MESSAGE = {False: {"err": "#c62828", "ok": "#2e7d32"},   # readable on a light 
 
 
 def light_palette():
-    pal = QtW.QStyleFactory.create("Fusion").standardPalette()
-    pal.setColor(QtG.QPalette.PlaceholderText, QtG.QColor("#6b7079"))
+    """Fusion's light colours, written out: Fusion's own standard palette follows the system's colour scheme in Qt 6,
+    so on a Windows in dark mode it is dark grey."""
+    P, c = QtG.QPalette, QtG.QColor
+    pal = QtG.QPalette()
+    for role, col in ((P.Window, "#efefef"), (P.WindowText, "#000000"), (P.Base, "#ffffff"), (P.AlternateBase, "#f7f7f7"),
+                      (P.Text, "#000000"), (P.Button, "#efefef"), (P.ButtonText, "#000000"), (P.BrightText, "#ffffff"),
+                      (P.Highlight, "#308cc6"), (P.HighlightedText, "#ffffff"), (P.ToolTipBase, "#ffffdc"),
+                      (P.ToolTipText, "#000000"), (P.PlaceholderText, "#6b7079"), (P.Link, "#0000ff"), (P.LinkVisited, "#ff00ff"),
+                      (P.Accent, "#308cc6"), (P.NoRole, "#000000"),
+                      (P.Light, "#ffffff"), (P.Midlight, "#cacaca"), (P.Mid, "#b8b8b8"), (P.Dark, "#9f9f9f"), (P.Shadow, "#767676")):
+        pal.setColor(role, c(col))
+    for role, col in ((P.WindowText, "#bebebe"), (P.Text, "#bebebe"), (P.ButtonText, "#bebebe"), (P.Dark, "#bebebe"),
+                      (P.Shadow, "#b1b1b1"), (P.Highlight, "#919191"), (P.Accent, "#919191"), (P.Base, "#efefef")):
+        pal.setColor(P.Disabled, role, c(col))
     return pal
 
 
@@ -43,9 +55,25 @@ def resolve(choice, app):
     return system_is_dark(app) if choice == "system" else choice == "dark"
 
 
+def qt_color_scheme(choice):
+    """The colour scheme Qt is told: Light or Dark, or Unknown for System (the desktop decides)."""
+    S = QtC.Qt.ColorScheme
+    return {"light": S.Light, "dark": S.Dark}.get(choice, S.Unknown)
+
+
+def _tell_qt(app, choice):
+    """Qt 6.8+: the title bar and Qt's own dialogs follow the theme too. Older Qt can't; the palette is enough there."""
+    try:
+        app.styleHints().setColorScheme(qt_color_scheme(choice))
+    except (AttributeError, RuntimeError):
+        pass
+
+
 def apply_theme(app, choice):
     """Fusion style with a light or dark palette; returns True when dark."""
-    dark = resolve(choice if choice in ("system", "light", "dark") else "system", app)
+    choice = choice if choice in ("system", "light", "dark") else "system"
+    _tell_qt(app, choice)  # first: for System, the desktop's own scheme is read after this
+    dark = resolve(choice, app)
     app.setStyle("Fusion")
     app.setPalette(dark_palette() if dark else light_palette())
     app.setProperty("tomoreveal_dark", dark)

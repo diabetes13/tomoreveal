@@ -242,7 +242,7 @@ class MovieEditor(QtC.QObject):
 
     # ---- timeline gestures ----
     def resizing(self, pid, secs):
-        edits.set_part(self.spec, pid, seconds=secs)
+        self.record_pending(); edits.set_part(self.spec, pid, seconds=secs)  # (a change from before is its own step, none mid-drag)
         self.win.timeline.set_plan(sb.build_plan(self.spec, self.win.st.ds), self.spec, self.win.st.ds)  # the preview waits for the release
 
     def resized(self, pid, secs):

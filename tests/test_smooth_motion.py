@@ -96,12 +96,16 @@ def camera_rotation(p, fr):
     return np.column_stack([np.cross(up, back), up, back])
 
 
-def largest_turn(spec, ds):
-    """The largest change of the camera's orientation between two frames of a flight, or into or out of one (degrees).
-    (Not within the parts themselves: a path through points can turn faster on its own, see N-21.)"""
+def largest_turn(spec, ds, within=None):
+    """The largest change of the camera's orientation between two frames (degrees): of a flight, or into or out of one;
+    or, with within (a part id), between two frames of that part's own motion."""
     fr = framer_of(spec, ds); frames = sb.build_plan(spec, ds).frames; R = [camera_rotation(f["pose"], fr) for f in frames]
+    if within is None:
+        pick = lambda a, b: "transition" in (a["phase"], b["phase"])
+    else:
+        pick = lambda a, b: a["part"] == b["part"] == within and a["phase"] == b["phase"] == "main"
     return max(math.degrees(math.acos(min(1.0, max(-1.0, (np.trace(R[i].T @ R[i + 1]) - 1) / 2))))
-               for i in range(len(R) - 1) if "transition" in (frames[i]["phase"], frames[i + 1]["phase"]))
+               for i in range(len(R) - 1) if pick(frames[i], frames[i + 1]))
 
 
 def spin(axis, **kw):
@@ -137,6 +141,8 @@ def test_flights_into_and_out_of_a_camera_path_never_flip(studio, source):
     spec["shots"] = [sb.new_part("overview", seconds=1), path, sb.new_part("overview", seconds=1, view=dict(tilt=30.0, az=200.0, zoom=1.0))]
     assert not sb.build_plan(spec, ds).problems
     assert largest_turn(spec, ds) < 20
+    if source == "points":  # N-21: where the view crossed 20 degrees from straight down, the picture rolled by 40 in one frame
+        assert largest_turn(spec, ds, within=path["id"]) < 10
 
 
 def test_an_arc_keeps_a_camera_of_its_own_at_its_distance(studio):

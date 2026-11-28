@@ -85,15 +85,17 @@ def test_slow_playback_shows_evenly_spaced_frames(window):
         time.sleep(0.1); return real(*a, **kw)
     ren.draw = slow
     try:
-        win.timeline.set_frame(0); win.start_play(); shown = []
+        win.timeline.set_frame(0); win.start_play(); shown = []; step = []
         t0 = time.monotonic()
         while win.playing and time.monotonic() - t0 < 2.5:
             app.processEvents()
             if win.playing and win.playing["last"] is not None and (not shown or shown[-1] != win.playing["last"]):
-                shown.append(win.playing["last"])
+                shown.append(win.playing["last"]); step.append(win.playing.get("step"))
         win.stop_play()
     finally:
         ren.draw = real
-    steps = np.diff(shown)[-4:]
-    assert len(shown) > 8 and len(set(steps.tolist())) == 1 and steps[0] > 1, shown  # settles on one even step
+    # N-14: every frame is one step after the one before, with the step in force then: it may grow when drawing gets
+    # slower, but a step is never cut short (it flipped between 6 and 7 at every frame, and steps of 1, 9 and 3 were seen)
+    settled = [i for i in range(1, len(shown)) if step[i - 1]]
+    assert len(settled) > 6 and all(shown[i] - shown[i - 1] == step[i - 1] > 1 for i in settled), list(zip(shown, step))
     assert not errs

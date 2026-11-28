@@ -32,7 +32,7 @@ def make_demo(folder):
             + 0.05 * rng.normal(size=lab.shape)).astype(np.float32)
     paths = dict(tomogram=os.path.join(folder, "demo_tomogram.mrc"), labels=os.path.join(folder, "demo_labels.mrc"))
     write_mrc(paths["tomogram"], tomo, 10.0); write_mrc(paths["labels"], lab, 10.0)
-    json.dump({"1": {"name": "membrane", "color": "#d7566e"}, "2": {"name": "vesicles", "color": "#45b9e8"},
-               "3": {"name": "filaments", "color": "#ffd23f"}, "4": {"name": "particles", "color": "#b8e986"}},
-              open(os.path.join(folder, "demo_labels.json"), "w"), indent=2)
+    with open(os.path.join(folder, "demo_labels.json"), "w") as fh:
+        json.dump({"1": {"name": "membrane", "color": "#d7566e"}, "2": {"name": "vesicles", "color": "#45b9e8"},
+                   "3": {"name": "filaments", "color": "#ffd23f"}, "4": {"name": "particles", "color": "#b8e986"}}, fh, indent=2)
     return paths

@@ -158,6 +158,15 @@ def pause(app, ms):
     loop = QtCore.QEventLoop(); QtCore.QTimer.singleShot(ms, loop.quit); loop.exec()
 
 
+def until(app, done, seconds=10.0):
+    """Wait for something that comes after several timers (the threshold's, the surfaces', the undo history's)."""
+    import time
+    t = time.monotonic()
+    while not done() and time.monotonic() - t < seconds:
+        pause(app, 20)
+    return done()
+
+
 @pytest.fixture
 def errors():
     errs = []; old = sys.excepthook
@@ -841,8 +850,8 @@ def test_undo_of_a_threshold_brings_the_objects_back(scored):
         assert np.array_equal(win.st.ds.target_box({"class": sc.key, "component": 2}), box)
         win.editor.redo(); assert sc.now == 0.95 and target() == {"class": sc.key}
         win.editor.undo(); assert sc.now == 0.5
-    win.editor.reset_history(); sc.set(0.8); pause(app, 1300)  # the very first change
-    assert sc.now == 0.8 and win.editor.history.can_undo
+    win.editor.reset_history(); sc.set(0.8)  # the very first change: its undo step comes 1.25 to 1.45 s later (N-22)
+    assert until(app, lambda: win.editor.history.can_undo) and sc.now == 0.8
     win.editor.undo(); assert sc.now == 0.5
 
 
@@ -850,7 +859,7 @@ def test_a_drag_of_the_threshold_is_one_undo_step(scored):
     app, win, d, sc, p = scored; win.editor.reset_history()
     for v in (0.55, 0.7, 0.8, 0.95):
         sc.set(v); pause(app, 60)
-    pause(app, 1500)
+    assert until(app, lambda: win.editor.history.can_undo); pause(app, 1000)  # (and no second step after it)
     assert sc.now == 0.95 and len(win.editor.history.states) == 2
 
 

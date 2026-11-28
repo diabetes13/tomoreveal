@@ -89,6 +89,39 @@ def test_guess_kind(kind, stem, have_tomo, expected):
     assert guess_kind(_vol(np.random.default_rng(0), kind), stem, have_tomo, 1) == expected
 
 
+def _many_labels(rng):
+    lab = np.zeros((40, 200, 200), np.uint16)  # 200 objects of different sizes: more numbers than the 64 of the first guess
+    for i in range(200):
+        z, y, x = rng.integers(0, 36), rng.integers(0, 190), rng.integers(0, 190); r = rng.integers(3, 10)
+        lab[z:z + 4, y:y + r, x:x + r] = i + 1
+    return lab
+
+
+def _with_zero_border(a):
+    a = a.copy(); a[:, :, :int(a.shape[2] * 0.45)] = 0
+    return a
+
+
+def test_a_label_file_with_many_numbers_and_no_role_is_a_segmentation(tmp_path):
+    """N-16: above 64 different numbers a label file given without a role (dropped on the window) was taken for a tomogram."""
+    p = str(tmp_path / "cells.mrc"); write_mrc(p, _many_labels(np.random.default_rng(0)), 10.0)
+    st = tr.Studio(headless=True)
+    st.add_files([p], log=quiet, make_renderer=False)
+    assert not st.tomo_files and [s["kind"] for s in st.seg_sources] == ["labels"]
+
+
+@pytest.mark.parametrize("make", [
+    lambda n: (n * 3000).astype(np.int16),                                                 # 16-bit
+    lambda n: np.clip(n * 30 + 128, 1, 255).astype(np.uint8),                              # 8-bit
+    lambda n: np.clip(__import__("scipy.ndimage").ndimage.gaussian_filter(n, 4) * 600 + 128, 1, 255).astype(np.uint8),  # denoised
+], ids=["int16", "uint8", "smooth uint8"])
+def test_tomograms_with_a_zero_border_stay_tomograms(make):
+    """N-16 (7-D2): many numbers count as labels only where neighbouring voxels mostly hold the same number."""
+    from tomoreveal.volumes import guess_kind
+    noise = np.random.default_rng(1).normal(0, 1, (40, 200, 200)).astype(np.float32)
+    assert guess_kind(_with_zero_border(make(noise)), "TS01", False, 1) == "tomogram"
+
+
 def test_demo_files_are_still_recognised(demo):
     from tomoreveal.volumes import guess_kind
     assert guess_kind(load_volume(demo["tomogram"])[0], "demo_tomogram", False, 2) == "tomogram"

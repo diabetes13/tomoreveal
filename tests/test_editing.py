@@ -91,6 +91,27 @@ def test_resize_by_dragging_the_right_edge(window):
     assert not errors, errors
 
 
+def test_a_click_and_then_a_slow_drag_of_the_edge_is_one_undo_step(window):
+    """N-15: a click restarts the 600 ms history timer, and the drag writes each new length into the settings; when the
+    timer fired during the drag, a half-way length became an undo step (two Undos needed, the first to a length never chosen)."""
+    app, win, errors = window
+
+    def pause(ms):
+        loop = QtCore.QEventLoop(); QtCore.QTimer.singleShot(ms, loop.quit); loop.exec()
+    pause(1000)  # nothing left over from the load
+    c = win.timeline.canvas; pid = ids(win)[1]; start, count = c.parts[pid]["main"]; y = 22 + 18
+    QtTest.QTest.mouseClick(c, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(int(c.x_of(start + count / 2)), y)); pump(app)
+    before = float(win.spec["shots"][1]["seconds"]); steps = len(win.editor.history.states)
+    x = int(round(c.x_of(start + count))); assert c.edge_at(QtCore.QPointF(x, y)) == pid
+    QtTest.QTest.mousePress(c, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(x, y))
+    for dx in (20, 40, 60):  # about a second, as a hand drags
+        QtTest.QTest.mouseMove(c, QtCore.QPoint(x + dx, y)); pause(300)
+    QtTest.QTest.mouseRelease(c, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(x + 60, y)); pump(app)
+    assert len(win.editor.history.states) == steps + 1
+    win.editor.undo(); assert win.spec["shots"][1]["seconds"] == before
+    assert not errors, errors
+
+
 def test_reorder_by_dragging_a_block(window):
     app, win, errors = window
     c = win.timeline.canvas; a, b, d = ids(win)

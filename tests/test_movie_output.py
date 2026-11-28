@@ -418,6 +418,43 @@ def test_cancel_can_be_clicked_while_a_movie_is_made(window, monkeypatch):
     run_for(app, 1.0); assert not errs, errs
 
 
+def test_no_undo_changes_the_settings_while_a_movie_is_made(window, monkeypatch):
+    """N-18: View > Undo view change went on working while a movie was made (the parts' Undo, its keys and the
+    preview's keys are locked then). It changed the window's settings, not the movie."""
+    import json
+    from PySide6 import QtCore, QtTest, QtWidgets
+    app, win, errs = window; slow_surfaces(monkeypatch, 0.6)
+    pid = win.spec["shots"][0]["id"]; win.editor.resized(pid, 0.5)  # one undo step of the parts
+    win.nav.push(force=True); win.set_view(az=win.spec["view"]["az"] + 40.0)  # and one of the view
+    menu = {a.text(): a for m in win.menuBar().findChildren(QtWidgets.QMenu) for a in m.actions()}
+    nav_menu = next(m for m in win.menuBar().findChildren(QtWidgets.QMenu) if menu["Undo view change"] in m.actions())
+
+    def greyed():
+        nav_menu.aboutToShow.emit()
+        return not menu["Undo view change"].isEnabled() and not menu["Redo view change"].isEnabled()
+    assert not greyed()
+    for wait in (False, True):
+        if wait:
+            win._param_changed(win.st.ds.key_of(2), "smoothing", 3)
+        win.make_movie(); assert win.gen is not None and (win.job is None) == wait
+        assert greyed()
+        before = json.loads(json.dumps(win.spec))
+        ways = {f"{how} on the {name}": (lambda w=w, m=m: QtTest.QTest.keyClick(w, QtCore.Qt.Key_Z, m))
+                for name, w in (("timeline", win.timeline.canvas), ("preview", win.prev))
+                for how, m in (("Ctrl+Z", QtCore.Qt.ControlModifier), ("Ctrl+Shift+Z", QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))}
+        ways.update({"Undo button": win.editor.undo_btn.click, "Redo button": win.editor.redo_btn.click,
+                     "Undo view change": menu["Undo view change"].trigger, "Redo view change": menu["Redo view change"].trigger})
+        changed = []
+        for name, do in ways.items():  # one at a time: an undo and a redo could cancel out
+            do(); app.processEvents()
+            if json.loads(json.dumps(win.spec)) != before:
+                changed.append(name); win.spec = json.loads(json.dumps(before))
+        assert not changed, changed
+        win.cancel_btn.click(); assert win.gen is None and not greyed()
+    win.nav.undo(); assert win.spec["view"]["az"] != before["view"]["az"]  # and afterwards it works again
+    run_for(app, 1.0); assert not errs, errs
+
+
 # ---- camera paths that are still being worked out (G-10) ----
 
 def add_path(win, key):
@@ -564,7 +601,9 @@ def test_an_error_keeps_the_complete_chunks_and_the_movie_can_be_continued(windo
     for _ in job:
         pass
     a, b = decoded(out), decoded(ref)
-    assert len(a) == len(b) == n and all((x == y).all() for x, y in zip(a, kept + b[4:]))
+    # the kept frames of the first movie in this window are the same as those of a movie made in one go (N-19: the first
+    # movie drew its first frames without depth fade, so this compared them with the first run's chunks only)
+    assert len(a) == len(b) == n and all((x == y).all() for x, y in zip(a, b)) and all((x == y).all() for x, y in zip(kept, b))
     assert not errs, errs
 
 

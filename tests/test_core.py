@@ -120,3 +120,14 @@ def test_closeup_shot_is_added_to_plan(loaded):
     frames, marks = tr.build_timeline(spec, st.ds)
     assert len(frames) > n0 and marks[-1]["label"] == "vesicles"
     assert any(f["caption"] == "vesicles" and f["e"] == 1.0 for f in frames)
+
+
+def test_the_demo_closes_its_files(tmp_path):
+    """N-20: demo.py wrote demo_labels.json without closing the file (a ResourceWarning in tests)."""
+    import gc
+    import warnings
+    from tomoreveal import make_demo
+    with warnings.catch_warnings(record=True) as said:
+        warnings.simplefilter("always", ResourceWarning)
+        make_demo(str(tmp_path)); gc.collect()
+    assert not [str(w.message) for w in said if issubclass(w.category, ResourceWarning)]

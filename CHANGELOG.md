@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixes from a second code review
+
+These fixes come from a second review, of 3.5.0, made on the `DS_Branch` branch.
+
+#### Lost work
+
 - **No work is lost around projects.** **Start over** asks about changes that are not saved, like File ▸ New (the button did not). **Revert to saved** asks a question of its own and always goes back to the saved file; before, it offered Save and then ignored it. Closing the window while a movie is being made also asks about unsaved changes; Cancel keeps the window and the movie going.
 - **The movie is kept when nothing is shown.** Removing or switching off all data used to drop your movie. It now waits for the next data, can be saved meanwhile, and File ▸ New starts over. Saving while data is loading no longer loses the list of data files. A kept movie that is shown on other data becomes a new project and does not overwrite the old file.
 - **Restored work is safe until it is saved.** The autosave is deleted only when a new one has been written, files given on the command line wait for the Restore question and are not loaded over restored work, and a restored project that was never saved stays unsaved. An autosave also records the size and time of its data files, so another file of the same name is not used without asking.
@@ -10,20 +16,29 @@
 - **Looking does not change a project.** Opening a part, or clicking an item on the picture, no longer marks the project as changed or adds an undo step.
 - **New and Open end what is running** (playback, a glide, typing in a label, a threshold that is waiting), which could otherwise raise an error or reach the next project.
 - On Windows, a project in a folder whose name changed letter case keeps its names, colours and close-ups.
+- **A finished movie is never lost.** When the old movie is open in a video player (on Windows it can't be replaced then), the new one is saved next to it as `name (new).mp4`, with its poster as `name (new)_poster.png`; the window says so, and Play movie opens it. Before, the message named a file that was deleted right after. Of several formats, each one that can be replaced is replaced.
+- **An error while a movie is made keeps the work done.** The frames finished so far are kept in whole steps of 300 frames, and Make movie offers to continue. The window is always usable again after an error. The command line starts again, as before, except when only joining the parts failed.
+
+#### Data, surfaces and thresholds
+
 - **What you see always belongs to the data that is loaded.** Surfaces could stay behind, on the wrong side or outside the volume, after a tomogram with another grid was added, after a flip, or when segmentations were switched while new surfaces were being made; such a structure could also stay without a surface. A tomogram file that was written anew is read anew when you add it again. A Dragonfly session added after the tomogram is lined up with it as when both are added together (the picture was not, and lay mirrored against the segmentation). Flipping back is now instant.
 - **A part's own smoothing no longer stays on in later parts.** With more than about 24 structures, parts after it could keep the smoother membranes, and the window could keep making the same surfaces again.
 - **Changing smoothing or specks never holds up the window,** also when it is changed again while surfaces are being made. If a surface can't be made, the others are still changed, and the message stays.
 - **A flip that fails changes nothing.** Before, arrows, frames and points were already moved. The flip belongs to the movie: it stays while its data is removed and added again.
 - **A camera path along a structure stays the same path when the volume is flipped:** the same line, in the same direction and beside the same side of the structure (left and right swap when the picture is mirrored). "Above" stays above. A project saved with a flip by 3.5.0 may show such a path the other way round than it did; **Reverse direction** turns it.
 - **Thresholds can be undone.** The threshold of a score volume is now part of the movie settings: undo and redo bring it back together with the close-ups it changed, saving right after moving the slider saves the new value, and a file that is removed and added again gets the threshold of the movie. Undoing one rebuilds the surface, so it takes as long as changing it. 3.5.0 can still open these projects.
-- **A finished movie is never lost.** When the old movie is open in a video player (on Windows it can't be replaced then), the new one is saved next to it as `name (new).mp4`, with its poster as `name (new)_poster.png`; the window says so, and Play movie opens it. Before, the message named a file that was deleted right after. Of several formats, each one that can be replaced is replaced.
-- **An error while a movie is made keeps the work done.** The frames finished so far are kept in whole steps of 300 frames, and Make movie offers to continue. The window is always usable again after an error. The command line starts again, as before, except when only joining the parts failed.
+- **A label file with more than 64 numbers** (an instance segmentation) given without a role, for example dropped on the window, is a segmentation; before, it was taken for a tomogram.
+
+#### Making movies
+
 - **Make movie waits for what you just changed.** New surfaces (smoothing, specks, smoother membranes), a new threshold, the text of a card you are typing and camera paths that are still being worked out are finished first, and the movie then starts by itself; before, it could start with the old ones. Parts that can't be drawn are listed with their reasons before it starts, so you can stop. A camera path that can't be worked out is left out with its reason and no longer stops the other paths. **Cancel** can be clicked while it waits and while the movie is made.
 - **Continue only continues the same movie.** An interrupted movie is continued only when the settings, the data and the program are the same; before, other voxels in files of the same name were joined into it. Movies interrupted with 3.5.0 start again.
 - **Colours look the same in video players.** Movies are now encoded and tagged as BT.709, which HD players expect; before, colours were shifted a little (a red by about 10 of 255 levels). Files keep their size.
 - **Motion blur stops at a cut** instead of blurring the last frame towards the next part.
 - **File size estimates:** an error of the encoder is shown instead of "0 MB", and the sizes of Editing and Transparent MOV per minute are shown again.
-- **Command line:** a wrong `--bg`, `--scale-bar` or `--z` stops at once with a one-line message (before: an error report after loading, or `--z -5` quietly counted from the last slice), and `tomoreveal movie` says which parts are left out of the movie.
+
+#### Pictures
+
 - **The same settings give the same picture.** Smooth edges "Off" in a new window was smoothed until the setting was first changed, and making one structure see-through then changed pixels all over the picture. Off now has no smoothing from the start, so pictures drawn with Off look a little sharper than before. **Multisample** is no longer offered: see-through structures can't be drawn with it, and projects that chose it are drawn with Best, which takes about as long. Previews without a choice of their own (the command line's `preview`, the browser, Explore and the preset pictures) use Fast.
 - **"Outer edge only" and "no outline" work with every kind of smooth edges.** On Windows the outlines of see-through membranes kept all their inner lines, and with Fast some edges stayed on structures set to have no outline.
 - **Depth fade in movies from the first frame.** With Best, the default for movies, the depth fade came one frame late, or never in looks without outlines; movies now get the fade that the preview shows. With outlines on, **Frame a region** over the slice found nothing there, and an arrow set to hide behind things showed through the slice.
@@ -32,26 +47,47 @@
 - **The scale bar has the right length** where a camera path changes the field of view (at 60° it was 2.15 times too long).
 - **An object in a close-up keeps the look.** With glass or cream membranes, X-ray, a surface style or soft shadows, a single object in focus no longer snaps to its plain colour as the close-up begins. A see-through structure is drawn without its objects in focus, so they are not seen twice through their own glass.
 - **A card that dissolves into the next part** shows that part as it is now: with changed colours, the movie's smooth edges and its own background. Before, the first picture was kept, and it was drawn see-through.
+
+#### Motion, transitions, arrows and text
+
 - **A transition that overlaps the start of a slide no longer stops the plan.** Before, there was no preview and no movie.
 - **The depth fade glides through every flight.** With the Soft looks it jumped in one frame at the start of a flight to a close-up, the end of the movie kept the close-up's depth, and a depth fade used in one part only pumped while the camera moved. It now changes only where the picture changes at once: at a cut, a dissolve or a card.
 - **No more sudden turns between parts.** Flights into and out of camera paths and into an overview that turns around X or Y could turn the picture by up to 180° from one frame to the next. Flights now turn smoothly, and an arc keeps the camera at its distance. In flights to and from camera paths and turning overviews, the camera now takes a slightly different way.
 - **A dissolve starts from the picture you see.** On its first frame the part it leaves lost its look, arrows, scale bar and depth fade.
 - **Tomogram fades and structures start with the transition.** When a transition overlapped the part before, the tomogram fade of the next part started late, and a close-up after a slide without structures showed none. A card keeps its own fade instead of cutting it short.
 - **A close-up that grows, entered by a cut or a dissolve,** no longer leaves its clip plane on every part after it.
+- **"Behind" in a follow path from before 3.5** puts the camera behind; it was drawn as "right".
+- **A camera path through points no longer rolls the picture** by up to 40° from one frame to the next where the view comes near a top view. Paths through points move a little differently there.
 - **Arrows and text without an end time show to the end of their part,** including its pause after; before, they vanished early by the length of the pause before. They never show in transitions, in cards or after the flight back from a close-up. Their bars on the timeline and **Start here** / **End here** use the same clock as the movie.
 - **An arrow goes away with what it points at in a close-up:** when its structure is hidden there, or drawn at no opacity. When the close-up only changes the look (glass, X-ray), it stays.
 - **Splitting a part keeps its arrows and text.** They vanished in the second half. What shows there now goes on there: an arrow that was fading in or growing goes on doing so. Arrows and text with times in all parts get their list of parts written out. In a part that a transition overlaps, the split is now at the playhead. On the timeline, dragging the end of a bar keeps a start that lies before the part.
 - **Arrows that leave the picture in long movies** no longer slow down each preview; before, it could take about 11 s and 1.7 GB of memory each time.
+
+#### Clicks, keys and the window
+
 - **One click mode at a time, and it ends when it should.** Clicking a structure for a close-up, objects of a close-up, points or the object of a camera path, a region to frame, a spot for a new arrow and more pointers of an arrow: starting one ends the one before. Esc, its own button, New, Open, loading data and Make movie end it. A mode for one part or arrow also ends when you select or open another part, or when its part or arrow is gone after Delete, Undo or Redo; before, a click could change the wrong part. A click on nothing keeps the mode on. The cross cursor stays over the picture, and a click on the legend or the slice label reaches the mode.
 - **Moving around changes the view you see.** In a part with a view of its own, dragging, the wheel and the keys change that part's view also when it is not selected, and the preview says "Changing the view of part 3"; before, the main view changed without any change on screen. Where the main view is not on screen (a close-up, a camera path, a card, or the Main view bars in a part with its own view), changing it shows the overview. A locked part still refuses. Moving the playhead ends a glide at its end view.
 - **Undo view change goes back on the view it changed** (the main view or a part's own view) and shows it. Steps of parts that are gone or locked since are skipped, and New and Open start a new list.
+- **View ▸ Undo view change is greyed out while a movie is made.** It changed the view of the window, not of the movie.
 - **A new arrow or text goes into the part on screen,** which is then selected, so the item is in the list. On a card, which shows no arrows, nothing is added and a message says so.
 - **Typing is not interrupted.** The voxel size and an arrow's **from** and **to** take the number after Enter or when you leave the field, instead of at each key (typing "1.36" gave other numbers). A number still being typed counts for Save, Save as, the question about unsaved changes and Make movie. The **Arrows and text** list is no longer built anew at each change, so typing a label and then clicking a colour does both, and leaving a label unchanged adds no undo step.
 - **Delete after clicking an arrow's or a text's bar on the timeline** deletes that item, not the part. The **Delete** button still deletes the part.
 - **Esc in an arrow's label** drops the typing and closes the field; while you type there, the keys no longer move the view or end a click mode.
 - **Playback stops where you click** on the timeline, and with the arrow keys, Home and End; before, it jumped to the frame where playback was.
+- **Slow playback in the preview keeps an even step** between the frames it shows, instead of stumbling now and then.
+- **Dragging the end of a part is one undo step.** A step could be recorded in the middle of the drag, so the first Undo went to a length you never chose.
 - **The settings of a camera path point stay on that point** when points before it are deleted or moved, and they close when the point is gone.
 - **The window fits smaller screens.** The timeline's zoom bar is now on the line of text below the buttons, and that text shortens with "…" (the whole text is in its tooltip) instead of making the window wider. The window opens no larger than the screen. Its smallest width goes from 1,450 to 1,050 pixels.
+- **The Light theme is light on a Windows in dark mode** (it was dark grey). Light and Dark now also set the title bar and Qt's own dialogs (with Qt 6.8 or later); System follows the desktop.
+- Closing the window while surfaces or camera paths are worked out no longer prints "Failed to disconnect" warnings.
+
+#### Command line
+
+- **Command line:** a wrong `--bg`, `--scale-bar` or `--z` stops at once with a one-line message (before: an error report after loading, or `--z -5` quietly counted from the last slice), and `tomoreveal movie` says which parts are left out of the movie.
+
+#### Tests
+
+- The pictures and the camera motion that the tests pin are made again for the fixes above (on Windows), and tests that depended on how fast the computer is (playback, undo after a threshold change) now wait for what they check.
 
 ## 3.5.0
 

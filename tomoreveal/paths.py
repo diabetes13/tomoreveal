@@ -292,18 +292,29 @@ def gaussian_in_time(points, sigma_frames):
 
 def upright_ups(dirs, up0, z=(0.0, 0.0, 1.0), limit_deg=20.0):
     """Up vectors: the tomogram's z axis whenever the view is more than limit_deg away from it, otherwise carried along
-    from the previous frame with the least turn (parallel transport), so the picture never rolls with the membrane."""
-    z = np.asarray(z, float); ups = []; prev = None; cosl = math.cos(math.radians(limit_deg))
+    from the previous frame with the least turn (parallel transport), so the picture never rolls with the membrane.
+    Between limit_deg / 2 and limit_deg each frame shows a blend of the carried one and the upright one, all upright at
+    limit_deg, so that the two rules meet without a jump (the carried one drifts meanwhile: 40 degrees in one frame)."""
+    z = np.asarray(z, float); ups = []; carried = None
     for d in dirs:
         d = np.asarray(d, float); d = d / (np.linalg.norm(d) or 1.0)
-        if abs(float(d @ z)) < cosl:
-            u = z - d * float(z @ d)
+        away = math.degrees(math.acos(min(1.0, abs(float(d @ z)))))
+        upright = z - d * float(z @ d)
+        if away >= limit_deg:
+            u = upright
         else:
-            base = prev if prev is not None else np.asarray(up0, float)
-            u = base - d * float(base @ d)
-            if np.linalg.norm(u) < 1e-6:
-                u = np.cross(d, [1.0, 0.0, 0.0])
-        u = u / (np.linalg.norm(u) or 1.0); ups.append(u); prev = u
+            base = carried if carried is not None else np.asarray(up0, float)
+            c = base - d * float(base @ d)
+            if np.linalg.norm(c) < 1e-6:
+                c = np.cross(d, [1.0, 0.0, 0.0])
+            c = c / (np.linalg.norm(c) or 1.0); u = c
+            w = smooth01((away - limit_deg / 2) / (limit_deg / 2))
+            if w > 0:  # c turned about the view direction by w of the angle from c to the upright one
+                zn = upright / (np.linalg.norm(upright) or 1.0)
+                a = w * math.atan2(float(d @ np.cross(c, zn)), float(c @ zn))
+                u = c * math.cos(a) + np.cross(d, c) * math.sin(a)
+        u = u / (np.linalg.norm(u) or 1.0); ups.append(u)
+        carried = c if away < limit_deg else u  # the blend is shown, never carried on
     return ups
 
 
@@ -597,6 +608,8 @@ def path_poses(part, ds, fr, spec, n, fps, cb):
                 off = np.asarray(main_dir, float)
             elif side == "above":
                 off = upp
+            elif side == "behind":  # (came with 3.5's steadiness, but the side list offers it for old paths too)
+                off = -math.cos(h) * T + math.sin(h) * upp
             else:
                 sv = np.cross(T, z); sv = sv / (np.linalg.norm(sv) or 1.0) * (1 if side == "left" else -1)
                 off = math.cos(h) * sv + math.sin(h) * upp

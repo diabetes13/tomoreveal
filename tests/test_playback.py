@@ -131,6 +131,24 @@ def test_closing_during_a_load(window, demo, monkeypatch):
     assert not made and not win.worker.isRunning() and not errors, errors
 
 
+def test_closing_while_surfaces_are_made_disconnects_without_warnings(window):
+    """N-23: closing printed "Failed to disconnect (None) from signal failed(QString)": PySide warns, rather than raising,
+    for a signal with nothing connected. The surface worker of the Structures tab connects only "done"."""
+    import threading
+    import warnings
+    from tomoreveal.gui_widgets import Worker
+    app, win, errors = window
+    go = threading.Event()
+    win._surf_worker = Worker(lambda log: go.wait(10)); win._surf_worker.done.connect(lambda r: None)  # as gui_render does
+    win._surf_worker.start(); threading.Timer(0.3, go.set).start()
+    with warnings.catch_warnings(record=True) as said:
+        warnings.simplefilter("always")
+        win.close()
+    run_for(app, 0.3)
+    assert not [w for w in said if "disconnect" in str(w.message)], [str(w.message) for w in said]
+    assert not win._surf_worker.isRunning() and not errors, errors
+
+
 
 @pytest.mark.parametrize("how", ["click", "Right", "Left", "Home", "End"])
 def test_a_click_or_key_on_the_timeline_stops_where_it_points(window, how):

@@ -67,3 +67,27 @@ def test_settings_go_to_the_test_folder_not_the_registry(window, tmp_path):
     win.set_theme("dark"); win.settings.sync()  # Qt writes the file on sync
     assert (tmp_path / "settings" / "TomoReveal" / "TomoReveal.ini").exists()
     assert QtCore.QSettings().value("theme") == "dark"
+
+
+def test_light_is_light_also_when_the_system_is_dark(monkeypatch):
+    """N-25: Fusion's standard palette follows the system's colour scheme in Qt 6, so Light was dark grey on a dark Windows."""
+    from tomoreveal import gui_theme
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    real = QtWidgets.QStyleFactory.create("Fusion").standardPalette()  # off-screen there is no dark mode: Fusion's light colours
+    roles = [r for r in QtGui.QPalette.ColorRole if r not in (QtGui.QPalette.NColorRoles, QtGui.QPalette.PlaceholderText)]
+    groups = (QtGui.QPalette.Active, QtGui.QPalette.Inactive, QtGui.QPalette.Disabled)
+    assert all(gui_theme.light_palette().color(g, r).rgba() == real.color(g, r).rgba() for g in groups for r in roles)  # the look is unchanged
+
+    class DarkFusion:  # what Fusion gives while Windows is in dark mode
+        def standardPalette(self):
+            return gui_theme.dark_palette()
+    monkeypatch.setattr(QtWidgets.QStyleFactory, "create", staticmethod(lambda name: DarkFusion()))
+    pal = gui_theme.light_palette()
+    assert lightness(pal.color(QtGui.QPalette.Window)) > 0.7 and lightness(pal.color(QtGui.QPalette.WindowText)) < 0.3
+
+
+def test_the_colour_scheme_told_to_qt_follows_the_choice():
+    """N-25 (7-D1): Light and Dark are told to Qt as well, so the title bar and Qt's own dialogs follow; System lets the desktop decide."""
+    from tomoreveal.gui_theme import qt_color_scheme
+    S = QtCore.Qt.ColorScheme
+    assert (qt_color_scheme("light"), qt_color_scheme("dark"), qt_color_scheme("system")) == (S.Light, S.Dark, S.Unknown)

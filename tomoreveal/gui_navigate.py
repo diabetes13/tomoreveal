@@ -117,7 +117,9 @@ class Navigator:
 
     def _back(self, src, dst):
         """One step of undo (src = history) or redo: to the view it belongs to, which is then shown. Steps of parts that
-        are gone, locked or have no view of their own any more are skipped."""
+        are gone, locked or have no view of their own any more are skipped. Not while a movie is made or data loads."""
+        if not self.ready():
+            return
         self.finish()
         while src:
             t, v = src.pop()

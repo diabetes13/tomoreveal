@@ -228,7 +228,7 @@ class ExplorePanel(QtW.QWidget):
             if self.st.ren is None:
                 return
             sp = self.spec_for(); w = max(320, self.view.viewport().width()); h = max(180, self.view.viewport().height())
-            img = self.st.ren.draw(self.state_3d(sp), sp, (w, h), aa=False)
+            img = self.st.ren.draw(self.state_3d(sp), sp, (w, h), aa="fxaa")  # no smoothing setting here: Fast
             self.view.set_image(to_qimage(img), coords=False); self.view.set_clip(None)
             self.read_lbl.setText(f"slice {self.k + 1} of {self.nz}" + self._z_text())
             return

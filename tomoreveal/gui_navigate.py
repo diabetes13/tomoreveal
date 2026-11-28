@@ -25,6 +25,9 @@ HELP = ("Left drag: rotate · Right drag: move · Wheel: zoom · Right click: me
 HINT = "Left drag: rotate · Right drag: move · Wheel: zoom · Right click: menu"
 
 
+_NOW = object()  # (the target is taken from the playhead now)
+
+
 def exec_menu(menu, pos):
     """Show a menu (tests replace this so nothing waits for a click)."""
     menu.exec(pos)
@@ -63,17 +66,31 @@ class Navigator:
         w = self.win
         return bool(w.spec) and w.gen is None and not w.busy and w.st.ren is not None
 
-    def view(self):
+    def target(self):
+        """Whose view a change starts on: the id of the part whose own view is on screen, or None for the main view."""
         part = self.win.view_part()
+        return part["id"] if part else None
+
+    def _part(self, target):
+        """The part of a target, or None when it is gone, locked or has no view of its own (or the target is the main view)."""
+        p = self.win.parts_panel.part(target) if target else None
+        return p if p is not None and p.get("view") and not p.get("locked") else None
+
+    def view(self, target=_NOW):
+        target = self.target() if target is _NOW else target; part = self._part(target)
         v = dict(part["view"] if part else self.win.spec["view"])
         v.setdefault("zoom", 1.0); v["pan"] = list(v.get("pan") or [0.0, 0.0, 0.0])
         return v
 
-    def apply(self, v, quick=True):
+    def apply(self, v, quick=True, target=_NOW):
         w = self.win
-        if w.locked_part():  # a part with a locked view (3.5): nothing moves it
+        if target is _NOW:
+            if w.locked_part():  # a part with a locked view (3.5): nothing moves it
+                self._anim = None; return
+            target = self.target()
+        part = self._part(target)
+        if target and part is None:  # gone or locked since
             self._anim = None; return
-        part = w.view_part()
         pan = [float(x) for x in v.get("pan") or [0, 0, 0]]
         target = part["view"] if part else w.spec["view"]
         if any(abs(x) > 1e-9 for x in pan):
@@ -88,31 +105,55 @@ class Navigator:
             w.set_view(quick=quick, **kw)
 
     def push(self, force=False):
-        """Remember the view before a change (a burst of wheel steps counts once)."""
-        now = time.monotonic()
-        if not force and now - self._last_push < 0.6:
+        """Remember the view before a change, with whose view it is (a burst of wheel steps on one view counts once)."""
+        now = time.monotonic(); t = self.target()
+        if not force and now - self._last_push < 0.6 and self.history and self.history[-1][0] == t:
             self._last_push = now; return
         self._last_push = now
-        v = self.view()
-        if not self.history or self.history[-1] != v:
-            self.history.append(v); del self.history[:-HISTORY]
+        e = (t, self.view(t))
+        if not self.history or self.history[-1] != e:
+            self.history.append(e); del self.history[:-HISTORY]
         self.future.clear()
 
+    def _back(self, src, dst):
+        """One step of undo (src = history) or redo: to the view it belongs to, which is then shown. Steps of parts that
+        are gone, locked or have no view of their own any more are skipped."""
+        self.finish()
+        while src:
+            t, v = src.pop()
+            if t is None or self._part(t) is not None:
+                dst.append((t, self.view(t))); self.apply(v, quick=False, target=t); self._last_push = 0.0
+                w = self.win
+                if t is not None:
+                    w.req = {"at": {"part": t, "u": 0.5}}
+                elif w._main_view_hidden():
+                    w.req = w._main_req()
+                w.schedule(0); return
+
     def undo(self):
-        if self.history:
-            self.future.append(self.view()); self.apply(self.history.pop(), quick=False); self._last_push = 0.0
+        self._back(self.history, self.future)
 
     def redo(self):
-        if self.future:
-            self.history.append(self.view()); self.apply(self.future.pop(), quick=False); self._last_push = 0.0
+        self._back(self.future, self.history)
+
+    def forget(self):
+        """New or Open: the view history was of another project."""
+        self.history.clear(); self.future.clear(); self._anim = None; self.anim.stop()
 
     # ---- smooth moves ----
     def glide(self, target, seconds=EASE):
-        start = self.view() if self._anim is None else self._anim["now"]
-        self._anim = dict(a=start, b=target, t0=time.monotonic(), T=max(1e-3, seconds), now=start)
+        who = self.target() if self._anim is None else self._anim["target"]  # the view it started on
+        start = self.view(who) if self._anim is None else self._anim["now"]
+        self._anim = dict(a=start, b=target, t0=time.monotonic(), T=max(1e-3, seconds), now=start, target=who)
         if seconds <= 0:
-            self._anim = None; self.apply(target, quick=False); return
+            self._anim = None; self.apply(target, quick=False, target=who); return
         self.anim.start()
+
+    def finish(self):
+        """End a running glide at once, at its end view."""
+        a, self._anim = self._anim, None
+        if a is not None:
+            self.anim.stop(); self.apply(a["b"], quick=False, target=a["target"])
 
     def _step(self):
         a = self._anim
@@ -121,9 +162,9 @@ class Navigator:
         u = min(1.0, (time.monotonic() - a["t0"]) / a["T"]); q = u * u * (3 - 2 * u)
         a["now"] = _lerp_view(a["a"], a["b"], q)
         if u >= 1.0:
-            self.anim.stop(); self._anim = None; self.apply(a["b"], quick=False)
+            self.anim.stop(); self._anim = None; self.apply(a["b"], quick=False, target=a["target"])
         else:
-            self.apply(a["now"], quick=True)
+            self.apply(a["now"], quick=True, target=a["target"])
 
     def target_view(self):
         """The view a running glide is heading for (so quick wheel steps add up), else the view now."""
@@ -134,7 +175,7 @@ class Navigator:
         """Move the view so the scene follows the mouse by (dfx, dfy) fractions of the frame."""
         ren = self.win.st.ren; pos, foc, right, up, d = ren.camera_frame()
         D = float((foc - pos) @ d) if depth is None else depth
-        wph = ren.world_per_height(D); W, H = ren.size
+        wph = ren.world_per_height(D); W, H = ren.shown_size
         delta = -right * dfx * (W / H) * wph + up * dfy * wph
         v = dict(v); v["pan"] = [float(a + b) for a, b in zip(v.get("pan") or [0, 0, 0], delta)]
         return v
@@ -243,11 +284,7 @@ class Navigator:
             if left <= 0:
                 return None
             a = left / MARKER_FADE
-        ren = self.win.st.ren
-        if ren is None:
-            return None
-        _, c, _, _, _ = ren.camera_frame(); f, ok = ren.project(c)
-        return (f, a) if ok else None
+        return ((0.5, 0.5), a) if self.win.st.ren is not None else None  # the focal point is the middle of the picture
 
     def _fade_step(self):
         self.win.prev.update()
@@ -266,7 +303,7 @@ class Navigator:
             if shift:
                 v = dict(v, az=v["az"] - 5 * dx, tilt=min(85.0, max(0.0, v["tilt"] + 5 * dy)))
             else:
-                v = self.pan_by(v, -0.05 * dx * self.win.st.ren.size[1] / self.win.st.ren.size[0], -0.05 * dy)
+                v = self.pan_by(v, -0.05 * dx * self.win.st.ren.shown_size[1] / self.win.st.ren.shown_size[0], -0.05 * dy)
             self.glide(v); return True
         if k in (QtC.Qt.Key_Plus, QtC.Qt.Key_Equal, QtC.Qt.Key_Minus, QtC.Qt.Key_Underscore):
             self.push(); self.glide(self.zoom_at(v, 1.25 if k in (QtC.Qt.Key_Plus, QtC.Qt.Key_Equal) else 0.8)); return True
@@ -316,7 +353,7 @@ class Navigator:
         hit = None
         if f is not None and w.st.has_segmentation:
             try:
-                hit = w.st.pick(w.spec_for(), {"frame": w.frame, "x": f[0], "y": f[1]})
+                hit = w.st.pick_at(w.spec_for(), f[0], f[1])
             except Exception:
                 hit = None
             if hit is not None and not hit.get("found"):

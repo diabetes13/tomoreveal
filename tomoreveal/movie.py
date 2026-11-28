@@ -8,7 +8,7 @@ import numpy as np
 from .common import UserError, hex2rgb
 from .paths import missing_paths, work_out
 from .storyboard import build_plan, clip_box, state_key
-from .transitions import lerp_pose
+from .transitions import lerp_camera
 
 
 def poster_path(out):
@@ -49,13 +49,12 @@ def blur_towards(s, nxt):
 
 def motion_blurred(ren, s, nxt, spec, size, aa, transparent):
     """The average of BLUR_SAMPLES pictures with the camera between this frame and the next (3.5)."""
-    acc = None; fov = float(spec.get("style", {}).get("fov", 30))
+    from .storyboard import Framer
+    acc = None; style = spec.get("style", {})
+    fr = Framer(ren.ds.shape, size[0] / size[1], float(style.get("fov", 30)), bool(style.get("ortho", False)))
     for k in range(BLUR_SAMPLES):
         u = BLUR_SHUTTER * k / BLUR_SAMPLES
-        pose = lerp_pose(s["pose"], nxt["pose"], u, fov=fov)
-        if s["pose"].get("pos") is not None and nxt["pose"].get("pos") is not None:
-            pose["pos"] = np.asarray(s["pose"]["pos"]) * (1 - u) + np.asarray(nxt["pose"]["pos"]) * u
-            up = np.asarray(s["pose"]["up"]) * (1 - u) + np.asarray(nxt["pose"]["up"]) * u; pose["up"] = up / (np.linalg.norm(up) or 1.0)
+        pose = lerp_camera(fr, s["pose"], nxt["pose"], u)  # (cameras of their own turn, as in a flight)
         img = ren.draw(dict(s, pose=pose), spec, size, aa=aa, transparent=transparent).astype(np.float32)
         acc = img if acc is None else acc + img
     return np.clip(np.round(acc / BLUR_SAMPLES), 0, 255).astype(np.uint8)

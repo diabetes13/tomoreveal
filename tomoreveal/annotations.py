@@ -116,60 +116,75 @@ def project(fr, pose, P, aspect):
     return 0.5 + float(v @ right) / (z * t * aspect) / 2, 0.5 - float(v @ up) / (z * t) / 2, True
 
 
+def show_times(a):
+    """(start, end) in seconds into the part (the clock "tp" of the frames); end None: to the end of the part."""
+    sh = a.get("show") or {}
+    return (float(sh["start"]) if sh.get("start") is not None else 0.0), (float(sh["end"]) if sh.get("end") is not None else None)
+
+
+def shown_at(a, f):
+    """Whether a frame lies in the time of an annotation (its fades and the edge of the picture aside). Without an end
+    time it shows to the end of the part, its pauses included; never in transitions and cards, nor after the flight back
+    from a close-up (frames there have no "tp")."""
+    t = f.get("tp")
+    if t is None or f.get("card") or not shown_in(a, f.get("part")):
+        return False
+    s0, s1 = show_times(a)
+    return s0 - 1e-9 <= t and (s1 is None or t <= s1 + 1e-9)  # (times moved by a split are not rounded)
+
+
 def plan_annotations(spec, ds, frames, segments, fr, fps, aspect):
     """Opacity, growth and (for "keep outside") the tail angle of every annotation in every frame."""
     anns = [a for a in items(spec) if a.get("visible", True)]
     if not anns:
         return
-    tpart = [None] * len(frames)  # seconds since the start of the part's main phase (None outside main / pause)
-    seen_main = {}
-    for sg in segments:
-        if sg["phase"] in ("main", "pause") and sg["part"] is not None:
-            base = seen_main.setdefault(sg["part"], sg["start"])
-            for j in range(sg["start"], sg["start"] + sg["count"]):
-                tpart[j] = (j - base) / fps
-    span = {}
-    for sg in segments:
-        if sg["phase"] == "main" and sg["part"] is not None:
-            span[sg["part"]] = span.get(sg["part"], 0) + sg["count"] / fps
-    for a in anns:
-        sh = a.get("show") or {}; fade = max(0.0, float(sh.get("fade", 0.4) or 0)); how = sh.get("appear", "fade")
-        alpha = np.zeros(len(frames)); grown = np.ones(len(frames)); angle = [None] * len(frames)
-        for j, f in enumerate(frames):
-            t = tpart[j]; pid = f.get("part")
-            if t is None or f.get("card") or not shown_in(a, pid):
-                continue
-            s0 = float(sh["start"]) if sh.get("start") is not None else 0.0
-            s1 = float(sh["end"]) if sh.get("end") is not None else span.get(pid, t + 1)
-            if not (s0 <= t <= s1):
-                continue
-            ain = 1.0 if how == "pop" or fade <= 0 else _ramp((t - s0) / fade)
-            if how == "grow":
-                grown[j] = _ramp((t - s0) / GROW); ain = 1.0
-            aout = 1.0 if fade <= 0 else _ramp((s1 - t) / fade) if sh.get("end") is not None else 1.0
-            alpha[j] = min(ain, aout)
-        anchor = anchor_xyz(a)
-        if anchor is not None:  # fade out (over the fade time) while the point is outside the picture
-            on = np.array([(lambda p: p[2] and -0.02 <= p[0] <= 1.02 and -0.02 <= p[1] <= 1.02)(project(fr, f["pose"], anchor, aspect))
-                           for f in frames], bool)
-            nf = max(1, int(round(fade * fps)))
-            off_idx = np.nonzero(~on)[0]
-            if len(off_idx):
-                dist = np.min(np.abs(np.arange(len(frames))[:, None] - off_idx[None, :]), axis=1)
-                alpha *= np.clip(dist / nf, 0, 1)
-            if a["kind"] == "arrow" and a.get("keep_outside") and a["anchor"].get("structure") is not None:
-                centre = _object_centre(ds, a["anchor"])
-                if centre is not None:  # point the tail away from the object's middle, smoothed over time
-                    raw = []
-                    for f in frames:
-                        tip = project(fr, f["pose"], anchor, aspect); c = project(fr, f["pose"], centre, aspect)
-                        dx, dy = tip[0] - c[0], -(tip[1] - c[1])
-                        raw.append(math.atan2(dy, dx) if (dx * dx + dy * dy) > 1e-8 else None)
-                    angle = _smooth_angles(raw, int(round(0.5 * fps)))
-        for j in range(len(frames)):
-            if alpha[j] > 0.002:
-                frames[j].setdefault("ann", {})[a["id"]] = [round(float(alpha[j]), 3), round(float(grown[j]), 3),
-                                                            None if angle[j] is None else round(angle[j], 2)]
+    from .frame_passes import taken_back
+    for frs in [frames] + [run for run, _ in taken_back(frames)]:  # (the frames a dissolve blends away: on their own)
+        for a in anns:
+            _plan_one(a, frs, ds, fr, fps, aspect)
+
+
+def _plan_one(a, frames, ds, fr, fps, aspect):
+    """One annotation in a run of frames that follow each other."""
+    sh = a.get("show") or {}; fade = max(0.0, float(sh.get("fade", 0.4) or 0)); how = sh.get("appear", "fade")
+    alpha = np.zeros(len(frames)); grown = np.ones(len(frames)); angle = [None] * len(frames)
+    s0, s1 = show_times(a)
+    for j, f in enumerate(frames):
+        if not shown_at(a, f):
+            continue
+        t = f["tp"]
+        ain = 1.0 if how == "pop" or fade <= 0 else _ramp((t - s0) / fade)
+        if how == "grow":
+            grown[j] = _ramp((t - s0) / GROW); ain = 1.0
+        aout = 1.0 if fade <= 0 or s1 is None else _ramp((s1 - t) / fade)
+        alpha[j] = min(ain, aout)
+    anchor = anchor_xyz(a)
+    if anchor is not None:  # fade out (over the fade time) while the point is outside the picture
+        on = np.array([(lambda p: p[2] and -0.02 <= p[0] <= 1.02 and -0.02 <= p[1] <= 1.02)(project(fr, f["pose"], anchor, aspect))
+                       for f in frames], bool)
+        nf = max(1, int(round(fade * fps)))
+        if not on.all():
+            alpha *= np.clip(frames_from_off(on) / nf, 0, 1)
+        if a["kind"] == "arrow" and a.get("keep_outside") and a["anchor"].get("structure") is not None:
+            centre = _object_centre(ds, a["anchor"])
+            if centre is not None:  # point the tail away from the object's middle, smoothed over time
+                raw = []
+                for f in frames:
+                    tip = project(fr, f["pose"], anchor, aspect); c = project(fr, f["pose"], centre, aspect)
+                    dx, dy = tip[0] - c[0], -(tip[1] - c[1])
+                    raw.append(math.atan2(dy, dx) if (dx * dx + dy * dy) > 1e-8 else None)
+                angle = _smooth_angles(raw, int(round(0.5 * fps)))
+    for j in range(len(frames)):
+        if alpha[j] > 0.002:
+            frames[j].setdefault("ann", {})[a["id"]] = [round(float(alpha[j]), 3), round(float(grown[j]), 3),
+                                                        None if angle[j] is None else round(angle[j], 2)]
+
+
+def frames_from_off(on):
+    """For each frame, how many frames away the nearest frame is where the point is off the picture (0 there). At least
+    one frame must be off."""
+    from scipy.ndimage import distance_transform_edt
+    return np.rint(distance_transform_edt(np.asarray(on, bool))).astype(int)
 
 
 def _object_centre(ds, anchor):
@@ -204,10 +219,13 @@ def _colour(c, dark):
 
 
 def _visible_here(a, s, spec, ds, xyz, anc=None):
-    """0..1: hidden while its structure is switched off, cut away by the reveal or the clip box, or faded in a close-up."""
+    """0..1: hidden while its structure is switched off or fully see-through, cut away by the reveal or the clip box, or
+    faded or hidden in a close-up (look.closeup_factor: the others, and this structure's own setting in the close-up).
+    Glass and X-ray are not hiding: the opacity they draw with is not asked."""
     if not a.get("hide_when_hidden", True) or xyz is None:
         return 1.0
-    from .storyboard import class_spec, clip_box, others_of, target_items
+    from .look import closeup_factor
+    from .storyboard import class_spec, clip_box
     if anc is None:
         anc = a.get("anchor") if a["kind"] == "arrow" else (a.get("pin") or {})
     key = (anc or {}).get("structure")
@@ -218,17 +236,13 @@ def _visible_here(a, s, spec, ds, xyz, anc=None):
     if key is None:
         return 1.0
     k = ds.id_of(key)
-    if k is None or not class_spec(spec, ds, k).get("show", True):
+    c = class_spec(spec, ds, k) if k is not None else {}
+    if k is None or not c.get("show", True) or float(c.get("opacity", 1.0)) <= 0 or float(spec.get("style", {}).get("structures_opacity", 1.0)) <= 0:
         return 0.0
     cut = s.get("cut") or ("above" if s.get("reveal") else "none")
     if not s.get("reveal") or (cut == "above" and z < float(s["k"]) + 0.5):
         return 0.0  # not yet revealed: the cutting plane has not passed it
-    e = float(s.get("e", 0)); items_ = target_items(s.get("target"))
-    if e > 0 and items_ and key not in {kk for kk, _ in items_}:
-        mode = s.get("others")
-        _, op = others_of(mode)
-        return 1.0 - e * (1.0 - op)
-    return 1.0
+    return closeup_factor(s, key, (anc or {}).get("component"))
 
 
 def is_2d(a):
@@ -318,7 +332,7 @@ def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf):
         anc = anchor_xyz(a)
         tip = (float(a["tip2d"][0]) * W, float(a["tip2d"][1]) * H) if is_2d(a) else None
         if anc is not None:
-            (fx, fy), front = ren.project(anc)
+            (fx, fy), front = ren._project(anc)
             if not front:
                 continue
             tip = (fx * W, fy * H)
@@ -336,7 +350,7 @@ def _draw_all(d, P, ren, s, spec, W, H, ds, dark, px, vis, zbuf):
         outline = (0, 0, 0, int(A * 0.7)) if sum(col) > 380 else (255, 255, 255, int(A * 0.7))
         extra = []  # more things it points at: (index, screen point, opacity)
         for j, m in enumerate(pointers(a)):
-            (mx, my), front = ren.project(m["xyz"])
+            (mx, my), front = ren._project(m["xyz"])
             aj = _visible_here(a, s, spec, ds, m["xyz"], m) if front else 0.0
             if front and -0.02 <= mx <= 1.02 and -0.02 <= my <= 1.02 and aj > 0.002:
                 extra.append((j, (mx * W, my * H), aj))

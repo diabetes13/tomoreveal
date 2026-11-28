@@ -1,5 +1,6 @@
 """Plan 3.4 phase 6: close-ups of several objects, the other structures' colour and opacity, vignette, background blur."""
 import argparse
+import json
 import sys
 
 import numpy as np
@@ -37,6 +38,46 @@ def test_two_whole_structures_in_focus(studio):
     assert sb.closeup_caption([(mem, None), (ves, None)], lambda k: spec["classes"][k]["name"]) == "membrane and vesicles"
     assert sb.part_name(part, spec, ds) == "Close-up: membrane and vesicles"
     assert studio.ren.last_rects["legend"]["shown"]
+
+
+def object_closeup(ds, look):
+    spec = tr.default_spec(ds); spec["style"].update(legend=False, slice_label=False, title="")
+    lk.apply_look(spec, look)
+    part = sb.new_part("focus", target=sb.make_target([(ds.key_of(2), 1)]), others=dict(colour="grey", opacity=1.0),
+                       motion="none", caption="")
+    spec["shots"] = [part]
+    return spec, [f for f in sb.build_plan(spec, ds).frames if f["phase"] == "main" and f["part"] == part["id"]][-1]
+
+
+@pytest.mark.parametrize("look", ["soft", "glass", "ceramic", "xray"])
+def test_an_object_in_focus_keeps_the_look(studio, look):
+    """A single object in focus snapped to its raw colour and opacity, without glass, cream, X-ray or soft shadows."""
+    ds, ren = studio.ds, studio.ren; spec, f = object_closeup(ds, look); size = (480, 270)
+    k = ds.id_of(ds.key_of(2))
+    before = ren.draw(dict(f, e=0.0), spec, size).astype(int)
+    starts = ren.draw(dict(f, e=0.01), spec, size).astype(int)
+    idimg, _, _ = ren._id_pass(size)
+    def where(act):
+        out = np.zeros(idimg.shape[:2], bool)
+        for c, a in ren._id_actors.items():
+            if a is act:
+                out |= (idimg == np.array(c)).all(2)
+        return out
+    obj, struct = where(ren.comp_actors[(k, 1)]), where(ren.actors[k])
+    struct &= ~obj
+    changed = lambda a, b, m: float(((np.abs(a - b).max(2) > 30) & m).sum() / max(1, m.sum()))
+    assert obj.sum() > 300 and struct.sum() > 300
+    assert changed(before, starts, obj) < 0.05, ("the object as the close-up starts", changed(before, starts, obj))
+    assert changed(before, starts, struct) < 0.05, ("the rest of its structure", changed(before, starts, struct))
+    # With the others hidden: what shows through a see-through object changes, and close-ups draw finer outlines on
+    # purpose (X-ray makes them glow). So the object alone is compared with its structure alone, without outlines.
+    lk.set_look(spec, outline="off")
+    only = json.loads(json.dumps(spec))
+    for key, c in only["classes"].items():
+        c["show"] = key == ds.key_of(2)
+    ref = ren.draw(dict(f, e=0.0), only, size).astype(int)
+    alone = ren.draw(dict(f, e=1.0, others=dict(colour="hide", opacity=1.0)), spec, size).astype(int)
+    assert changed(ref, alone, obj) < 0.05, ("the object alone", changed(ref, alone, obj))
 
 
 def test_old_hide_means_opacity_zero():
@@ -102,7 +143,8 @@ def test_pick_several_objects_then_one_close_up_each(window):
     app, win, errs = window
     part = sb.new_part("focus", target=sb.make_target([]), caption=""); win.editor.insert(part)
     pid = part["id"]; win.parts_panel.open(pid)
-    win.start_multi_pick(pid); win.prev_timer.stop(); win.do_preview()
+    from tomoreveal import gui_clicks as clk
+    win.clicks.start(clk.CloseupObjects(pid)); win.prev_timer.stop(); win.do_preview()
     spec = win.spec_for(); seen = {}
     for fx in np.linspace(0.2, 0.8, 13):
         for fy in np.linspace(0.25, 0.8, 8):
@@ -118,7 +160,7 @@ def test_pick_several_objects_then_one_close_up_each(window):
     win.on_click(*picks[0][1])
     assert sb.target_items(win.parts_panel.part(pid)["target"]) == [k for k, _ in picks[1:]]
     win.on_click(*picks[0][1])  # back to three
-    win.end_multi_pick()
+    win.clicks.end()
     n = len(win.spec["shots"])
     win.editor.split_closeup(pid)
     shots = win.spec["shots"]; i = len(shots) - 3
@@ -143,25 +185,26 @@ def test_a_later_close_up_does_not_add_to_the_first(window):
     """3.5 bug fix: with "+ Click objects" still on for close-up A, clicks for a new close-up went into A."""
     app, win, errs = window
     a = sb.new_part("focus", target=sb.make_target([]), caption=""); win.editor.insert(a)
-    win.parts_panel.open(a["id"]); win.start_multi_pick(a["id"]); win.prev_timer.stop(); win.do_preview()
+    from tomoreveal import gui_clicks as clk
+    win.parts_panel.open(a["id"]); win.clicks.start(clk.CloseupObjects(a["id"])); win.prev_timer.stop(); win.do_preview()
     picks = _objects(win, 3); assert len(picks) == 3
     win.on_click(*picks[0][1])
     assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0]]
     # without pressing Esc: add a new close-up by clicking an object
     n = len(win.spec["shots"])
     win.editor.pick_closeup(); win.prev_timer.stop(); win.do_preview()
-    assert win.multi_pick is None
+    assert isinstance(win.clicks.mode, clk.NewCloseup)  # (the clicking for A ended)
     win.on_click(*picks[1][1])
     assert len(win.spec["shots"]) == n + 1
     assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0]]  # A unchanged
     b = win.spec["shots"][-1] if win.spec["shots"][-1]["id"] != a["id"] else win.spec["shots"][-2]
     assert sb.target_items(b["target"])[0][0] == picks[1][0][0]
     # selecting another part also ends the clicking for A
-    win.parts_panel.open(a["id"]); win.start_multi_pick(a["id"])
-    win.select_part(b["id"]); assert win.multi_pick is None
+    win.parts_panel.open(a["id"]); win.clicks.start(clk.CloseupObjects(a["id"]))
+    win.select_part(b["id"]); assert win.clicks.mode is None
     # later, objects can still be added to A
-    win.select_part(a["id"]); win.start_multi_pick(a["id"]); win.prev_timer.stop(); win.do_preview()
-    win.on_click(*picks[2][1]); win.end_multi_pick()
+    win.select_part(a["id"]); win.clicks.start(clk.CloseupObjects(a["id"])); win.prev_timer.stop(); win.do_preview()
+    win.on_click(*picks[2][1]); win.clicks.end()
     assert sb.target_items(win.parts_panel.part(a["id"])["target"]) == [picks[0][0], picks[2][0]]
     assert not errs, errs
 
@@ -202,9 +245,10 @@ def test_close_up_of_a_drawn_frame(window):
     win.prev_timer.stop(); win.do_preview()
     for _ in range(10):
         app.processEvents()
-    n = len(win.spec["shots"]); win.start_region_pick(None, win.spec["shots"][-1]["id"])
+    from tomoreveal import gui_clicks as clk
+    n = len(win.spec["shots"]); win.clicks.start(clk.Region(None, win.spec["shots"][-1]["id"]))
     assert win.prev.box_mode
-    win.on_boxed(0.42, 0.42, 0.58, 0.58)
+    win.clicks.boxed(0.42, 0.42, 0.58, 0.58)
     assert not win.prev.box_mode and len(win.spec["shots"]) == n + 1
     part = win.spec["shots"][-1]
     assert part["type"] == "focus" and sb.part_region(part) is not None and not sb.target_items(part["target"])
@@ -217,6 +261,6 @@ def test_close_up_of_a_drawn_frame(window):
     assert pose["dist"] < 0.5 * ov["dist"]  # closes in on the frame
     assert sb.part_name(part, win.spec, win.st.ds) == "Close-up: framed region"
     win.parts_panel.open(part["id"])  # its settings build without errors
-    win.start_region_pick(part["id"]); win.on_boxed(0.45, 0.45, 0.5, 0.5)
+    win.clicks.start(clk.Region(part["id"])); win.clicks.boxed(0.45, 0.45, 0.5, 0.5)
     assert not np.allclose(sb.part_region(win.spec["shots"][-1])[0], lo)
     assert not errs, errs

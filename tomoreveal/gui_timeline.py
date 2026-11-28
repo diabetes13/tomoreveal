@@ -47,6 +47,7 @@ class TimelineCanvas(QtW.QWidget):
         self.setMinimumHeight(ROW_TOP + ROW_H + 6); self.setFocusPolicy(QtC.Qt.StrongFocus); self.setMouseTracking(True)
         self.setAttribute(QtC.Qt.WA_AcceptTouchEvents, False)
         self.plan = None; self.spec = None; self.ds = None; self.frame = 0; self.selected = None
+        self.selected_ann = None  # the arrow or text whose bar was clicked last: Delete removes it, not the part
         self.ppf = 1.0; self.offset = 0.0; self.fit = True; self._drag = None
         self.pending_view = None  # zoom and scroll read from a project, applied when the plan arrives
         self.parts = {}  # id -> dict(index, part, start, end, main=(start, count))
@@ -70,6 +71,9 @@ class TimelineCanvas(QtW.QWidget):
             d["end"] = sg["start"] + sg["count"]
             if sg["phase"] == "main" and d["main"] is None:
                 d["main"] = (sg["start"], sg["count"])
+        for pid, d in self.parts.items():  # the clock of arrows and text in each part: (frames, seconds), as in the movie
+            js = [j for j in range(d["start"], d["end"]) if plan.frames[j].get("part") == pid and plan.frames[j].get("tp") is not None]
+            d["tp"] = (js, [plan.frames[j]["tp"] for j in js])
         self.frame = min(self.frame, max(0, self.total - 1))
         if self.pending_view is not None and self.total:
             v, self.pending_view = self.pending_view, None
@@ -213,20 +217,22 @@ class TimelineCanvas(QtW.QWidget):
     def ann_bars(self):
         """Bars of the arrows and text boxes: [(annotation id, part id, x0, x1, lane, start s, end s)], in lanes so that
         overlapping items never hide each other."""
-        from .annotations import items, shown_in
+        import bisect
+        from .annotations import items, show_times, shown_in
         if not self.plan or not self.spec:
             return []
         fps = self.plan.fps; bars = []
         for a in items(self.spec):
-            sh = a.get("show") or {}
+            s0, s1 = show_times(a)
             for pid, d in self.parts.items():
-                if not d["main"] or not shown_in(a, pid):
+                js, ts = d.get("tp") or ([], [])
+                if not d["main"] or not js or not shown_in(a, pid):
                     continue
-                n = d["main"][1] / fps; s0 = float(sh.get("start") or 0.0); s1 = float(sh["end"]) if sh.get("end") is not None else n
-                s1 = min(s1, n)
-                if s1 <= s0:
+                i0, i1 = bisect.bisect_left(ts, s0 - 1e-9), len(ts) if s1 is None else bisect.bisect_right(ts, s1 + 1e-9)  # (as shown_at)
+                if i1 <= i0:
                     continue
-                bars.append([a["id"], pid, self.x_of(d["main"][0] + s0 * fps), self.x_of(d["main"][0] + s1 * fps), 0, s0, s1, a])
+                end = s1 if s1 is not None else round(ts[-1] + 1.0 / fps, 2)  # without an end time: to the end of the part
+                bars.append([a["id"], pid, self.x_of(js[i0]), self.x_of(js[i1 - 1] + 1), 0, s0, end, a])
         bars.sort(key=lambda b: b[2]); ends = []
         for b in bars:
             lane = next((i for i, e in enumerate(ends) if e <= b[2] - 2), len(ends))
@@ -453,7 +459,7 @@ class TimelineCanvas(QtW.QWidget):
     def mousePressEvent(self, e):
         if not self.total:
             return
-        self.setFocus(); pos = e.position()
+        self.setFocus(); pos = e.position(); self.selected_ann = None
         if e.button() == QtC.Qt.MiddleButton:  # drag to scroll
             self._drag = dict(kind="pan", x0=pos.x(), off=self.offset); self.setCursor(QtC.Qt.ClosedHandCursor); return
         if e.button() == QtC.Qt.RightButton:
@@ -502,14 +508,15 @@ class TimelineCanvas(QtW.QWidget):
         elif d["kind"] == "ann":
             fps = self.plan.fps if self.plan else 30; dt = (pos.x() - d["x0"]) / (self.ppf * fps)
             step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
-            s0, s1 = d["s0"], d["s1"]
+            s0, s1 = d["s0"], d["s1"]; drawn = max(0.0, s0)  # (a start before the part, left by a split: drawn at 0)
+            snap = lambda x: round(round(x / step) * step, 2)
             if d["how"] == "start":
-                s0 = min(s1 - 0.1, max(0.0, s0 + dt))
-            elif d["how"] == "end":
-                s1 = max(s0 + 0.1, s1 + dt)
+                d["new"] = (snap(min(s1 - 0.1, max(0.0, drawn + dt))), s1)
+            elif d["how"] == "end":  # the stored start is kept
+                d["new"] = (s0, snap(max(drawn + 0.1, s1 + dt)))
             else:
-                s0, s1 = max(0.0, s0 + dt), max(0.0, s0 + dt) + (s1 - s0)
-            d["new"] = (round(round(s0 / step) * step, 2), round(round(s1 / step) * step, 2)); self.update()
+                d["new"] = (snap(max(0.0, drawn + dt)), snap(max(0.0, drawn + dt) + s1 - drawn))
+            self.update()
         elif d["kind"] == "tedge":
             step = 0.5 if e.modifiers() & QtC.Qt.ShiftModifier else 0.1
             dt = (pos.x() - d["x0"]) / (self.ppf * (self.plan.fps if self.plan else 30))
@@ -603,7 +610,7 @@ class TimelineCanvas(QtW.QWidget):
             if order:
                 here = next((i for i, pid in enumerate(order) if self.parts[pid]["start"] <= self.frame < self.parts[pid]["end"]), 0)
                 pid = order[max(0, min(len(order) - 1, here + (1 if k == QtC.Qt.Key_Down else -1)))]
-                d = self.parts[pid]
+                d = self.parts[pid]; self.selected_ann = None
                 self._move_playhead((d["main"] or (d["start"],))[0])
                 self.selected = pid; self.part_selected.emit(pid)
         elif k == QtC.Qt.Key_Escape and self._drag and self._drag.get("kind") == "block":
@@ -613,6 +620,8 @@ class TimelineCanvas(QtW.QWidget):
             cmd = {(QtC.Qt.Key_Delete, False): "delete", (QtC.Qt.Key_Backspace, False): "delete", (QtC.Qt.Key_D, True): "duplicate",
                    (QtC.Qt.Key_S, False): "split", (QtC.Qt.Key_Z, True): "redo" if shift else "undo", (QtC.Qt.Key_Space, False): "play",
                    (QtC.Qt.Key_Y, True): "redo"}.get((k, ctrl))
+            if cmd == "delete" and self.selected_ann in {b[0] for b in self.ann_bars()}:
+                cmd = "delete_annotation"
             if cmd:
                 self.command.emit(cmd); return
             return super().keyPressEvent(e)
@@ -715,8 +724,33 @@ class OverviewStrip(QtW.QWidget):
         self._drag = None
 
 
+class ElidedLabel(QtW.QLabel):
+    """A line of text that shortens with "..." when there is no room, and so never makes its row wider.
+    `text()` is the whole text."""
+
+    def __init__(self, text=""):
+        super().__init__(); self._full = ""
+        self.setSizePolicy(QtW.QSizePolicy.Ignored, QtW.QSizePolicy.Preferred); self.setText(text)
+
+    def setText(self, text):
+        self._full = text or ""; self._fit()
+
+    def text(self):
+        return self._full
+
+    def minimumSizeHint(self):
+        return QtC.QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e); self._fit()
+
+    def _fit(self):
+        short = self.fontMetrics().elidedText(self._full, QtC.Qt.ElideRight, max(0, self.contentsRect().width()))
+        super().setText(short); self.setToolTip(self._full if short != self._full else "")
+
+
 class Timeline(QtW.QWidget):
-    """Timeline strip, a scroll bar when zoomed in, a row of buttons, and the time line of text below."""
+    """Timeline strip, a scroll bar when zoomed in, a row of buttons, and below it the time line of text with the zoom row."""
     frame_changed = QtC.Signal(int)
     released = QtC.Signal()
     part_selected = QtC.Signal(str)
@@ -749,8 +783,10 @@ class Timeline(QtW.QWidget):
         self.compact_btn = QtW.QToolButton(); self.compact_btn.setText("Compact"); self.compact_btn.setCheckable(True)
         self.compact_btn.setToolTip("Lower blocks, for long movies."); self.compact_btn.toggled.connect(self.canvas.set_compact); zl.addWidget(self.compact_btn)
         self._syncing = False
-        self.buttons.addStretch(1); self.buttons.addWidget(zb)
-        self.info = QtW.QLabel(""); self.info.setStyleSheet("color: palette(placeholder-text)"); lay.addWidget(self.info)
+        self.buttons.addStretch(1)
+        self.info_row = QtW.QHBoxLayout(); lay.addLayout(self.info_row)  # (the zoom row is here, not in the buttons: G-21)
+        self.info = ElidedLabel(""); self.info.setStyleSheet("color: palette(placeholder-text)")
+        self.info_row.addWidget(self.info, 1); self.info_row.addWidget(zb)
         c = self.canvas
         c.frame_changed.connect(self._frame); c.released.connect(self.released)
         c.part_selected.connect(self.part_selected); c.part_activated.connect(self.part_activated)
@@ -771,6 +807,8 @@ class Timeline(QtW.QWidget):
         self.canvas.update(); self._text()
 
     def set_selected(self, pid):
+        if pid != self.canvas.selected:  # (the preview calls this at every redraw, with the same part)
+            self.canvas.selected_ann = None
         self.canvas.selected = pid; self.canvas.update(); self._text(); self.part_btn.setEnabled(pid in self.canvas.parts)
 
     @property

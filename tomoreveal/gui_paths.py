@@ -5,6 +5,7 @@ from PySide6 import QtCore as QtC, QtWidgets as QtW
 from . import storyboard as sb
 from .paths import PATH_CAMERA, point_values
 from .gui_theme import DIM
+from .gui_clicks import PathObject, PathPoints
 
 SIDES = (("above", "above"), ("from the left", "left"), ("from the right", "right"), ("behind, looking along it", "behind"),
          ("as the main view", "free"))
@@ -101,7 +102,7 @@ def path_rows(panel, pid, p, form):
             for c in (win.info or {}).get("structures", []):
                 if c.get("mesh"):
                     menu.addAction(panel._name(c["key"]), lambda key=c["key"]: set_items([(key, None)]))
-            menu.addSeparator(); menu.addAction("one object I click in the preview...", lambda: win.start_path_pick(pid))
+            menu.addSeparator(); menu.addAction("one object I click in the preview...", lambda: win.clicks.start(PathObject(pid)))
         menu.aboutToShow.connect(fill)
 
         def set_items(its):
@@ -202,9 +203,9 @@ def path_rows(panel, pid, p, form):
             ws = list(part().get("waypoints") or []); ws.append(dict(pos=[float(x) for x in v[0]], focal=[float(x) for x in v[1]], pause=0.0))
             panel.set(pid, "waypoints", ws, rebuild=True); win.editor.record()
         here.clicked.connect(add_here)
-        click = QtW.QPushButton("Add point by clicking in the preview"); click.setCheckable(True); click.setChecked(win.waypoint_pick == pid)
+        click = QtW.QPushButton("Add point by clicking in the preview"); click.setCheckable(True); win.clicks.follow(click, lambda m: isinstance(m, PathPoints) and m.part == pid)
         click.setToolTip("Click a structure or the slice; the camera will pass near it, looking at it. Esc ends.")
-        click.toggled.connect(lambda on: win.start_waypoint_pick(pid) if on else win.end_waypoint_pick())
+        click.toggled.connect(lambda on: win.clicks.start(PathPoints(pid)) if on else win.clicks.end())
         form.addRow("" if wps else "Points", _row(here, click))
         click.setToolTip(click.toolTip() + " In the preview, drag a numbered point to move it on the slice; right-click it to delete it.")
     cam = dict(PATH_CAMERA, **(p.get("camera") or {}))
@@ -309,7 +310,7 @@ class PointPanel(QtW.QFrame):
     """The small panel next to a selected path point: zoom, field of view, keep, look from here / set this view."""
 
     def __init__(self, win):
-        super().__init__(win.prev); self.win = win; self.pid = None; self.i = None
+        super().__init__(win.prev); self.win = win
         self.setObjectName("pointpanel")
         self.setStyleSheet("QFrame#pointpanel { background: palette(window); border: 1px solid palette(mid); border-radius: 6px } "
                            "QFrame#pointpanel QLabel, QFrame#pointpanel QCheckBox, QFrame#pointpanel QRadioButton { background: transparent; border: none }")
@@ -354,11 +355,14 @@ class PointPanel(QtW.QFrame):
     def slider_to_z(v):
         a, b = np.log(ZOOM_RANGE[0]), np.log(ZOOM_RANGE[1]); return float(np.exp(a + (b - a) * v / 1000))
 
+    pid = property(lambda self: (self.win.path_point or (None, None))[0])  # the window's selected point, nothing of its own
+    i = property(lambda self: (self.win.path_point or (None, None))[1])
+
     def part(self):
         return self.win.parts_panel.part(self.pid) if self.pid else None
 
-    def show_for(self, pid, i):
-        self.pid, self.i = pid, i; self.refresh(); self.place(); self.show(); self.raise_()
+    def show_for(self):
+        self.refresh(); self.place(); self.show(); self.raise_()
 
     def refresh(self):
         p = self.part()
@@ -380,7 +384,7 @@ class PointPanel(QtW.QFrame):
         self.note.setVisible(bool(self.note.text())); self.adjustSize(); self._busy = False
 
     def place(self):
-        rects = self.win.st.ren.last_rects if self.win.st.ren is not None else {}
+        rects = self.win.st.ren.shown_rects if self.win.st.ren is not None else {}
         r = rects.get(f"marker:{self.i}"); prev = self.win.prev
         img = prev._img
         if r and img is not None:
@@ -444,8 +448,8 @@ class PointPanel(QtW.QFrame):
         p, w = self._wp()
         if w is None:
             return
-        del p["waypoints"][self.i]; i = self.i; self.close_panel(); self.win.editor.commit(select=self.pid)
+        i, pid = self.i, self.pid; del p["waypoints"][i]; self.close_panel(); self.win.editor.commit(select=pid)
         self.win.say(f"Deleted point {i + 1}. Undo brings it back.", "ok")
 
     def close_panel(self):
-        self.hide(); self.win.path_point = None; self.win.prev.update()
+        self.hide(); self.win._path_sel = None; self.win.prev.update()

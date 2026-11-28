@@ -290,3 +290,102 @@ def test_the_flip_stays_with_the_movie(window, demo):
     assert win.spec.get("flip") == ["x"] == win.st.info()["flip"]
     win.project.new(); wait_for(win, lambda: win.load(paths=files)); pump(app, 40)
     assert "flip" not in win.spec and win.st.flip == () and np.array_equal(win.st.ds.tomo, tomo) and not errs, errs
+
+
+# ---- the view you see is the view you change (G-43, N-10) and its undo (G-42) ----
+
+def own_view_parts(app, win):
+    a = sb.new_part("overview", motion="none", seconds=2, view=dict(tilt=30.0, az=10.0, zoom=1.0))
+    b = sb.new_part("overview", motion="none", seconds=2, view=dict(tilt=50.0, az=-20.0, zoom=1.0))
+    win.spec["shots"] += [a, b]; win.editor.commit(); win.selected_part = None; pump(app)
+    return a["id"], b["id"], win._main_req()["at"]["part"]
+
+
+def go(app, win, pid, u=0.5):
+    win.req = {"at": {"part": pid, "u": u}}; win.prev_timer.stop(); win.do_preview(); pump(app)
+    assert win.timeline.canvas.plan.frames[win.frame]["part"] == pid
+
+
+def views(win, *pids):
+    return [dict(win.parts_panel.part(p)["view"]) if p else dict(win.spec["view"]) for p in pids]
+
+
+def test_dragging_changes_the_view_on_screen(window):
+    """G-43: over an own-view part that was not selected, a drag changed the main view, which is not on screen."""
+    app, win, errs = window
+    a, b, main = own_view_parts(app, win)
+    go(app, win, a); before = views(win, a, b, None)
+    win.on_drag(40, 0); win.on_release(); pump(app)
+    after = views(win, a, b, None)
+    assert after[0]["az"] != before[0]["az"] and after[1:] == before[1:]
+    assert win.prev.note.text().startswith("Changing the view of part")
+    win.nav.wheel(120, (0.5, 0.5)); win.nav._step(); win.nav.glide(win.nav.target_view(), 0); pump(app)
+    assert views(win, a)[0]["zoom"] != after[0]["zoom"] and views(win, b, None) == after[1:]
+    # a glide on part 1, then the playhead moves to part 2 half-way: it ends on part 1
+    v = views(win, a)[0]; win.nav.push(force=True); win.nav.glide(dict(win.nav.view(), az=v["az"] + 60.0), 0.5)
+    win.nav._step()
+    win.on_scrub(next(j for j, f in enumerate(win.timeline.canvas.plan.frames) if f.get("part") == b))
+    pump(app)
+    assert views(win, a)[0]["az"] == pytest.approx(((v["az"] + 60.0 + 180) % 360) - 180) and views(win, b, None) == after[1:]
+    assert win.nav._anim is None
+    assert not errs, errs
+
+
+@pytest.mark.parametrize("where", ["path", "card", "hold after a close-up", "own view, Tilt slider"])
+def test_changing_the_main_view_shows_it(window, where):
+    """N-10: where the main view is not on screen, changing it (drag, or the Main view sliders) showed nothing."""
+    app, win, errs = window
+    a, b, main = own_view_parts(app, win)
+    key = win.st.ds.key_of(2)
+    if where == "path":
+        p = sb.new_part("path", seconds=3, source=dict(kind="points", items=[]),
+                        waypoints=[dict(pos=[60.0, 60.0, 120.0], focal=[80.0, 90.0, 24.0]), dict(pos=[200.0, 260.0, 120.0], focal=[180.0, 230.0, 24.0])])
+    elif where == "card":
+        p = sb.new_part("card", seconds=2)
+    else:
+        p = None
+    if where == "hold after a close-up":
+        f = sb.new_part("focus", target=sb.make_target([(key, None)]), caption=""); p = sb.new_part("hold", seconds=2)
+        win.spec["shots"] += [f, p]
+    elif p is not None:
+        win.spec["shots"].append(p)
+    win.editor.commit(); win.selected_part = None; pump(app)
+    pid = a if p is None else p["id"]
+    go(app, win, pid); m0 = views(win, None)[0]
+    if where.startswith("own view"):
+        win.set_view(tilt=m0["tilt"] + 10.0); win.prev_timer.stop(); win.do_preview(); pump(app)
+    else:
+        win.on_drag(40, 0); win.on_release(); win.prev_timer.stop(); win.do_preview(); pump(app)
+    assert views(win, None)[0] != m0
+    assert win.timeline.canvas.plan.frames[win.frame]["part"] == main  # the main view is shown
+    assert not errs, errs
+
+
+def test_undo_of_a_view_change_goes_back_to_its_own_view(window):
+    """G-42: one history for all views: an undo wrote the main view into a part's own view, and the other way round."""
+    app, win, errs = window
+    a, b, main = own_view_parts(app, win)
+    nav = win.nav
+    go(app, win, main); m0, a0 = views(win, None, a)
+    nav.push(force=True); nav.apply(dict(nav.view(), az=m0["az"] + 30.0), quick=False); m1 = views(win, None)[0]
+    go(app, win, a)
+    nav.push(force=True); nav.apply(dict(nav.view(), az=a0["az"] + 40.0), quick=False); a1 = views(win, a)[0]
+    go(app, win, b, 0.2)
+    nav.undo(); pump(app); win.prev_timer.stop(); win.do_preview(); pump(app)
+    assert views(win, None, a) == [m1, a0] and win.timeline.canvas.plan.frames[win.frame]["part"] == a  # and shown
+    nav.undo(); pump(app); win.prev_timer.stop(); win.do_preview(); pump(app)
+    assert views(win, None, a) == [m0, a0] and win.timeline.canvas.plan.frames[win.frame]["part"] == main
+    nav.redo(); nav.redo(); pump(app)
+    assert views(win, None, a) == [m1, a1]
+    # a part locked, or deleted, since: its steps are skipped and nothing else changes
+    go(app, win, a); nav.push(force=True); nav.apply(dict(nav.view(), az=a1["az"] + 5.0), quick=False); a2 = views(win, a)[0]
+    win.parts_panel.lock(a, True); pump(app); go(app, win, main); b0 = views(win, b)[0]
+    nav.undo(); nav.undo(); pump(app)
+    assert views(win, a, b)[0] == a2 and views(win, b)[0] == b0
+    assert views(win, None)[0] == m0  # (the main view's own step was the next one back)
+    win.parts_panel.lock(a, False); win.editor.delete(a); pump(app); n = len(nav.history)
+    nav.redo(); pump(app)
+    assert views(win, b)[0] == b0
+    win.project.confirm_discard = lambda what: True; win.start_over()
+    assert not nav.history and not nav.future
+    assert not errs, errs

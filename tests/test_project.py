@@ -427,7 +427,8 @@ def busy_with_a_path(app, win):
 def busy_with_clicks(app, win):
     win.pick_btn.setChecked(True)
     pid = next(p["id"] for p in win.spec["shots"] if p["type"] == "focus")
-    win.pick_btn.setChecked(False); win.parts_panel.open(pid); win.start_multi_pick(pid)
+    from tomoreveal import gui_clicks as clk
+    win.pick_btn.setChecked(False); win.parts_panel.open(pid); win.clicks.start(clk.CloseupObjects(pid))
 
 
 def busy_with_a_label(app, win):
@@ -448,7 +449,7 @@ def test_new_ends_what_is_running(work, errors, busy):
     assert win.spec is None and not win.playing and not win.editor.history.can_undo
     pause(app, 1000)
     assert not errors, errors
-    assert not win.thr_timer.isActive() and not win.editor.history.states and win.multi_pick is None and not win.pick_mode
+    assert not win.thr_timer.isActive() and not win.editor.history.states and win.clicks.mode is None
     assert win.label_editor is None
     assert win.prev.text().startswith("Drop files")  # nothing was drawn over the empty page
 

@@ -163,6 +163,45 @@ def test_edit_points_in_the_window(window):
     assert not errs, errs
 
 
+def test_the_point_panel_stays_on_its_point(window):
+    """G-46: the selected point was a number nobody changed: delete point 1 and the panel edited another point."""
+    app, win, errs = window
+    wps = [dict(pos=[60.0 + 30 * k, 60.0 + 40 * k, 120.0], focal=[80.0 + 20 * k, 90.0 + 25 * k, 24.0]) for k in range(5)]
+    part = sb.new_part("path", seconds=4, source=dict(kind="points", items=[]), waypoints=wps)
+    win.editor.insert(part, "start"); pid = part["id"]
+    win.req = {"at": {"part": pid, "u": 0.0}}; win.prev_timer.stop(); win.do_preview()
+    for _ in range(10):
+        app.processEvents()
+    def redraw():
+        win.prev_timer.stop(); win.do_preview()
+        for _ in range(5):
+            app.processEvents()
+    def ws():
+        return win.parts_panel.part(pid)["waypoints"]
+    win.select_path_point(pid, 2); me = ws()[2]
+    win.parts_panel.open(pid)
+    def delete_point(i):  # as the preview's right-click menu does
+        del ws()[i]; win.editor.commit(select=pid)
+    delete_point(0); redraw()
+    assert win.path_point == (pid, 1) and ws()[1] is me and win.point_panel.title.text().startswith("Point 2")
+    ws()[1], ws()[2] = ws()[2], ws()[1]; win.editor.commit(select=pid); redraw()  # moved down
+    assert win.path_point == (pid, 2) and win.point_panel.isVisible() and win.point_panel.title.text().startswith("Point 3")
+    ws()[1], ws()[2] = ws()[2], ws()[1]; win.editor.commit(select=pid); redraw()  # and up again
+    assert win.path_point == (pid, 1)
+    win.point_panel.zoom.setValue(win.point_panel.z_to_slider(2.0)); win.point_panel._commit()
+    assert me.get("zoom") == pytest.approx(2.0, rel=0.01) and all(w.get("zoom") is None for w in ws() if w is not me)
+    # a click adds a point after the selected one: marker, ring and panel go to the new point
+    win.req = win._main_req(); redraw(); ren = win.st.ren
+    fx = next(x for x in np.linspace(0.3, 0.7, 9) if ren.pick_point(x, 0.6) is not None)
+    win.on_click(fx, 0.6); redraw()
+    assert len(ws()) == 5 and win.path_point == (pid, 2) and ws()[2] is not me and win.point_panel.title.text().startswith("Point 3")
+    win.select_path_point(pid, 1); win.point_panel._delete(); redraw()  # deleting the selected one closes the panel
+    assert win.path_point is None and not win.point_panel.isVisible() and me not in ws()
+    win.select_path_point(pid, 0); win.editor.undo(); redraw()  # undo makes new copies: closed
+    assert win.path_point is None and not win.point_panel.isVisible()
+    assert not errs, errs
+
+
 def QtCore_mods():
     from PySide6 import QtCore
     return QtCore.Qt.NoModifier

@@ -3,7 +3,7 @@ import copy
 
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
-from . import edits, storyboard as sb
+from . import edits, gui_clicks as clk, storyboard as sb
 from .animations import fx_settings
 from .common import UserError
 from .gui_data import clear_layout
@@ -21,7 +21,7 @@ class MovieEditor(QtC.QObject):
 
     def __init__(self, win):
         super().__init__(win)
-        self.win = win; self.history = edits.History(); self.pending_after = None
+        self.win = win; self.history = edits.History()
         tl = win.timeline
         self.add_btn = QtW.QPushButton("+ Add part"); self.add_menu = QtW.QMenu(self.add_btn)
         self.add_menu.aboutToShow.connect(lambda: self.fill_add_menu(self.add_menu)); self.add_btn.setMenu(self.add_menu)
@@ -88,7 +88,7 @@ class MovieEditor(QtC.QObject):
         """After an edit: one undo step, rebuild the Movie tab, redraw; optionally select a part and show its start."""
         self.hist_timer.stop(); self.history.push(self.spec)
         if select is not None:
-            self.win.end_picks(keep=select); self.win.selected_part = select
+            self.win.clicks.end_for(select); self.win.selected_part = select
         if show is not None:
             self.win.req = {"at": {"part": show, "u": 0}}
         self.win.build_controls(); self.win.schedule(0); self.refresh_buttons()
@@ -160,7 +160,7 @@ class MovieEditor(QtC.QObject):
         self.insert(sb.focus_shot({"class": key}, name), after)
 
     def pick_closeup(self, after=None):
-        self.pending_after = after or self.anchor(); self.win.pick_btn.setChecked(True)
+        self.win.clicks.start(clk.NewCloseup(after or self.anchor()))
 
     def delete(self, pid=None):
         pid = self.target(pid)
@@ -262,8 +262,8 @@ class MovieEditor(QtC.QObject):
         edits.move_part(self.spec, pid, new_index); self.commit(select=pid)
 
     def command(self, cmd):
-        {"delete": lambda: self.delete(), "duplicate": lambda: self.duplicate(), "split": self.split,
-         "undo": self.undo, "redo": self.redo, "play": self.win.toggle_play}[cmd]()
+        {"delete": lambda: self.delete(), "duplicate": lambda: self.duplicate(), "split": self.split, "undo": self.undo,
+         "redo": self.redo, "play": self.win.toggle_play, "delete_annotation": self.win.ann_panel.delete_clicked}[cmd]()
 
     # ---- menus ----
     def fill_add_menu(self, menu, after=None):
@@ -309,7 +309,7 @@ class MovieEditor(QtC.QObject):
             sub.addAction(QtG.QIcon(pm), name, lambda key=c["key"], name=name: self.add_closeup(key, name, after))
         sub.addSeparator()
         sub.addAction("an object I click in the preview...", lambda: self.pick_closeup(after))
-        sub.addAction("a region I draw in the preview...", lambda: self.win.start_region_pick(None, after or self.anchor()))
+        sub.addAction("a region I draw in the preview...", lambda: self.win.clicks.start(clk.Region(None, after or self.anchor())))
 
     def context_menu(self, pid, pos):
         if self.spec is None:
@@ -511,7 +511,7 @@ class PartsPanel(QtW.QWidget):
     # ---- opening and closing ----
     def toggle(self, pid):
         if self.open_id == pid:
-            self.win.end_picks(); self.close_open(); self.win.selected_part = None; self.win.timeline.set_selected(None)
+            self.win.clicks.end_for(None); self.close_open(); self.win.selected_part = None; self.win.timeline.set_selected(None)
         else:
             self.open(pid)
 
@@ -526,7 +526,7 @@ class PartsPanel(QtW.QWidget):
         """Open one line (closing the others); select=True also selects the part on the timeline and shows it."""
         if pid not in self.rows:
             return
-        self.win.end_picks(keep=pid)
+        self.win.clicks.end_for(pid)
         self.close_open(); self.open_id = pid; r = self.rows[pid]
         self.fill_details(pid); r["details"].setVisible(True); r["arrow"].setArrowType(QtC.Qt.DownArrow)
         r["box"].setStyleSheet("QFrame#part { border: 1px solid palette(highlight); border-radius: 3px }")  # not its labels
@@ -1034,12 +1034,12 @@ class PartsPanel(QtW.QWidget):
                 a.toggled.connect(lambda on, key=c["key"]: self.set_items(pid, [it for it in sb.target_items(self.part(pid)["target"])
                                                                                 if it != (key, None)] + ([(key, None)] if on else [])))
         menu.aboutToShow.connect(fill)
-        pick = QtW.QPushButton("+ Click objects in the preview"); pick.setCheckable(True); pick.setChecked(self.win.multi_pick == pid)
+        pick = QtW.QPushButton("+ Click objects in the preview"); pick.setCheckable(True); self.win.clicks.follow(pick, lambda m: isinstance(m, clk.CloseupObjects) and m.part == pid)
         pick.setToolTip("Click objects to add them; click again to take one out; Shift-click adds the whole structure. Esc ends.")
-        pick.toggled.connect(lambda on: self.win.start_multi_pick(pid) if on else self.win.end_multi_pick())
+        pick.toggled.connect(lambda on: self.win.clicks.start(clk.CloseupObjects(pid)) if on else self.win.clicks.end())
         frame = QtW.QPushButton("Frame a region..."); frame.setToolTip(
             "Draw a frame in the preview: the close-up shows only what is inside it, for example where two objects touch.")
-        frame.clicked.connect(lambda: self.win.start_region_pick(pid))
+        frame.clicked.connect(lambda: self.win.clicks.start(clk.Region(pid)))
         h.addWidget(b); h.addWidget(pick); h.addStretch(1)
         out = QtW.QWidget(); v = QtW.QVBoxLayout(out); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2); v.addWidget(w)
         h2 = QtW.QHBoxLayout(); h2.addWidget(frame)
@@ -1071,6 +1071,6 @@ class PartsPanel(QtW.QWidget):
                 self.win.editor.commit(select=pid); self.fill_details(pid)
             elif v == "pick":
                 obj.setCurrentIndex(1 if tgt.get("component") is not None else 0)
-                win.start_object_pick(pid, ds.key_of(k))
+                win.clicks.start(clk.CloseupObject(pid, ds.key_of(k)))
         obj.activated.connect(chose)
         form.addRow("Object", obj)

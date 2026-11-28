@@ -188,7 +188,7 @@ def cmd_preview(args):
         s = dict(frames[idx[len(idx) // 2]])
         if args.z is not None:
             s["k"] = args.z
-        im = Image.fromarray(st.ren.draw(s, spec, size)[..., :3])
+        im = Image.fromarray(st.ren.draw(s, spec, size, aa="fxaa")[..., :3])  # no smoothing setting here: Fast
         ImageDraw.Draw(im).text((12, 8), f"--view {name}", fill=(255, 255, 0), font=font)
         sheet.paste(im, ((i % cols) * size[0], (i // cols) * size[1]))
     sheet.save(args.out)

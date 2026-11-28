@@ -84,6 +84,32 @@ def test_dissolve_blends_into_the_next_part(studio):
     assert np.abs(b - c).mean() < np.abs(a - c).mean()  # the last card frame is close to the next part's first frame
 
 
+@pytest.mark.parametrize("transparent", [False, True])
+def test_each_dissolve_frame_mixes_the_card_and_the_next_frame_as_it_is_now(studio, transparent):
+    """The next frame was kept from the first dissolve frame: old colours, old smoothing, and drawn see-through."""
+    ds, ren = studio.ds, studio.ren; size = (320, 180)
+    spec = tr.default_spec(ds); spec["style"].update(legend=False, slice_label=False, title="", bg="#ffffff")
+    edits.insert_part(spec, sb.new_part("title_card", title="T", transition_to_next="dissolve", fade_in=0), after="start")
+    frames, _ = tr.build_timeline(spec, ds)
+    cf = [f for f in card_frames(frames, spec["shots"][0]["id"]) if 0 < f.get("dissolve", 0) < 1]
+    assert len(cf) >= 3
+
+    def check(s, aa="off"):
+        q = float(s["dissolve"])
+        got = ren.draw(s, spec, size, aa=aa, transparent=transparent).astype(float)
+        card = ren.draw(dict(s, dissolve=0.0), spec, size, aa=aa, transparent=transparent).astype(float)
+        nxt = ren.draw(s["dissolve_to"], spec, size, aa=aa, transparent=transparent).astype(float)
+        assert got.shape == card.shape == nxt.shape
+        assert np.abs(got - ((1 - q) * card + q * nxt)).max() <= 2
+        return got
+    for s in cf[::max(1, len(cf) // 3)]:
+        check(s)
+    s = cf[-1]; before = check(s)
+    spec["style"]["invert"] = True  # a setting of the next part changes (its slice, white on black): seen at once
+    assert np.abs(check(s) - before).max() > 30
+    check(s, "ssaa")  # Off, then Best at the same size: Best's edges
+
+
 def test_project_keeps_card_pictures(studio, tmp_path):
     from PIL import Image
     path = str(tmp_path / "logo.png"); Image.new("RGBA", (10, 10), (0, 0, 255, 255)).save(path)

@@ -126,14 +126,17 @@ class ExportControls(QtC.QObject):
 
     def step(self):
         w = self.win
-        if self.est_gen is None or w.gen is not None or w.playing:
-            return self.stop()
+        if self.est_gen is None or w.gen is not None or w.playing or w.busy:
+            return self.stop()  # it starts again after a change (set_busy, the end of a movie or of playback)
+        held = w.mouse_down()  # a drag: this step waits (not on a 0 ms timer, which would keep a core busy)
+        self.tick.setInterval(50 if held else 0)
+        if held:
+            return
         try:
             next(self.est_gen)
         except StopIteration:
             res = (self.est.result, set(self.est.rough), len(self.est.frames) / self.est.fps); self.cache[self._k] = res
             self.stop(); self.show(res)
-            w.schedule(0)  # the shared renderer drew other sizes: draw the preview again
         except Exception as exc:
             self.stop(); self.est_lbl.setText(f"Could not estimate the file sizes: {exc}")
 

@@ -15,7 +15,7 @@ import numpy as np
 from .common import __version__
 
 CHUNK_FRAMES = 300
-PICTURE_VERSION = 1  # raised when the same settings and data give other pictures (the app's version may stay the same)
+PICTURE_VERSION = 2  # raised when the same settings and data give other pictures (the app's version may stay the same)
 
 # name: (file suffix, extension, pixel format fed to FFmpeg, encoder arguments)
 SIZES = {"larger": 18, "balanced": 20, "smaller": 23}

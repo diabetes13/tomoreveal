@@ -11,7 +11,7 @@ import numpy as np
 
 PRESETS = (("Default", "default"), ("Simple", "simple"), ("Soft", "soft"), ("Full", "full"), ("Flat", "flat"))
 AA_PREVIEW = (("Off", "off"), ("Fast", "fxaa"))
-AA_MOVIE = (("Off", "off"), ("Fast", "fxaa"), ("Best", "ssaa"), ("Multisample", "msaa"))
+AA_MOVIE = (("Off", "off"), ("Fast", "fxaa"), ("Best", "ssaa"))  # older projects' "msaa" (Multisample) is drawn as Best
 STYLES = (("Normal", "normal"), ("Cartoon", "cartoon"), ("Dots", "dots"), ("Glossy", "glossy"))
 GLOSS = {"shiny": (0.0, 0.25, 1.0), "metallic": (0.8, 0.3, 1.0), "glass": (0.0, 0.05, 0.35)}  # metallic, roughness, opacity
 
@@ -54,12 +54,13 @@ def style_of(spec, key):
 
 
 def aa_mode(v):
-    """Anti-aliasing mode from a bool (older callers) or a mode name."""
-    if v is True:
+    """Anti-aliasing mode from a bool (older callers) or a mode name. Multisample ("msaa", in older projects) is
+    drawn as Best: see-through structures can't be drawn multisampled, and switching per frame made the picture jump."""
+    if v is True or v == "msaa":
         return "ssaa"
     if not v:
         return "off"
-    return v if v in ("off", "fxaa", "ssaa", "msaa") else "off"
+    return v if v in ("off", "fxaa", "ssaa") else "off"
 
 
 def direction(az, el):
@@ -196,6 +197,20 @@ def style35(spec):
     return out
 
 
+def part_style35(spec, own):
+    """The look settings of 3.5 in a part with its own look `own` (storyboard.part_look; {}: the movie's). A whole look
+    for the part keeps the movie's background."""
+    L35 = style35(spec)
+    if not own:
+        return L35
+    if own.get("style") in LOOK_PRESETS:
+        L35 = {**STYLE35_DEFAULTS, **LOOK_PRESETS[own["style"]], "background": L35["background"], "preset": own["style"]}
+    L35 = dict(L35, **{k: v for k, v in own.items() if k in ("shadow", "outline", "depth_fade")})
+    if "membranes" in own:
+        L35.update(glass=own["membranes"] == "glass", membrane_colour=solid_colour(spec) if own["membranes"] == "cream" else None)
+    return L35
+
+
 def solid_colour(spec):
     """The colour chosen for solid membranes ("solid colour"; cream unless another was chosen from the colour wheel)."""
     return ((spec.get("look") or {}).get("style35") or {}).get("solid_colour") or CREAM
@@ -240,6 +255,71 @@ def is_membrane(spec, key, name):
     import re
     words = re.findall(r"[a-z]+", (name or "").lower())
     return any(w in MEMBRANE_WORDS or w.startswith("membran") or w.startswith("vesic") for w in words)
+
+
+def closeup_factor(s, key, component=None):
+    """How much of structure `key` (or of one of its objects, `component`) a close-up frame s leaves visible, 0..1:
+    the others' opacity and the close-up's own "hide" for this structure, faded in with e. What is in focus (the whole
+    structure, or that object) is not one of the others. Glass per structure is not hiding (appearance does it)."""
+    from .parts import others_of, target_items
+    e, mode = float(s.get("e", 0.0)), s.get("others")
+    items = [(k, None if c is None else int(c)) for k, c in target_items(s.get("target"))]
+    if e <= 0:
+        return 1.0
+    focus = (key, None) in items or (component is not None and (key, int(component)) in items)
+    if not isinstance(mode, dict):  # older settings: grey / hide / keep
+        return 0.0 if mode == "hide" and e >= 0.999 and items and not focus else 1.0
+    ocol, oop = others_of(mode); f = 1.0
+    if items and not focus and not (ocol == "keep" and oop >= 0.999):  # (a region close-up has no others)
+        f *= 1.0 - e * (1.0 - oop)
+    if (mode.get("each") or {}).get(key) == "hide":
+        f *= 1.0 - e
+    return f
+
+
+def look_appearance(spec, ds, L35, k):
+    """(colour, opacity) of structure k as the look draws it, before any close-up: its own colour and opacity, all
+    structures' opacity, glass or cream membranes, richer colours on light backgrounds, pastel, X-ray."""
+    from .common import hex2rgb
+    from .parts import class_spec
+    c = class_spec(spec, ds, k); style = spec.get("style", {})
+    op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
+    col = hex2rgb(c.get("color", ds.classes[k]["color"]))
+    mem = (L35["glass"] or L35["membrane_colour"]) and is_membrane(spec, ds.classes[k]["key"], c.get("name", ds.classes[k]["name"]))
+    if L35["glass"] and mem:  # glass membranes (3.5): pale and see-through
+        col = hex2rgb(L35["glass_colour"]); op *= float(L35["glass_opacity"])
+    elif L35["membrane_colour"] and mem:  # solid membranes in one colour (Ceramic: cream)
+        col = hex2rgb(L35["membrane_colour"])
+    elif L35["richer"] and sum(hex2rgb(style.get("bg", "#000000"))) > 1.5:
+        col = richer(col)
+    if L35["pastel"] and not mem:
+        col = pastel(col)
+    if L35["material"] == "xray":  # X-ray: every structure see-through
+        op *= XRAY_OPACITY
+    return col, op
+
+
+def appearance(spec, ds, L35, s, k, component=None):
+    """(colour, opacity) of structure k, or of one of its objects in focus, in frame s: the look (look_appearance) and
+    the close-up: the others greyed, darkened or faded, glass or hidden per structure (closeup_factor)."""
+    from .common import hex2rgb
+    from .parts import others_of, target_items
+    col, op = look_appearance(spec, ds, L35, k)
+    key = ds.classes[k]["key"]; e, mode = float(s["e"]), s["others"]
+    items = [(kk, None if c is None else int(c)) for kk, c in target_items(s["target"]) if ds.id_of(kk) is not None]
+    legacy = not isinstance(mode, dict); ocol, oop = others_of(mode)
+    keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
+    focus = (key, None) in items or (component is not None and (key, int(component)) in items)
+    if e > 0 and items and not keep and not focus:  # one of the others: towards grey, darker, or the background
+        if legacy:
+            to = (0.27, 0.27, 0.27) if mode == "grey" else hex2rgb(spec.get("style", {}).get("bg", "#000000"))
+        else:
+            to = (0.27, 0.27, 0.27) if ocol == "grey" else tuple(v * 0.3 for v in col) if ocol == "darken" else col
+        col = tuple(a + (b - a) * e for a, b in zip(col, to))
+    if e > 0 and not legacy and (mode.get("each") or {}).get(key) == "glass":  # see-through in this close-up
+        col = tuple(a + (b - a) * e for a, b in zip(col, hex2rgb(L35["glass_colour"])))
+        op *= 1.0 - e * (1.0 - float(L35["glass_opacity"]))
+    return col, op * closeup_factor(dict(s, target={"items": [{"structure": kk, "component": c} for kk, c in items]}), key, component)
 
 
 def pastel(rgb, amount=0.3):

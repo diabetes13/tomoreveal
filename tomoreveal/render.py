@@ -9,7 +9,7 @@ from .common import hex2rgb
 from .picking import PreviewPicking
 from .picture_looks import PictureLooks
 from .shadows import restore_unlit, unlit_to_ambient
-from .storyboard import Framer, class_spec, clip_box, others_of, state_key, target_items
+from .storyboard import Framer, class_spec, clip_box, others_of, target_items
 
 
 def get_font(px, bold=False):
@@ -72,7 +72,9 @@ class Renderer(PreviewPicking, PictureLooks):
         self._slice_grey, self._shadow_key = None, None
         self.surface_async, self.surfaces_pending, self._soften_now = False, set(), {}  # smoother membranes per part (3.5)
         self.pl = pv.Plotter(off_screen=True, window_size=list(self.size))
-        self._ms_aa = self.pl.ren_win.GetMultiSamples()  # multisampling wanted by the anti-aliasing mode (off while peeling)
+        # VTK's window starts with 8 samples: "Off" would smooth until the mode first changes, and see-through
+        # structures (depth peeling) can't be drawn multisampled. No mode uses multisampling (Multisample is drawn as Best).
+        self.pl.ren_win.SetMultiSamples(0)
         self.shape = ds.shape; nz, ny, nx = self.shape
         self.img = pv.ImageData(dimensions=(nx, ny, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
         self.img.point_data["I"] = np.zeros(nx * ny, np.uint8); self._slice_key = None
@@ -88,7 +90,11 @@ class Renderer(PreviewPicking, PictureLooks):
         self.actors, self.comp_actors, self._fonts = {}, {}, {}
         self._shown = {}  # structure id -> the surface its actor shows: the structure's own, or a part's (3.5)
         self.bar_actor, self.last_rects = None, {}
-        self._card_cache, self._next_cache = {}, {}
+        self._card_cache = {}
+        self._depth, self._depth_ok, self._last_id = None, False, None  # scene_depth() of the frame just drawn
+        # show(): the frame on screen, what it showed, and the number of draws when it was drawn (see picking.py)
+        self._draws, self._shown_args, self._shown_mark = 0, None, 0
+        self.shown_rects, self.shown_path, self.shown_path3d, self.shown_size = {}, None, None, self.size
         for k, m in ds.meshes.items():
             self.actors[k] = self._add(m); self._shown[k] = m
 
@@ -135,6 +141,8 @@ class Renderer(PreviewPicking, PictureLooks):
         if key not in self.comp_actors:
             m = self.ds.comp_mesh(k, cid, self._soften_now.get(k))
             self.comp_actors[key] = self._add(m, front=True) if m is not None else None
+            if m is not None:
+                self.comp_actors[key]._shown_mesh = m
         return self.comp_actors[key]
 
     def _font(self, px, bold=False):
@@ -146,7 +154,9 @@ class Renderer(PreviewPicking, PictureLooks):
         return next((p for p in spec.get("shots", []) if p.get("id") == pid), None)
 
     def draw_card(self, s, spec, size, aa=False, transparent=False, annotate=True):
-        """A card frame: the card image (cached per part and size), faded, or dissolving into the next frame."""
+        """A card frame: the card image (cached per part and size), faded, or dissolving into the next frame, which is
+        drawn each time as it is now (its settings, smoothing and surfaces may have changed), opaque unless the movie
+        is transparent."""
         import json as _json
         from .cards import card_frame
         part = self._part(spec, s["card"]) or {}
@@ -155,18 +165,16 @@ class Renderer(PreviewPicking, PictureLooks):
             a, rects = card_frame(part, size, self._font, float(s.get("card_fade", 1.0)), transparent)
             self._card_cache = dict(key=key, img=a, rects=rects)
         a, rects = self._card_cache["img"], self._card_cache["rects"]
-        q = float(s.get("dissolve", 0.0) or 0.0)
-        if q > 0 and s.get("dissolve_to") is not None:
-            nxt = s["dissolve_to"]; nk = (state_key(nxt), nxt.get("part"), tuple(size), bool(transparent))
-            if self._next_cache.get("key") != nk:
-                self._next_cache = dict(key=nk, img=self.draw(nxt, spec, size, aa=aa, transparent=True).astype(np.float32))
-            b = self._next_cache["img"]
-            a = a * (1 - q) + b * q
         out = np.clip(a, 0, 255).astype(np.uint8)
         if not transparent:
             al = out[..., 3:4].astype(np.float32) / 255.0
             bgc = np.array(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) * 255
             out = (out[..., :3] * al + bgc * (1 - al)).astype(np.uint8)
+        q = float(s.get("dissolve", 0.0) or 0.0)
+        if q > 0 and s.get("dissolve_to") is not None:
+            b = self.draw(dict(s["dissolve_to"], blend=None), spec, size, aa=aa, transparent=transparent, annotate=annotate)  # (it may blend this card)
+            out = np.clip(np.round(out.astype(np.float32) * (1 - q) + b.astype(np.float32) * q), 0, 255).astype(np.uint8)
+        self._depth, self._depth_ok, self._last_id = None, False, None  # a card has no depth
         if not annotate:
             self.last_rects = dict(rects); return out
         img = self.annotate(out, s, spec, size, False, transparent)
@@ -175,6 +183,7 @@ class Renderer(PreviewPicking, PictureLooks):
 
     def draw(self, s, spec, size, aa=False, transparent=False, annotate=True, preview=False):
         """One frame. preview=True also shows helpers that never go into a movie (the path of a camera path part)."""
+        self._draws += 1
         ds, style = self.ds, spec.get("style", {})
         size = (int(size[0]) // 2 * 2, int(size[1]) // 2 * 2)
         if s.get("blend"):  # a dissolve or a fade through black / white between two parts (3.5)
@@ -196,33 +205,24 @@ class Renderer(PreviewPicking, PictureLooks):
             return np.clip(np.round(a_img * (1 - q) + b_img * q), 0, 255).astype(np.uint8)
         if s.get("card"):
             return self.draw_card(s, spec, size, aa, transparent, annotate)
+        self._depth, self._depth_ok, self._last_id = None, False, None
         if size != self.size:
             self.pl.window_size = list(size); self.size = size
         from .look import aa_mode, look_settings
         lk = look_settings(spec); mode = aa_mode(aa)
         if mode != self.aa:  # switching is costly: only when the mode changes
             self.pl.disable_anti_aliasing()
-            if mode == "msaa":
-                self.pl.enable_anti_aliasing("msaa", multi_samples=4)
-            elif mode != "off":
+            if mode != "off":
                 import warnings
                 with warnings.catch_warnings():  # with OSMesa, VTK uses SSAA for FXAA and says so
                     warnings.simplefilter("ignore")
                     self.pl.enable_anti_aliasing(mode)
-            self.aa = mode; self._ms_aa = self.pl.ren_win.GetMultiSamples()
-        from .look import GRADIENT_TOP, LOOK_PRESETS, style35
-        L35 = style35(spec)
+            self.aa = mode
+        from .look import GRADIENT_TOP, part_style35
         own = s.get("lk") or {}
-        if own:  # this part's own look and effects (3.5)
-            if own.get("style") in LOOK_PRESETS:  # a whole look for this part; the background stays the movie's
-                from .look import STYLE35_DEFAULTS
-                L35 = {**STYLE35_DEFAULTS, **LOOK_PRESETS[own["style"]], "background": L35["background"], "preset": own["style"]}
-            L35 = dict(L35, **{k: v for k, v in own.items() if k in ("shadow", "outline", "depth_fade")})
-            if "membranes" in own:
-                from .look import solid_colour
-                L35.update(glass=own["membranes"] == "glass", membrane_colour=solid_colour(spec) if own["membranes"] == "cream" else None)
-            if "tomo_shadow" in own:
-                lk["shadows"]["slice"]["on"] = bool(own["tomo_shadow"])
+        L35 = part_style35(spec, own)  # this part's own look and effects (3.5)
+        if "tomo_shadow" in own:
+            lk["shadows"]["slice"]["on"] = bool(own["tomo_shadow"])
         self._l35 = L35
         self._use_surfaces(spec, own.get("soften"))
         bg = style.get("bg", "#000000"); bgkey = (bg, L35["background"] == "gradient")
@@ -232,9 +232,6 @@ class Renderer(PreviewPicking, PictureLooks):
             else:
                 self.pl.set_background(hex2rgb(bg))
             self.bg = bgkey
-        bgc = hex2rgb(bg)
-        light_bg = sum(bgc) > 1.5
-        del LOOK_PRESETS
         # tomogram slice
         con = style.get("contrast", [1, 99]); inv = bool(style.get("invert", False)); k = int(s["k"])
         key = (k, tuple(con), inv, id(ds.tomo))
@@ -256,67 +253,42 @@ class Renderer(PreviewPicking, PictureLooks):
             p.SetOrigin(*o)
         # structures
         e, tgt, mode = float(s["e"]), s["target"], s["others"]
-        items = self._focus_items(tgt); whole = {k for k, c in items if c is None}
-        legacy = not isinstance(mode, dict)  # older settings (grey / hide / keep) are drawn exactly as before
-        ocol, oop = others_of(mode)
+        items = self._focus_items(tgt)
+        legacy = not isinstance(mode, dict); ocol, oop = others_of(mode)
         keep = (mode == "keep") if legacy else (ocol == "keep" and oop >= 0.999)
-        each = (mode.get("each") or {}) if not legacy else {}  # per structure in this close-up (3.5): glass / hide
         all_op = float(min(1.0, max(0.0, style.get("structures_opacity", 1.0))))
-        from .look import XRAY_OPACITY
+        from .look import appearance, look_appearance
+        for kk, act in self.actors.items():  # the structure's own surface again (see below, and a cut in _apply_fx)
+            if getattr(act, "_rest", False):
+                act.mapper.SetInputData(self.mesh_of(kk)); act._rest = False; act._shown_mesh = self.mesh_of(kk)
+        objects = {}  # structure id -> its objects in focus, drawn by actors of their own
+        for tid, comp in items if e > 0 and not keep else ():
+            if comp is not None:
+                objects.setdefault(tid, []).append(int(comp))
         translucent = False; self._legend_col = {}
         for kk, act in self.actors.items():
-            c = class_spec(spec, ds, kk)
-            if not c.get("show", True):
+            if not class_spec(spec, ds, kk).get("show", True):
                 act.SetVisibility(False); continue
-            op = float(min(1.0, max(0.0, c.get("opacity", 1.0)))) * all_op
-            col = hex2rgb(c.get("color", ds.classes[kk]["color"]))
-            mem = (L35["glass"] or L35["membrane_colour"]) and self._membrane(spec, kk)
-            if L35["glass"] and mem:  # glass membranes (3.5): pale and see-through
-                col = hex2rgb(L35["glass_colour"]); op *= float(L35["glass_opacity"])
-            elif L35["membrane_colour"] and mem:  # solid membranes in one colour (Ceramic: cream)
-                col = hex2rgb(L35["membrane_colour"])
-            elif L35["richer"] and light_bg:
-                from .look import richer
-                col = richer(col)
-            if L35["pastel"] and not mem:
-                from .look import pastel
-                col = pastel(col)
-            if L35["material"] == "xray":  # X-ray: every structure see-through
-                op *= XRAY_OPACITY
-            self._legend_col[kk] = col  # the colour the legend shows: as drawn by the look
-            if e <= 0 or not items or keep or kk in whole:
-                act.SetVisibility(True)
-            elif legacy:
-                to = (0.27, 0.27, 0.27) if mode == "grey" else bgc
-                col = tuple(a + (b - a) * e for a, b in zip(col, to))
-                act.SetVisibility(not (mode == "hide" and e >= 0.999))
-            else:  # the others: grey / darker / unchanged colour, and their own opacity, both faded in with e
-                to = (0.27, 0.27, 0.27) if ocol == "grey" else tuple(v * 0.3 for v in col) if ocol == "darken" else col
-                col = tuple(a + (b - a) * e for a, b in zip(col, to))
-                op *= 1.0 - e * (1.0 - oop); act.SetVisibility(op > 0.002)
-            ch = each.get(ds.classes[kk]["key"]) if e > 0 and each else None
-            if ch == "hide":  # hidden in this close-up, faded out with e
-                op *= 1.0 - e; act.SetVisibility(op > 0.002)
-            elif ch == "glass":  # see-through in this close-up, like the glass membranes
-                to = hex2rgb(L35["glass_colour"]); col = tuple(a + (b - a) * e for a, b in zip(col, to))
-                op *= 1.0 - e * (1.0 - float(L35["glass_opacity"]))
-            set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
+            self._legend_col[kk] = look_appearance(spec, ds, L35, kk)[0]  # the colour the legend shows: as drawn by the look
+            col, op = appearance(spec, ds, L35, s, kk)
+            act.SetVisibility(True); set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
             act.GetProperty().SetColor(*col)
-        translucent |= self._apply_styles(spec, lk, all_op)
-        self._apply_baked_shadows(spec, L35)
+            if op < 0.999 and kk in objects:  # see-through: drawn without its objects in focus (they can't match
+                rest = self._fx_mesh(kk, tuple(sorted(objects[kk])), "rest")  # when drawn over their own glass)
+                if rest is not None:
+                    act.mapper.SetInputData(rest); act._rest = True; act._shown_mesh = rest
         for act in self.comp_actors.values():
             if act is not None:
                 act.SetVisibility(False)
-        for tid, comp in items:  # single objects in focus: drawn over their (greyed) structure
-            if comp is None or e <= 0 or keep:
-                continue
-            act = self._comp_actor(tid, int(comp))
-            if act is not None:
-                act.SetVisibility(True)
-                act.GetProperty().SetColor(*hex2rgb(class_spec(spec, ds, tid).get("color", ds.classes[tid]["color"])))
-                op = float(min(1.0, max(0.0, class_spec(spec, ds, tid).get("opacity", 1.0)))) * all_op
-                op *= XRAY_OPACITY if L35["material"] == "xray" else 1.0
-                set_opacity(act, op); translucent |= op < 0.999 and act.GetVisibility()
+        for tid, cids in objects.items():  # single objects in focus: drawn over their structure, in the look
+            for cid in cids:
+                act = self._comp_actor(tid, cid)
+                if act is not None:
+                    col, op = appearance(spec, ds, L35, s, tid, cid)
+                    act.SetVisibility(True); act.GetProperty().SetColor(*col); set_opacity(act, op)
+                    translucent |= op < 0.999 and act.GetVisibility()
+        translucent |= self._apply_styles(spec, lk, all_op)
+        self._apply_baked_shadows(spec, L35)
         translucent |= self._apply_fx(s.get("fx") or {}, items, spec, e, keep, all_op)
         # Depth peeling only while some structure is see-through and the slice is opaque or hidden: with OSMesa (VTK 9.6)
         # peeling plus a see-through slice gives an all-black frame when drawn without anti-aliasing (3.2 and 3.4 pitfall).
@@ -346,14 +318,10 @@ class Renderer(PreviewPicking, PictureLooks):
         try:
             self.pl.render()
             fr_img = self.pl.screenshot(None, transparent_background=bool(transparent))
-            blur_zb = None
-            if self._vig is not None and self._vig["blur"] > 0.001:  # before the outline pass draws over the depth buffer
-                from vtkmodules.util.numpy_support import vtk_to_numpy
-                W_, H_ = size; arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W_ - 1, H_ - 1, arr)
-                blur_zb = vtk_to_numpy(arr).reshape(H_, W_)[::-1].copy()
         finally:
             restore_unlit(lit)
-        self._last_id = None
+        self._depth_ok = True  # scene_depth() may be asked from now on
+        blur_zb = self.scene_depth() if self._vig is not None and self._vig["blur"] > 0.001 else None
         if L35["outline"] != "off" or L35["depth_fade"] != "off":  # 3.5 looks: outlines and depth fade, from the depth buffer
             fr_img = self._outlines_and_fade(fr_img, s, spec, size, L35, transparent)
         if blur_zb is not None:
@@ -369,10 +337,9 @@ class Renderer(PreviewPicking, PictureLooks):
 
     def _set_peeling(self, on):
         """Depth peeling for see-through structures, set up by hand (3.5 phase 1A). PyVista's enable_depth_peeling()
-        leaves multisampling on, and peeling with multisampling drew every see-through mesh invisible (OSMesa, VTK 9.6):
-        so multisampling is off while peeling, and back to what the anti-aliasing mode wants afterwards."""
+        leaves multisampling on, and peeling with multisampling drew every see-through mesh invisible (OSMesa, VTK 9.6);
+        the window has no multisampling (see __init__)."""
         rw, ren = self.pl.ren_win, self.pl.renderer
-        rw.SetMultiSamples(0 if on else self._ms_aa)
         if on == self.peeling:
             return
         if on:
@@ -434,9 +401,7 @@ class Renderer(PreviewPicking, PictureLooks):
         if not self._path3d:
             return
         W, H = size; ren = self.pl.renderer
-        from vtkmodules.util.numpy_support import vtk_to_numpy
-        arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-        zb = vtk_to_numpy(arr).reshape(H, W)
+        zb = self.scene_depth()[::-1]  # rows from the bottom
 
         def proj(P):
             ren.SetWorldPoint(*[float(v) for v in P], 1.0); ren.WorldToDisplay(); x, y, z = ren.GetDisplayPoint()
@@ -462,14 +427,15 @@ class Renderer(PreviewPicking, PictureLooks):
     # ---------- close-up animations (fx) ----------
     def _fx_mesh(self, k, cid, kind="item"):
         """Surfaces used by the effects, cached: the item itself, the item with outward-facing polygons (for capped
-        clipping), and the rest of a structure without one of its objects."""
+        clipping), and the rest of a structure without some of its objects (cid: a tuple of them)."""
         src = self.mesh_of(k); key = (k, cid, kind, id(src), tuple(sorted(self._soften_now.items())))
         if key not in self._fx_meshes or self._fx_meshes[key][0] is not src:
             ds = self.ds
             if kind == "rest":
                 from .volumes import surface
                 lbl, _, _ = ds.components(k); sl = ds.bbox[k]
-                m = surface(ds.kept_mask(k, sl) & (lbl != int(cid)), [x.start for x in sl], ds.param(k, "smoothing"), ds.step,
+                cids = [int(c) for c in (cid if isinstance(cid, tuple) else (cid,))]
+                m = surface(ds.kept_mask(k, sl) & ~np.isin(lbl, cids), [x.start for x in sl], ds.param(k, "smoothing"), ds.step,
                             self._soften_now.get(k, ds.param(k, "soften")), ds.shape)
             else:
                 m = src if cid is None else ds.comp_mesh(k, int(cid), self._soften_now.get(k))
@@ -513,9 +479,6 @@ class Renderer(PreviewPicking, PictureLooks):
         from colorsys import hsv_to_rgb, rgb_to_hsv
         for a in list(self.glow_actors.values()) + list(self.cut_actors.values()):
             a.SetVisibility(False)
-        for kk, act in self.actors.items():  # the structure's own surface again (a cut may have swapped it)
-            if getattr(act, "_rest", False):
-                act.mapper.SetInputData(self.mesh_of(kk)); act._rest = False; act._shown_mesh = self.mesh_of(kk)
         if not fx or not items:
             return False
         ds = self.ds; translucent = False
@@ -536,8 +499,9 @@ class Renderer(PreviewPicking, PictureLooks):
                 c = fx["cut"]; body, cap = self._clipped(k, cid, c["normal"], c["origin"]); cut_body = body
                 if cid is None:
                     act.SetVisibility(False)
-                else:  # the greyed structure must not draw this object uncut over the cross-section
-                    act.SetVisibility(False); rest = self._fx_mesh(k, cid, "rest"); sa = self.actors.get(k)
+                else:  # the greyed structure must not draw this object (nor the others in focus) uncut over the cut
+                    cids = tuple(sorted(int(c) for kk, c in items if kk == k and c is not None))
+                    act.SetVisibility(False); rest = self._fx_mesh(k, cids, "rest"); sa = self.actors.get(k)
                     if sa is not None and rest is not None:
                         sa.mapper.SetInputData(rest); sa._rest = True; sa._shown_mesh = rest
                 col = np.array(pr.GetColor())
@@ -628,7 +592,9 @@ class Renderer(PreviewPicking, PictureLooks):
         ceramic = pre == "default" and getattr(self, "_l35", {}).get("material") == "ceramic"
         xray = pre == "default" and getattr(self, "_l35", {}).get("material") == "xray"
         glass = False
-        for kk, act in self.actors.items():
+        objs = [(kk, act, False) for kk, act in self.actors.items()] + \
+               [(kk, act, True) for (kk, _), act in self.comp_actors.items() if act is not None and act.GetVisibility()]
+        for kk, act, obj in objs:  # obj: an object in focus, drawn by an actor of its own (its structure's style)
             st = style_of(spec, ds.classes[kk]["key"]); pr = act.GetProperty(); kind = st["kind"]
             pr.SetRepresentationToSurface(); pr.SetInterpolationToPhong(); pr.SetMetallic(0.0); pr.SetRoughness(0.5)
             pr.RenderPointsAsSpheresOff(); pr.SetLighting(pre != "flat")
@@ -637,13 +603,13 @@ class Renderer(PreviewPicking, PictureLooks):
                 pr.SetAmbient(0.5); pr.SetDiffuse(0.62); pr.SetSpecular(0.12); pr.SetSpecularPower(6)
             elif xray:  # X-ray: luminous rather than lit, with a small glint
                 pr.SetAmbient(0.7); pr.SetDiffuse(0.35); pr.SetSpecular(0.3); pr.SetSpecularPower(25)
-            mesh = self.mesh_of(kk)
+            mesh = None if obj else self.mesh_of(kk)  # (an object keeps its own surface: no dots, no outline)
             if kind == "dots" and mesh is not None:
                 pr.SetRepresentationToPoints(); pr.RenderPointsAsSpheresOn(); pr.SetPointSize(float(st["point_size"]))
                 dm = self._dots_mesh(kk, mesh, float(st["point_size"]))
                 if getattr(act, "_shown_mesh", None) is not dm:
                     act.mapper.SetInputData(dm); act._shown_mesh = dm
-            elif mesh is not None and getattr(act, "_shown_mesh", None) not in (None, mesh):
+            elif mesh is not None and not getattr(act, "_rest", False) and getattr(act, "_shown_mesh", None) not in (None, mesh):
                 act.mapper.SetInputData(mesh); act._shown_mesh = mesh
             if kind == "cartoon":
                 pr.SetAmbient(0.6); pr.SetDiffuse(0.4); pr.SetSpecular(0.0)
@@ -654,7 +620,7 @@ class Renderer(PreviewPicking, PictureLooks):
                     pr.SetOpacity(pr.GetOpacity() * o); glass |= bool(act.GetVisibility())
             if pre == "flat":
                 pr.SetAmbient(1.0); pr.SetDiffuse(0.0); pr.SetSpecular(0.0)
-            sil = self.sil_actors.get(kk)
+            sil = self.sil_actors.get(kk) if not obj else None
             if kind == "cartoon" and mesh is not None:
                 sil = self._silhouette(kk, mesh)
                 col = np.array(pr.GetColor())
@@ -771,10 +737,9 @@ class Renderer(PreviewPicking, PictureLooks):
         self._scale_bar(P, items["scale_bar"], s, spec, size, vox, shown("scale_bar", True))
         P.caption(items["caption"], s["caption"] or "", shown("caption", True), float(s.get("cap_a", 1.0)))
         if s.get("ann"):  # arrows and text boxes (3.5), on top of everything
-            from vtkmodules.util.numpy_support import vtk_to_numpy
             from .annotations import draw as draw_annotations
-            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-            draw_annotations(layer, P, self, s, spec, size, vtk_to_numpy(arr).reshape(H, W))  # rows from the bottom
+            zb = self.scene_depth()
+            draw_annotations(layer, P, self, s, spec, size, zb[::-1] if zb is not None else None)  # rows from the bottom
         self.last_rects = P.rects
         im = Image.alpha_composite(im, layer)
         return np.asarray(im if transparent else im.convert("RGB"))

@@ -139,12 +139,12 @@ class Preview(QtW.QLabel):
             p.end()
         if self.nav is not None and self.image_px():
             w = self.nav.win; ren = w.st.ren
-            if ren is not None and getattr(ren, "path_view", None) and w.selected_part:
+            if ren is not None and getattr(ren, "shown_path", None) and w.selected_part:
                 from .gui_paths import paint_path
                 sel = w.path_point[1] if w.path_point and w.path_point[0] == w.selected_part else None
                 hn = getattr(self.overlay, "hover_name", None) if self.overlay is not None else None
                 hov = int(hn.split(":")[1]) if hn and hn.startswith("marker:") else None
-                p = QtG.QPainter(self); paint_path(p, self, ren.path_view, sel, hov); p.end()
+                p = QtG.QPainter(self); paint_path(p, self, ren.shown_path, sel, hov); p.end()
             from .gui_annotations import paint_selection
             p = QtG.QPainter(self); paint_selection(p, self, w); p.end()
             from .gui_navigate import paint_marker

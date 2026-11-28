@@ -60,6 +60,24 @@ def test_scale_bar_length_in_orthographic_view(studio):
     assert ov.length_text(50) == "50 nm" and ov.length_text(2000) == "2 µm"
 
 
+@pytest.mark.parametrize("fov", [30.0, 60.0])
+def test_scale_bar_length_where_a_camera_path_changes_the_field_of_view(studio, fov):
+    """The bar used the Look's field of view, not the frame's: 2.15 times too long at 60 degrees."""
+    from test_waypoints import fov_spec
+    spec, part = fov_spec(studio); part["waypoints"][1]["fov"] = fov; part["waypoints"][0]["fov"] = fov
+    spec["style"].update(legend=False, slice_label=False, bg="#000000"); spec["style"]["tomogram"]["show"] = False
+    ov.set_show(spec, "scale_bar", True); ov.set_item(spec, "scale_bar", length_nm=50, label=True)
+    f = [g for g in tr.storyboard.build_plan(spec, studio.ds).frames if g["part"] == part["id"] and g["phase"] == "main"][-1]
+    assert abs(float(f["pose"].get("fov", 30.0)) - fov) < 1e-6
+    W, H = 640, 360; img = studio.ren.draw(f, spec, (W, H))
+    _, foc, right, _, _ = studio.ren.camera_frame()
+    (ax, _), _ = studio.ren.project(foc); (bx, _), _ = studio.ren.project(foc + right * 50 * 10 / studio.ds.vox)
+    expect = abs(bx - ax) * W  # a 50 nm line at the focal point, as VTK draws it
+    x0, y0, x1, y1 = studio.ren.last_rects["scale_bar"]["box"]
+    row = img[int(y1) - 1, int(x0):int(x1) + 1].astype(int).sum(1) > 600  # the bar is white
+    assert abs(row.sum() - expect) <= 0.02 * expect + 1, (row.sum(), expect)
+
+
 def test_auto_length_is_nice_and_fits(studio):
     spec = tr.default_spec(studio.ds); W, H = 1920, 1080
     frames, _ = tr.build_timeline(spec, studio.ds)
@@ -127,6 +145,40 @@ def test_wrong_voxel_size_warns_and_can_be_typed(window, demo, tmp_path):
     assert win.spec["data"]["voxel_size_nm"] == pytest.approx(4.11) and ov.voxel_size(win.spec, win.st.ds) == pytest.approx(41.1)
     assert "your value" in win.voxel_row.note.text()
     assert win.project.data()["spec"]["data"]["voxel_size_nm"] == pytest.approx(4.11)  # saved in the project
+    assert not errs, errs
+
+
+def activate(app, win):
+    """Typing tests need the window active, also off-screen."""
+    win.show(); win.activateWindow(); win.windowHandle().requestActivate()
+    for _ in range(200):
+        app.processEvents()
+        if win.isActiveWindow():
+            return
+    pytest.skip("the window could not be made active here")
+
+
+def test_voxel_size_can_be_typed_key_by_key(window, demo, tmp_path, monkeypatch):
+    app, win, errs = window
+    wait(app, win, lambda: win.load(paths=[demo["tomogram"], demo["labels"]]))
+    if win.st.ren is None:
+        pytest.skip("3D rendering is not available here")
+    activate(app, win); win.tabs.setCurrentIndex(0)
+    sp = win.voxel_row.spin; sp.setFocus(); app.processEvents()
+    for text, want in (("0.8", 0.8), ("1.36", 1.36)):
+        sp.selectAll(); QtTest.QTest.keyClicks(sp, text); QtTest.QTest.keyClick(sp, QtCore.Qt.Key_Return)
+        assert win.spec["data"]["voxel_size_nm"] == pytest.approx(want)
+    from tomoreveal import project as pj
+    win.project.path = str(tmp_path / ("typed" + pj.EXT))
+    sp.selectAll(); QtTest.QTest.keyClicks(sp, "2.5")  # no Enter: Ctrl+S takes the number as it is typed
+    assert app.focusWidget() in (sp, sp.lineEdit())
+    win.project.act_save.trigger()
+    assert pj.read_project(win.project.path)["spec"]["data"]["voxel_size_nm"] == pytest.approx(2.5)
+    asked = []
+    monkeypatch.setattr(type(win.project), "ask_save", lambda self, what: asked.append(what) or "cancel")
+    sp.selectAll(); QtTest.QTest.keyClicks(sp, "3")
+    assert not win.project.confirm_discard("closing TomoReveal") and asked  # the typed 3 is a change
+    assert win.spec["data"]["voxel_size_nm"] == pytest.approx(3.0)
     assert not errs, errs
 
 

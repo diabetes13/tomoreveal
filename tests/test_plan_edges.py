@@ -62,3 +62,19 @@ def test_one_voxel_clip_box_with_a_closeup(ds):
     plan = sb.build_plan(spec, ds)
     assert all(f["pose"]["dist"] > 0 and f["pose"]["scale"] > 0 for f in plan.frames)
 
+
+
+@pytest.mark.parametrize("kind", ["cut", "dissolve"])
+def test_a_grow_close_up_entered_without_a_flight_leaves_nothing_behind(ds, kind):
+    """Its last fly-in state was copied whole into what later parts start from: their frames kept the clip plane
+    ("fx") of the grow effect."""
+    spec = tr.default_spec(ds)
+    a = sb.new_part("overview", seconds=1)
+    b = sb.new_part("focus", seconds=1, target=sb.make_target([(ds.key_of(2), 1)]), effect=dict(kind="grow"))
+    b["transition_in"] = dict(kind=kind)
+    c = sb.new_part("overview", seconds=1)
+    spec["shots"] = [a, b, c]
+    frames = sb.build_plan(spec, ds).frames
+    assert [f for f in frames if f["part"] == b["id"] and f.get("fx")]  # the close-up itself grows
+    later = [f for f in frames if f["part"] == c["id"]]
+    assert later and not [f for f in later if "fx" in f]

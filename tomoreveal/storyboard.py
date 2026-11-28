@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from .animations import closeup_animation, steady_framing
+from .frame_passes import LOOK_BLEND, OVERVIEW, PART_LOOK, caption_fades, depth_ranges, part_look, part_looks  # noqa: F401 (used from here)
 from .common import UserError
 from .parts import (  # most of them are used from here by other modules and tests
     CLOSEUP_TRANSITION, OTHER_TRANSITION, VIEW_TRANSITION, _mark_label, as_legacy, class_spec, closeup_caption,
@@ -12,7 +13,7 @@ from .parts import (  # most of them are used from here by other modules and tes
     image_block, make_target, merge_settings, migrate_spec, new_id, new_part, others_choice, others_of,
     part_name, part_region, set_others_choice, shot_tomogram, target_items, text_block, tomogram_setting)
 from .paths import PathPending, path_poses
-from .transitions import ease_curve, lerp_pose, smooth01, transition_of, with_end_ease
+from .transitions import ease_curve, lerp_camera, smooth01, transition_of, with_end_ease
 
 
 def clip_box(spec, shape):
@@ -196,12 +197,14 @@ def build_plan(spec, ds):
     pose = [ov()]
     ramp = {}  # the tomogram fade at the start of the current part
     cur = dict(id=None, index=-1, type=None); shown = {}  # shown: the last part that drew frames
+    tbase, ended = {}, []  # the first pause or main frame of each part (for "tp"); set once the flight back has begun
+    rown = [None]  # whose depth range the frames show now (a part id, or OVERVIEW); see "rng" in emit and depth_ranges
 
     def start_fade(part, fade=None):
         t = shot_tomogram(part); f = t["fade"] if fade is None else fade
         if fade is None and t.get("whole"):  # fade gently over the whole part (for example while the segmentation is revealed)
             f = float(part.get("seconds", 5)) + float(part.get("pause_before") or 0)
-        ramp.clear(); ramp.update(start=len(frames), s0=st["slice"], s1=target_of(part), n=max(1, round(fps * max(0.0, float(f)))))
+        ramp.clear(); ramp.update(made=0, s0=st["slice"], s1=target_of(part), n=max(1, round(fps * max(0.0, float(f)))))
 
     last = {}   # pending dissolve / fade, waiting for the next part's first frames
 
@@ -221,10 +224,16 @@ def build_plan(spec, ds):
         for i in range(n):
             s = dict(st); s["pose"] = pose[0]; s["shot"] = cur["index"]; s["part"] = cur["id"]; s["type"] = cur["type"]; s["phase"] = phase
             d = fn(i / (n - 1) if n > 1 else 1.0)
-            if ramp and "slice" not in d:
-                q = smooth01((len(frames) - ramp["start"] + 1) / ramp["n"])
-                d["slice"] = ramp["s1"] if q >= 1 else ramp["s0"] + (ramp["s1"] - ramp["s0"]) * q
+            if ramp:  # the tomogram fade counts the frames it has made (frames taken back by an overlap are not made)
+                ramp["made"] += 1
+                if "slice" not in d:
+                    q = smooth01(ramp["made"] / ramp["n"])
+                    d["slice"] = ramp["s1"] if q >= 1 else ramp["s0"] + (ramp["s1"] - ramp["s0"]) * q
             s.update(d)
+            if "rng" not in d:  # (from, to, q): whose depth range the frame shows; a flight glides from one to the other
+                s["rng"] = (rown[0], rown[0], 1.0)
+            # seconds since the part's first pause or main frame: the clock of arrows and text (None where they never show)
+            s["tp"] = None if phase not in ("main", "pause") or cur["id"] is None or s.get("card") or ended else                 (len(frames) - tbase.setdefault(cur["id"], len(frames))) / fps
             if xb is not None:
                 g = xb["offset"] + i
                 if g < xb["n"]:
@@ -246,6 +255,7 @@ def build_plan(spec, ds):
             emit(n - skip, lambda u, fn=fn: fn((skip + u * (n - skip - 1)) / (n - 1) if n > 1 else 1.0), "main", label)
         else:
             emit(n, fn, "main", label)
+        segments[-1]["skip"] = skip  # (edits.split_part counts these frames too)
 
     def need_structures():
         """Overviews and close-ups show structures: switch them all on if none are shown."""
@@ -261,7 +271,7 @@ def build_plan(spec, ds):
         if m <= 0 or not segments or not frames:
             return []
         sg = segments[-1]
-        if sg["phase"] not in ("main", "pause") or sg["part"] == cur["id"]:
+        if sg["phase"] not in ("main", "pause") or sg["part"] == cur["id"] or sg["type"] == "card":  # (a card keeps its fade)
             return []
         m = min(m, sg["count"] - 1)
         if m <= 0:
@@ -269,59 +279,74 @@ def build_plan(spec, ds):
         out = frames[-m:]; del frames[-m:]; sg["count"] -= m
         return out
 
+    def overlap(tr, seconds):
+        """The previous part's last frames that a transition overlaps, taken back. The state goes back to the first of
+        them, so that the next part's tomogram fade starts there and its structures are switched on from there."""
+        n = round(fps * max(0.0, seconds))
+        if n <= 0 or tr["kind"] == "cut":
+            return []
+        A = take_previous(min(round(fps * tr["overlap_prev"]), n))
+        if A:
+            st.update({k: A[0][k] for k in st}); pose[0] = A[0]["pose"]
+        return A
+
     def flight_pose(i, n, q, p0, p1, A, m2, nxt, tr):
         a = A[i]["pose"] if i < len(A) else (A[-1]["pose"] if A else p0)
+        a_end = A[-1]["pose"] if A else p0  # where the part we leave stops moving
         b = p1
         if m2 > 1:  # the next part's own motion starts with the flight, slowly, and reaches its own speed as the flight
             k = (n - 1) / (m2 - 1)  # ends: its clock runs as (m2 - 1)·x^k, whose rate grows from 0 to exactly 1 frame per frame
-            b = nxt((m2 - 1) * (i / (n - 1)) ** k)["pose"]
+            b = nxt((m2 - 1) * (i / (n - 1)) ** k).get("pose", p1)  # (a slide moves the slice, not the camera)
         # the turn: the shorter way from where we leave to where the next part starts, plus however far that part has
         # turned on its own since (a spin can turn more than half a circle during the overlap)
-        p = lerp_pose(a, b, q, d_az=(((p1["az"] - a["az"] + 180.0) % 360.0) - 180.0) + (b["az"] - p1["az"]), fov=fr.fov)
+        p = lerp_camera(fr, a, b, q, (((p1["az"] - a["az"] + 180.0) % 360.0) - 180.0) + (b["az"] - p1["az"]), a_end, p1)
         if tr["path"] == "arc":  # fly a little higher in the middle
             da, ua = fr.axes(a["tilt"], a["az"]); db, _ = fr.axes(b["tilt"], b["az"])
             span = float(np.linalg.norm((a["c"] + a["dist"] * da) - (b["c"] + b["dist"] * db)))
-            p = dict(p, c=p["c"] + np.asarray(ua) * 0.15 * span * math.sin(math.pi * q))
+            lift = np.asarray(ua) * 0.15 * span * math.sin(math.pi * q)
+            p = dict(p, c=p["c"] + lift)
+            if p.get("pos") is not None:  # a camera of its own rises with what it looks at
+                p["pos"] = p["pos"] + lift
         return p
 
-    def go_to(p1, k1, seconds, slice_to=None, label=None, tr=None, nxt=None, nn=0):
+    def go_to(p1, k1, seconds, slice_to=None, label=None, tr=None, nxt=None, nn=0, A=()):
         """Transition: fly the camera to p1 and glide the slice to k1; the close-up emphasis fades out. tr: the
         transition settings of the part (3.5: easing at each end, overlaps, kind, arc); nxt(j): the next part's main
-        frame j (nn frames), for an overlap with its start. Returns the frames of the next part already shown."""
+        frame j (nn frames), for an overlap with its start; A: the frames overlap() took back from the part before.
+        Returns the frames of the next part already shown."""
         tr = tr or transition_of({})
         p0, k0, e0, s0 = pose[0], st["k"], st["e"], st["slice"]
         n = round(fps * max(0.0, seconds))
         m1 = round(fps * tr["overlap_prev"]); m2 = min(round(fps * tr["overlap_next"]), n, max(0, nn - 1)) if nxt else 0
         if n <= 0 or tr["kind"] == "cut":  # a hard cut
-            st.update(k=k1, e=0.0, target=None, caption=""); pose[0] = p1
+            st.update(k=k1, e=0.0, target=None, caption=""); pose[0] = p1; rown[0] = cur["id"]
             if slice_to is not None:
                 st["slice"] = slice_to
             return 0
         if tr["kind"] in ("dissolve", "black", "white"):  # blended in 2D with the next part's first frames
-            A = take_previous(min(m1, n))
-            src = [dict(f) for f in A] if A else ([dict(frames[-1])] if frames else [None])
-            st.update(k=k1, e=0.0, target=None, caption=""); pose[0] = p1
+            src = list(A) if A else ([frames[-1]] if frames else [None])  # the frames themselves: the passes below dress them
+            st.update(k=k1, e=0.0, target=None, caption=""); pose[0] = p1; rown[0] = cur["id"]
             if slice_to is not None:
                 st["slice"] = slice_to
             last["blend"] = dict(n=n, m2=m2, src=src, via=tr["kind"])
             return 0
         if same_pose(p0, p1) and k0 == k1 and e0 <= 0 and not m1 and not m2:
+            rown[0] = cur["id"]
             return 0
-        A = take_previous(min(m1, n))
-        if A:
-            k0, e0 = A[0]["k"], A[0]["e"]
+        ra = cur["id"] if rown[0] is None else rown[0]
 
         def fn(u):
             i = int(round(u * (n - 1))) if n > 1 else 0
             q = ease_curve(u, tr["ease_out_prev"], tr["ease_in_next"])
             ka = A[i]["k"] if i < len(A) else (A[-1]["k"] if A else k0)
             kb = nxt((m2 - 1) * (i / (n - 1)) ** ((n - 1) / (m2 - 1))).get("k", k1) if m2 > 1 else k1
-            d = dict(pose=flight_pose(i, n, q, p0, p1, A, m2, nxt, tr), k=int(round(ka + (kb - ka) * q)), e=e0 * (1 - q), caption="")
+            d = dict(pose=flight_pose(i, n, q, p0, p1, A, m2, nxt, tr), k=int(round(ka + (kb - ka) * q)), e=e0 * (1 - q), caption="",
+                     rng=(ra, cur["id"], q))
             if slice_to is not None:
                 d["slice"] = s0 + (slice_to - s0) * q
             return d
         emit(n, fn, "transition", label)
-        st.update(target=None, e=0.0); pose[0] = p1
+        st.update(target=None, e=0.0); pose[0] = p1; rown[0] = cur["id"]
         return m2
 
     shots = spec.get("shots", [])
@@ -335,15 +360,15 @@ def build_plan(spec, ds):
             show = part.get("structures", "keep")
             if (not has_tomo and show == "none") or (not has_seg and show in ("above", "all")):
                 continue  # nothing to see: no tomogram to slide through, or no segmentation to reveal
-            start_fade(part)
-            a, b = slice_no(part.get("from"), st["k"]), slice_no(part.get("to"), st["k"])
+            a, b = slice_no(part.get("from"), st["k"]), slice_no(part.get("to"), st["k"])  # (from where the part before ends)
             t = part.get("transition"); back = st["e"] > 0; t = (CLOSEUP_TRANSITION if back else OTHER_TRANSITION) if t is None else float(t)
+            A = overlap(tr, t); start_fade(part)
             slide = (lambda u, a=a, b=b: dict(k=a + int(round(u * (b - a)))))
             pb = _pause_frames(fps, part.get("pause_before"))
             slide_w = with_end_ease(slide, part)
             vw = part.get("view") or None  # a view of its own (3.5): for example one slice from the top, zoomed in
             skip = go_to(ov(0.0, vw), a, t, slice_to=(target_of(part) if back else None), tr=tr,
-                         nxt=None if pb else (lambda j, f=slide_w, n=n: f(j / (n - 1) if n > 1 else 1.0)), nn=n)
+                         nxt=None if pb else (lambda j, f=slide_w, n=n: f(j / (n - 1) if n > 1 else 1.0)), nn=n, A=A)
             if back:
                 start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
             if show == "none":
@@ -361,11 +386,11 @@ def build_plan(spec, ds):
             if pa:
                 emit(pa, lambda u: {}, "pause")
         elif typ == "overview":
-            start_fade(part)
-            need_structures()
-            vw = part.get("view") or None
+            vw = part.get("view") or None; k1 = st["k"]  # (the slice the part before ends on)
             t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
             back = st["e"] > 0
+            A = overlap(tr, t); start_fade(part)
+            need_structures()
             m, ang = part.get("motion", "rock"), float(part.get("angle", 25))
             turn = (lambda u, m=m, ang=ang: ang * math.sin(2 * math.pi * u) if m == "rock" else 360.0 * u if m == "spin" else 0.0)
             axis = part.get("spin_axis", "z") if m in ("rock", "spin") else "z"
@@ -379,8 +404,8 @@ def build_plan(spec, ds):
                 start_pose = ov(0.0, vw)
             ep = part if m == "spin" else None  # "slow down at the end" suits a spin, not a rock (it already ends at rest)
             main_w = with_end_ease(main, ep)
-            skip = go_to(start_pose, st["k"], t, slice_to=ramp["s1"] if back else None, tr=tr,
-                         nxt=lambda j, f=main_w, n=n: f(j / (n - 1) if n > 1 else 1.0), nn=n)
+            skip = go_to(start_pose, k1, t, slice_to=ramp["s1"] if back else None, tr=tr,
+                         nxt=lambda j, f=main_w, n=n: f(j / (n - 1) if n > 1 else 1.0), nn=n, A=A)
             if back:
                 start_fade(part, fade=0)  # the flight back from the close-up already faded the tomogram
             st["caption"] = part.get("caption", "")
@@ -396,6 +421,9 @@ def build_plan(spec, ds):
             if target_items(tgt) and not any(class_spec(spec, ds, ds.id_of(key)).get("show", True) for key, _ in target_items(tgt)):  # every object is off
                 problems[part.get("id")] = "structure switched off in the Structures tab"
                 continue
+            t = part.get("transition"); t = CLOSEUP_TRANSITION if t is None else float(t)
+            nt = round(fps * max(0.0, t)); k0 = st["k"]
+            A = overlap(tr, t) if tr["kind"] == "flight" else []  # (a close-up flown into goes on from the rewound slice)
             start_fade(part)
             need_structures()
             ft, fz = float(part.get("tilt", max(tilt, 50))), max(0.05, float(part.get("zoom", 1)))
@@ -410,26 +438,22 @@ def build_plan(spec, ds):
                     p["dist"], p["scale"] = steady
                 return zoomed(p, fz)
 
-            anim = closeup_animation(part, ds, fr, fp, n, fps, k0=st["k"], nz=nz)
+            anim = closeup_animation(part, ds, fr, fp, n, fps, k0=k0, nz=nz)
             if anim is None:  # orbit / rock / still without effects: exactly as in 3.3
                 anim = (lambda u, fp=fp, m=m, ang=ang: dict(pose=fp(360.0 * u if m == "orbit" else ang * math.sin(2 * math.pi * u) if m == "rock" else 0.0)))
             ep = part if m == "orbit" else None  # wiggle and rock have their own calm ends
             anim_w = with_end_ease(anim, ep)
             nxt = (lambda j, f=anim_w, n=n: f(j / (n - 1) if n > 1 else 1.0))
-            t = part.get("transition"); t = CLOSEUP_TRANSITION if t is None else float(t)
-            nt = round(fps * max(0.0, t))
             m2 = min(round(fps * tr["overlap_next"]), nt, n - 1) if tr["kind"] == "flight" else 0
-            A = take_previous(min(round(fps * tr["overlap_prev"]), nt)) if tr["kind"] == "flight" and nt > 0 else []
-            if A:
-                st.update({k: A[0][k] for k in st}); pose[0] = A[0]["pose"]
             p0, p1, e0, old, oldmode, s0 = pose[0], fp(), st["e"], st["target"], st["others"], st["slice"]
             s1 = ramp["s1"]  # the fly-in is this part's tomogram fade
             mode, cap = closeup_others(part), part.get("caption", "")
+            ra = cur["id"] if rown[0] is None else rown[0]
 
-            def fly(u, p0=p0, p1=p1, e0=e0, old=old, oldmode=oldmode, s0=s0, s1=s1, tgt=tgt, mode=mode, cap=cap, A=A, m2=m2, nt=nt, nxt=nxt, tr=tr):
+            def fly(u, p0=p0, p1=p1, e0=e0, old=old, oldmode=oldmode, s0=s0, s1=s1, tgt=tgt, mode=mode, cap=cap, A=A, m2=m2, nt=nt, nxt=nxt, tr=tr,
+                    ra=ra, rb=cur["id"]):
                 q = ease_curve(u, tr["ease_out_prev"], tr["ease_in_next"]); i = int(round(u * (nt - 1))) if nt > 1 else 0
-                d = dict(pose=flight_pose(i, nt, q, p0, p1, A, m2, nxt, tr) if (A or m2 or tr["path"] == "arc") else lerp_pose(p0, p1, q, fov=fr.fov),
-                         slice=s0 + (s1 - s0) * q)
+                d = dict(pose=flight_pose(i, nt, q, p0, p1, A, m2, nxt, tr), slice=s0 + (s1 - s0) * q, rng=(ra, rb, q))
                 if e0 > 0 and old is not None:  # hand over from the previous close-up
                     if u < 0.5:
                         d.update(e=e0 * (1 - smooth01(2 * u)), target=old, others=oldmode, caption="")
@@ -446,18 +470,23 @@ def build_plan(spec, ds):
                 label = None
             else:
                 if nt > 0 and tr["kind"] in ("dissolve", "black", "white"):
-                    last["blend"] = dict(n=nt, m2=0, src=[dict(frames[-1])] if frames else [None], via=tr["kind"])
-                st.update(fly(1.0)); pose[0] = p1; label = cap or "Focus"
+                    last["blend"] = dict(n=nt, m2=0, src=[frames[-1]] if frames else [None], via=tr["kind"])
+                st.update({k: v for k, v in fly(1.0).items() if k in st}); pose[0] = p1; label = cap or "Focus"  # (not "fx", nor the pose)
                 m2 = 0
+            rown[0] = cur["id"]
             start_fade(part, fade=0)  # the fly-in already faded the tomogram
             emit_main(n, anim, label, m2, ep)
             pose[0] = fp()
         elif typ == "hold":
-            start_fade(part)
-            vw = part.get("view") or None
+            vw = part.get("view") or None; A = []
             if vw:  # a view of its own (3.5): the camera flies there first
                 t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
-                go_to(ov(0.0, vw), st["k"], t, tr=tr)
+                k1 = st["k"]; A = overlap(tr, t)
+            start_fade(part)
+            if vw:
+                go_to(ov(0.0, vw), k1, t, tr=tr, A=A)
+            elif rown[0] is None:  # (without a view of its own it shows the depth range of what came before)
+                rown[0] = cur["id"]
             st["caption"] = part.get("caption", "")
             emit(n, lambda u: {}, "main", _mark_label(part))
         elif typ == "path":
@@ -469,11 +498,11 @@ def build_plan(spec, ds):
             except UserError as exc:
                 problems[part.get("id")] = str(exc)
                 continue
-            start_fade(part)
-            need_structures()
             t = part.get("transition"); t = (CLOSEUP_TRANSITION if st["e"] > 0 else OTHER_TRANSITION) if t is None else float(t)
+            k1 = st["k"]; A = overlap(tr, t); start_fade(part)
+            need_structures()
             m = len(poses)
-            skip = go_to(poses[0], st["k"], t, tr=tr, nxt=lambda j, poses=poses: dict(pose=poses[int(round(j))]), nn=m)
+            skip = go_to(poses[0], k1, t, tr=tr, nxt=lambda j, poses=poses: dict(pose=poses[int(round(j))]), nn=m, A=A)
             items = [(it.get("structure"), it.get("component")) for it in (part.get("source") or {}).get("items", [])]
             oc, oo = others_of(part.get("others"))
             if (part.get("source") or {}).get("kind", "follow") == "follow" and items and (oc, oo) != ("keep", 1.0):
@@ -507,14 +536,15 @@ def build_plan(spec, ds):
             emit(n, card, "main", _mark_label(part))
             st.update(card=None, card_fade=1.0, dissolve=0.0, caption="")
     if st["e"] > 0 and spec.get("return_to_overview", True):
-        ramp.clear(); cur.update(shown, index=len(shots))  # the flight back belongs to the last part shown
-        p0, e0, s0 = pose[0], st["e"], st["slice"]
-        emit(round(fps * CLOSEUP_TRANSITION), lambda u: dict(pose=lerp_pose(p0, ov(), smooth01(u), fov=fr.fov), e=e0 * (1 - smooth01(u)),
-                                                               slice=s0 + (base - s0) * smooth01(u), caption=""), "transition")
-        st.update(target=None, e=0.0); pose[0] = ov()
+        ramp.clear(); cur.update(shown, index=len(shots)); ended.append(True)  # the flight back belongs to the last part shown
+        p0, e0, s0, ra = pose[0], st["e"], st["slice"], rown[0]
+        emit(round(fps * CLOSEUP_TRANSITION), lambda u: dict(pose=lerp_camera(fr, p0, ov(), smooth01(u)), e=e0 * (1 - smooth01(u)),
+                                                               slice=s0 + (base - s0) * smooth01(u), caption="",
+                                                               rng=(ra, OVERVIEW, smooth01(u))), "transition")
+        st.update(target=None, e=0.0); pose[0] = ov(); rown[0] = OVERVIEW
         emit(max(1, round(fps * 0.5)), lambda u: {}, "pause")
     if not frames:
-        cur.update(id=None, index=-1, type=None)
+        cur.update(id=None, index=-1, type=None); rown[0] = OVERVIEW
         if has_seg:
             need_structures()
         emit(1, lambda u: {}, "main")
@@ -526,28 +556,9 @@ def build_plan(spec, ds):
             f["dissolve_to"] = frames[j] if j < len(frames) else None
     from .overlays import add_bar_lengths
     add_bar_lengths(frames, spec, ds, w, h, fr.fov, fr.ortho)
-    from .look import style35
-    if style35(spec)["depth_fade"] != "off":  # the depth range of each part, from its first frame, so the fade never pumps
-        mlo, mhi = main_box(spec, shape); first = {}
-        for sg in segments:
-            if sg["phase"] == "main" and sg["part"] is not None and sg["part"] not in first:
-                first[sg["part"]] = sg["start"]
-        ranges = {}
-        for pid, j in first.items():
-            part = next((q for q in spec.get("shots", []) if q.get("id") == pid), {})
-            try:
-                lo_, hi_ = focus_box(part, ds) if part.get("type") == "focus" else (mlo, mhi)
-            except (KeyError, IndexError, TypeError, ValueError):
-                lo_, hi_ = mlo, mhi
-            p = frames[j]["pose"]
-            cpos = np.asarray(p["pos"], float) if p.get("pos") is not None else np.asarray(p["c"]) + p["dist"] * np.asarray(fr.axes(p["tilt"], p["az"])[0])
-            dvec = np.asarray(p["c"], float) - cpos; dvec /= np.linalg.norm(dvec) or 1.0
-            corners = np.array([[x, y, z] for x in (lo_[0], hi_[0]) for y in (lo_[1], hi_[1]) for z in (lo_[2], hi_[2])])
-            dd = (corners - cpos) @ dvec
-            ranges[pid] = (float(max(1e-3, dd.min())), float(max(dd.max(), dd.min() + 1)))
-        for f in frames:
-            if f.get("part") in ranges:
-                f["dr"] = ranges[f["part"]]
+    from .look import part_style35
+    if any(part_style35(spec, part_look(p))["depth_fade"] != "off" for p in shots + [{}]):  # in the movie, or in one part
+        depth_ranges(spec, ds, frames, segments, fr, main_box(spec, shape), ov())
     cap_fade = float(((spec.get("overlays") or {}).get("caption") or {}).get("fade") or 0.0)
     if cap_fade > 0:  # captions fade in and out (3.5)
         caption_fades(frames, max(1, int(round(cap_fade * fps))))
@@ -586,71 +597,6 @@ def main_range(plan, part_id):
     return None
 
 
-# ---- editing (each returns the changed spec) ----
-# ---------------------------------------------------------------------------------------------------------------
-# Effects in some parts only (3.5): part["look"] = {setting: value} overrides the Look tab in that part. Missing (or
-# no part with one) = the Look tab everywhere, as before. A change between parts is blended over LOOK_BLEND seconds.
-# ---------------------------------------------------------------------------------------------------------------
-def _part_styles():
-    from .look import LOOKS
-    return (("as in the Look tab", None),) + tuple((t, d) for t, d in LOOKS if d != "tomogram")
-
-
-PART_LOOK = {  # setting -> choices (the first is "as in the Look tab", stored by leaving the setting out)
-    "style": _part_styles(),  # a whole look for this part (its background stays the movie's)
-    "shadow": (("as in the Look tab", None), ("none", "none"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
-    "outline": (("as in the Look tab", None), ("off", "off"), ("thin", "thin"), ("medium", "medium"), ("thick", "thick")),
-    "depth_fade": (("as in the Look tab", None), ("off", "off"), ("light", "light"), ("medium", "medium"), ("strong", "strong")),
-    "membranes": (("as in the Look tab", None), ("their own colour", "own"), ("see-through (glass)", "glass"), ("solid colour", "cream")),
-    "tomo_shadow": (("as in the Look tab", None), ("on", True), ("off", False)),
-    # smoother membrane surfaces in this part (structures ticked "Treat as membrane"); the levels of volumes.SOFTEN
-    "soften": (("as in the Structures tab", None), ("off", 0), ("a little", 1), ("more", 2), ("much", 3)),
-}
-LOOK_BLEND = 0.6
-
-
-def part_look(part):
-    """The Look settings this part changes: {setting: value} (only known settings with a real choice)."""
-    own = (part or {}).get("look") if isinstance((part or {}).get("look"), dict) else {}
-    return {k: v for k, v in own.items() if k in PART_LOOK and v is not None and any(v == d for _, d in PART_LOOK[k][1:])}
-
-
-def part_looks(spec, frames, fps):
-    """Each frame gets "lk" (its part's own look settings); the first frames after a change also get "lkfrom" (the
-    settings before) and "lkq" (0..1), so the picture blends smoothly from one look into the next."""
-    own = {p.get("id"): part_look(p) for p in spec.get("shots", [])}
-    n = max(1, int(round(LOOK_BLEND * fps))); prev, since, start = None, None, 0
-    for i, f in enumerate(frames):
-        cur = own.get(f.get("part"), {}) if not f.get("card") else (prev or {})
-        f["lk"] = cur
-        if prev is not None and cur != prev:
-            since, start = prev, i
-        if since is not None:
-            q = (i - start + 1) / (n + 1)
-            if q < 1.0:
-                f["lkfrom"] = since; f["lkq"] = round(q * q * (3 - 2 * q), 4)
-            else:
-                since = None
-        prev = cur
-
-
-def caption_fades(frames, n):
-    """Each run of frames with the same caption fades it in over its first n frames and out over its last n (never
-    more than a third of the run); frames get "cap_a" (0..1)."""
-    i = 0
-    while i < len(frames):
-        j = i
-        while j + 1 < len(frames) and frames[j + 1].get("caption", "") == frames[i].get("caption", ""):
-            j += 1
-        L = j - i + 1; m = max(1, min(n, L // 3))
-        if frames[i].get("caption"):
-            for k in range(i, j + 1):
-                u = min((k - i + 1) / m, (j - k + 1) / m, 1.0)
-                if u < 1.0:
-                    frames[k]["cap_a"] = round(u * u * (3 - 2 * u), 4)
-        i = j + 1
-
-
 def state_key(s):
     p = s["pose"]
     oth = s["others"] if not isinstance(s["others"], dict) else json.dumps(s["others"], sort_keys=True)
@@ -658,7 +604,9 @@ def state_key(s):
     if s.get("ann"):  # arrows and text boxes (3.5)
         extra += (json.dumps(s["ann"], sort_keys=True),)
     if s.get("blend"):  # dissolves and fades between parts (3.5)
-        extra += (s["blend"]["via"], s["blend"]["q"], state_key(s["blend"]["src"]))
+        extra += (s["blend"]["via"], s["blend"]["q"], state_key(dict(s["blend"]["src"], blend=None)))  # (drawn without its own)
+    if s.get("dr"):  # the depth range of the depth fade, where it changes (a flight from one part to the next)
+        extra += (round(float(s["dr"][0]), 2), round(float(s["dr"][1]), 2))
     if s.get("cap_a") is not None:  # a caption fading in or out (3.5)
         extra += (s["cap_a"],)
     if s.get("lk") or s.get("lkfrom"):  # effects in some parts only (3.5)

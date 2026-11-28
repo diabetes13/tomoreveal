@@ -86,6 +86,7 @@ def test_nothing_draws_while_files_are_loading(window, demo, monkeypatch):
     monkeypatch.setattr(win.st.ren, "draw", lambda *a, **k: draws.append(1) or real_draw(*a, **k))
     monkeypatch.setattr(gx, "slice_image", lambda *a, **k: slices.append(1) or real_slice(*a, **k))
     monkeypatch.setattr(win.st, "pick", lambda *a, **k: picks.append(1) or {"found": False})
+    monkeypatch.setattr(win.st, "pick_at", lambda *a, **k: picks.append(1) or {"found": False})
     go = threading.Event()
     monkeypatch.setattr(win.st, "load", lambda *a, **k: go.wait(10) and real_load(*a, **k))
     win.play_btn.click(); run_for(app, 0.1)
@@ -129,3 +130,24 @@ def test_closing_during_a_load(window, demo, monkeypatch):
     win.close(); run_for(app, 0.3)
     assert not made and not win.worker.isRunning() and not errors, errors
 
+
+
+@pytest.mark.parametrize("how", ["click", "Right", "Left", "Home", "End"])
+def test_a_click_or_key_on_the_timeline_stops_where_it_points(window, how):
+    """The clicked frame wins over the frame playback had reached (clicked 511, ended at 32)."""
+    app, win, errors = window
+    c = win.timeline.canvas; win.timeline.set_frame(20); win.play_btn.click(); run_for(app, 0.4)
+    assert win.playing
+    if how == "click":
+        want = min(c.total - 1, 511); x = round(c.x_of(want + 0.5))
+        while c.frame_at(x) != want:
+            x += 1 if c.frame_at(x) < want else -1
+        QtTest.QTest.mouseClick(c, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(x, 8))
+    else:
+        c.setFocus(); at = c.frame
+        want = {"Right": at + 1, "Left": at - 1, "Home": 0, "End": c.total - 1}[how]
+        QtTest.QTest.keyClick(c, getattr(QtCore.Qt, "Key_" + how))
+    assert not win.playing
+    run_for(app, 0.3); win.prev_timer.stop(); win.do_preview(); run_for(app, 0.1)
+    assert win.timeline.frame == want and win.frame == want
+    assert not errors, errors

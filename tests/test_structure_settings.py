@@ -19,19 +19,34 @@ def plain(spec):
     return spec
 
 
-def test_opacity_changes_only_that_structure(studio):
+@pytest.mark.parametrize("aa", ["off", "fxaa", "ssaa", "msaa"])  # msaa: older projects, drawn as Best
+def test_opacity_changes_only_that_structure(studio, aa):
     ds = studio.ds; spec = plain(tr.default_spec(ds)); f = overview(studio, spec)
     key = ds.key_of(2)  # vesicles
-    a = studio.ren.draw(f, spec, (320, 180)).astype(int)
+    a = studio.ren.draw(f, spec, (320, 180), aa=aa).astype(int)
     spec["classes"][key]["show"] = False
-    region = np.abs(studio.ren.draw(f, spec, (320, 180)).astype(int) - a).sum(2) > 10
+    region = np.abs(studio.ren.draw(f, spec, (320, 180), aa=aa).astype(int) - a).sum(2) > 10
     spec["classes"][key]["show"] = True; spec["classes"][key]["opacity"] = 0.4
-    b = studio.ren.draw(f, spec, (320, 180)).astype(int)
+    b = studio.ren.draw(f, spec, (320, 180), aa=aa).astype(int)
     diff = np.abs(b - a).sum(2) > 10
     assert diff.sum() > 50 and studio.ren.peeling
     assert (diff & ~ndimage.binary_dilation(region, iterations=2)).sum() <= 3
     spec["classes"][key]["opacity"] = 1.0
-    studio.ren.draw(f, spec, (320, 180)); assert not studio.ren.peeling
+    studio.ren.draw(f, spec, (320, 180), aa=aa); assert not studio.ren.peeling
+
+
+def test_off_is_the_same_picture_in_a_new_window_and_after_a_change_of_mode(demo, needs_3d):
+    """VTK's window starts with 8 samples: "Off" smoothed until the mode was first changed."""
+    from conftest import load_demo_studio
+    st = load_demo_studio(demo)
+    try:
+        spec = plain(tr.default_spec(st.ds)); f = overview(st, spec)
+        first = st.ren.draw(f, spec, (320, 180), aa="off").astype(int)
+        st.ren.draw(f, spec, (320, 180), aa="fxaa")
+        again = st.ren.draw(f, spec, (320, 180), aa="off").astype(int)
+        assert np.abs(first - again).max() <= 2 and st.ren.pl.ren_win.GetMultiSamples() == 0
+    finally:
+        st.ren.close()
 
 
 def test_all_structures_opacity_and_the_slice_stays_visible(studio):

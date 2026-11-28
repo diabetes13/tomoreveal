@@ -303,8 +303,17 @@ class ProjectManager(QtC.QObject):
         dlg = RelinkDialog(self.win, problems)
         return dlg.exec() == QtW.QDialog.Accepted
 
+    def take_typing(self):
+        """A number still being typed (no Enter yet) counts: the focused spin box takes its text now."""
+        w = QtW.QApplication.focusWidget()
+        while w is not None and not isinstance(w, QtW.QAbstractSpinBox):
+            w = w.parentWidget()
+        if w is not None:
+            w.interpretText()
+
     def confirm_discard(self, what):
         """True when it is fine to drop the current work (saved, or the user chose)."""
+        self.take_typing()
         if not self.dirty:
             return True
         c = self.ask_save(what)
@@ -330,6 +339,7 @@ class ProjectManager(QtC.QObject):
             self.open(p)
 
     def save(self):
+        self.take_typing()
         if not self.loaded:
             return False
         if not self.path:
@@ -337,6 +347,7 @@ class ProjectManager(QtC.QObject):
         return self.save_to(self.path)
 
     def save_as(self):
+        self.take_typing()
         if not self.loaded:
             return False
         name = (self.win.name_le.text().strip() or "project").removesuffix("_reveal") + pj.EXT

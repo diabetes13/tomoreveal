@@ -21,9 +21,9 @@ def test_every_look_has_a_note_and_new_settings_default_to_the_old_drawing():
     assert lk.membrane_look(lk.style35(spec)) == "cream"
 
 
-def glass_frame(ds, ren, edges):
+def glass_frame(ds, ren, edges, aa="off", spec=None):
     """Both slabs are membranes: where the front one overlaps the back one there is an edge inside the glass."""
-    spec = tr.default_spec(ds)
+    spec = spec or tr.default_spec(ds)
     spec["style"].update(legend=False, slice_label=False, ortho=True); spec["view"].update(tilt=0, az=0)
     k1, k2 = ds.key_of(1), ds.key_of(2)
     spec["classes"][k1].update(color=FRONT, membrane=True); spec["classes"][k2].update(color=BACK, membrane=True)
@@ -31,12 +31,13 @@ def glass_frame(ds, ren, edges):
     spec["look"]["lighting"] = {"preset": "flat"}
     spec["shots"] = [tr.storyboard.new_part("overview", seconds=0.1, motion="none")]
     f = tr.build_timeline(spec, ds)[0][0]
-    return ren.draw(f, spec, (320, 320)).astype(int)
+    return ren.draw(f, spec, (320, 320), aa=aa).astype(int)
 
 
-def test_see_through_membranes_can_keep_only_their_outer_edge(slabs):
+@pytest.mark.parametrize("aa", ["off", "fxaa", "ssaa"])
+def test_see_through_membranes_can_keep_only_their_outer_edge(slabs, aa):
     ds, ren = slabs
-    imgs = {e: glass_frame(ds, ren, e) for e in ("all", "outer", "none")}
+    imgs = {e: glass_frame(ds, ren, e, aa) for e in ("all", "outer", "none")}
     bgd = imgs["none"].sum(2) >= 3 * 250  # the white background
     dark = {e: (np.abs(im - imgs["none"]).sum(2) > 30) for e, im in imgs.items()}  # outline pixels
     assert dark["none"].sum() == 0 and dark["all"].sum() > dark["outer"].sum() > 0
@@ -44,6 +45,41 @@ def test_see_through_membranes_can_keep_only_their_outer_edge(slabs):
     near_bg = ndimage.binary_dilation(bgd, iterations=4)
     assert (dark["outer"] & ~near_bg).sum() <= 0.05 * dark["outer"].sum()
     assert (dark["all"] & ~near_bg).sum() > 50  # "all": also the line where one membrane overlaps the other
+
+
+@pytest.mark.parametrize("aa", ["off", "fxaa", "ssaa"])
+def test_the_hidden_outline_pass_has_exact_colours_in_every_smoothing_mode(slabs, aa):
+    """The pass that names each structure by a colour: smoothing (multisampling, FXAA) blended the colours at the
+    edges, so "outer edge only" and "no outline" missed pixels there."""
+    ds, ren = slabs; seen = []; orig = ren._id_pass
+    def spy(size):
+        out = orig(size); seen.append(out); return out
+    ren._id_pass = spy
+    try:
+        glass_frame(ds, ren, "all", aa)
+    finally:
+        del ren._id_pass
+    idimg, _, ids = seen[-1]
+    colours = {tuple(int(v) for v in c) for c in np.unique(idimg.reshape(-1, 3), axis=0)}
+    assert colours <= set(ids) | {(0, 0, 0)}, colours - set(ids)
+
+
+@pytest.mark.parametrize("aa", ["off", "fxaa", "ssaa"])
+def test_a_structure_without_an_outline_has_no_outline_pixel(slabs, aa):
+    ds, ren = slabs; k1 = ds.key_of(1)
+    spec = tr.default_spec(ds); spec["classes"][k1]["no_outline"] = True
+    lined = glass_frame(ds, ren, "all", aa, spec)
+    spec = tr.default_spec(ds); spec["classes"][k1]["no_outline"] = True; lk.set_look(spec, outline="off")
+    plain = glass_frame(ds, ren, "all", aa, spec)
+    spec = tr.default_spec(ds); spec["style"].update(legend=False, slice_label=False, ortho=True); spec["view"].update(tilt=0, az=0)
+    spec["classes"][ds.key_of(2)]["show"] = False; lk.set_look(spec, outline="off", depth_fade="off", shadow="none")
+    spec["look"] = dict(spec.get("look") or {}, lighting={"preset": "flat"})
+    spec["shots"] = [tr.storyboard.new_part("overview", seconds=0.1, motion="none")]
+    front_only = ren.draw(tr.build_timeline(spec, ds)[0][0], spec, (320, 320), aa=aa).astype(int)
+    front = np.abs(front_only - front_only[0, 0]).sum(2) > 30  # where the front slab is
+    inner = ndimage.binary_erosion(front, iterations=6)  # away from the edges of the other slab's outline
+    outline = np.abs(lined - plain).sum(2) > 30
+    assert inner.sum() > 1000 and (outline & inner).sum() == 0
 
 
 def test_ceramic_draws_membranes_cream_and_the_legend_follows(studio):
@@ -79,6 +115,8 @@ def test_presets_tab_pictures_and_saved_looks(window):
     assert win.spec["style"]["bg"] == "#000000"
     win.presets.delete("Mine"); win.presets.delete("Mine")  # twice: the list is rebuilt each time
     assert "Mine" not in gp.saved_presets() and ("mine", "Mine") not in win.presets.cards
+    lk.ensure(win.spec)["aa"]["movie"] = "msaa"; win.build_controls()  # an older project with Multisample: drawn as Best
+    assert win.aa_movie.currentData() == "ssaa"
     assert not errs
 
 

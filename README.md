@@ -207,6 +207,10 @@ In the **Movie** tab, set the **main view**: click a view button, or use the **T
 
 The **?** in the corner of the preview lists these. **View ▸ Moving around in the preview** can swap the left and right buttons or turn the mouse wheel the other way.
 
+Moving around changes the view you see: in a part with a view of its own, that part's view (the preview says "Changing the view of part 4"), else the main view. Where the main view is not on screen (a close-up, a camera path, a card), changing it shows the overview. **Undo view change** goes back one step on the view it changed and shows it.
+
+Some buttons wait for a click in the preview: a structure for a close-up, objects, path points, a region, a spot for an arrow. Only one waits at a time. Esc or the same button ends it, and so do another one, New, Open, loading data and Make movie; one that belongs to a part or an arrow also ends when you select another part.
+
 ### 5. Clip the tomogram
 
 Use **Clip** to keep only a part of the tomogram, as with the clip box in Dragonfly. Each bar has two handles. Drag them to set the range that you keep along X, Y and Z. The parts outside the range are not shown in the preview or in the movie. The slice moves only through the Z range that you keep.
@@ -227,7 +231,7 @@ The default movie has three parts: **Slide up through the slices**, **Slide back
 - **Remove a part** with **Delete** (or the Delete key). Any part can be removed, also the default ones. **Undo** brings it back. **Reset to the default movie** (Movie tab) starts again from the three default parts.
 - **Make a part longer or shorter**: drag the right edge of its block.
 - **Move a part**: drag its block to another place.
-- **Split** cuts a slide or a hold in two at the playhead. Then **+ Add part** puts something between the halves, for example a hold to stop the slice in the middle, or a close-up.
+- **Split** cuts a slide or a hold in two at the playhead. Its arrows and text go on in the second half. Then **+ Add part** puts something between the halves, for example a hold to stop the slice in the middle, or a close-up.
 - Untick a part in the Movie tab to leave it out without removing it.
 - Right-click a block for the same actions.
 
@@ -235,7 +239,7 @@ The default movie has three parts: **Slide up through the slices**, **Slide back
 
 | On the timeline | Does |
 |---|---|
-| Click or drag on the time scale | Moves the playhead; the preview follows |
+| Click or drag on the time scale | Moves the playhead; the preview follows (playback stops there) |
 | Click a block | Selects the part and opens its settings in the Movie tab |
 | Double-click a block | Opens its settings and shows the Movie tab |
 | Drag the right edge of a block | Changes its duration (0.1 s steps; with Shift 0.5 s) |
@@ -249,14 +253,14 @@ The default movie has three parts: **Slide up through the slices**, **Slide back
 | Up / Down arrow | Previous / next part |
 | Home / End | Start / end of the movie |
 | Space | Play / stop |
-| Delete | Removes the selected part |
+| Delete | Removes the selected part, or the arrow or text whose bar you clicked last |
 | Ctrl+D | Duplicates it |
 | S | Splits the part under the playhead |
 | Ctrl+Z, Ctrl+Shift+Z (or Ctrl+Y) | Undo, redo |
 
 The keys work while the timeline has the focus (click on it first), so they never change the movie while you type a caption.
 
-**Zoom**: the bar at the right end of the timeline has **−**, a slider, **+**, **Fit all**, **Zoom to part** and **Compact** (lower blocks for long movies). When you are zoomed in, a thin strip above the timeline shows the whole movie with a light box for the part you see: drag the box to scroll, drag its edges to zoom, click elsewhere to jump there. Very short parts merge into a grey "several parts" mark when zoomed out; its tooltip lists them. The zoom is saved with the project.
+**Zoom**: the bar under the timeline, at the right of the line of text, has **−**, a slider, **+**, **Fit all**, **Zoom to part** and **Compact** (lower blocks for long movies). When you are zoomed in, a thin strip above the timeline shows the whole movie with a light box for the part you see: drag the box to scroll, drag its edges to zoom, click elsewhere to jump there. Very short parts merge into a grey "several parts" mark when zoomed out; its tooltip lists them. The zoom is saved with the project. The line of text (time, part and its name) shortens with "…" when there is no room; its tooltip has the whole text.
 
 ![The timeline zoomed in, with the overview strip](docs/images/17-timeline-zoom.png)
 
@@ -316,7 +320,7 @@ They can be combined:
 
 #### View from here
 
-**+ Add part > View from here** adds a still view with its own camera position, taken from the main view. While that part is selected and the playhead is inside it, dragging and scrolling in the preview change the view of this part only (the preview says "Changing the view of part 4"); its line in the Movie tab also has Tilt, Rotate and Zoom bars. Two of these parts in a row make the camera fly from one position to the other.
+**+ Add part > View from here** adds a still view with its own camera position, taken from the main view. While the playhead is inside that part (selected or not), dragging and scrolling in the preview change the view of this part only (the preview says "Changing the view of part 4"); its line in the Movie tab also has Tilt, Rotate and Zoom bars. Two of these parts in a row make the camera fly from one position to the other.
 
 #### Camera paths
 
@@ -368,7 +372,7 @@ The Look tab group **On the picture**, and the buttons above the preview, switch
 
 In the Look tab, **Arrows and text** lists them:
 
-- **+ Add arrow**, then click the spot the arrow should point to (or right-click in the preview ▸ **Add arrow here**). The tip stays on that spot while the camera moves. The label is the structure's name; type over it.
+- **+ Add arrow**, then click the spot the arrow should point to (or right-click in the preview ▸ **Add arrow here**). The tip stays on that spot while the camera moves. The label is the structure's name; type over it (Esc drops what you typed). A new arrow or text goes into the part on screen, which is then selected; on a card nothing is added.
 - **+ Add text** adds a text box; drag it into place.
 - In the preview: drag an arrow's tail to turn it or make it longer, and drag its tip to another spot. Right-click an arrow or a text box for its shape (arrow, thin arrow, pointer, ring, bracket), box, colour, Duplicate, Copy to another part, Delete, and **Make all arrows look like this one**. Ctrl + click selects several; with several text boxes, **Align** lines them up.
 - Each item has its own **from** and **to** time in its part (**⏵** and **⏹** take the playhead). It fades in, grows or pops. Its bar on the timeline can be dragged.
@@ -400,7 +404,7 @@ In the Look tab:
 
 - **Lighting**: the **Preset** Default is the lighting of earlier versions. Simple uses one light; Soft adds soft shadows in creases (ambient occlusion; it works on the whole picture); Full adds slice shadows; Flat shows colours only. Set the **direction** with the sliders or by dragging on the ball, and **Brightness**, **Fill light**, **Ambient** and **Shininess**. **Light moves with the camera** keeps the light where the viewer is; without it, the light stays in place and highlights move when the camera turns.
 - **Shadows**: **Structures cast shadows on the tomogram slice**, with **Strength** and **Softness**, lit from the direction above. **Shadows between structures** needs a graphics card and is offered only where TomoReveal's test of the graphics card passes.
-- **Smooth edges** for the preview (Off or Fast). The movie has its own choice in Make the movie (Best is the default).
+- **Smooth edges** for the preview (Off or Fast). The movie has its own choice in Make the movie: Off, Fast or Best (the default). Projects that chose Multisample in an earlier version are drawn with Best. Previews without a choice of their own (the command line's `preview`, the browser, Explore and the preset pictures) use Fast.
 
 ![Cartoon membranes and vesicles with slice shadows](docs/images/13-cartoon-shadows.png)
 

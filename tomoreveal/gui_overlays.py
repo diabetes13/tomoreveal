@@ -4,6 +4,7 @@ import numpy as np
 from PySide6 import QtCore as QtC, QtGui as QtG, QtWidgets as QtW
 
 from . import overlays as ov
+from .gui_clicks import PathPoints
 from .gui_fold import Section
 from .gui_theme import DIM
 
@@ -248,7 +249,7 @@ class OverlayDrag(QtC.QObject):
             return {}
         W, H = sz
         return {n: ((r["box"][0] / W, r["box"][1] / H, r["box"][2] / W, r["box"][3] / H), r["shown"])
-                for n, r in (getattr(ren, "last_rects", None) or {}).items()}
+                for n, r in (getattr(ren, "shown_rects", None) or {}).items()}
 
     def hit(self, f):
         if f is None:
@@ -286,8 +287,11 @@ class OverlayDrag(QtC.QObject):
     def press(self, f, mods):
         """True when the press starts moving or resizing an item (the camera does not move then)."""
         w = self.win
-        if w.spec is None or w.pick_mode or w.gen is not None or w.busy or f is None:
+        if w.spec is None or w.gen is not None or w.busy or f is None:
             return False
+        m = w.clicks.mode
+        if m is not None and not (isinstance(m, PathPoints) and (self.hit(f) or "").startswith(("marker:", "look:"))):
+            return False  # a click mode is on: the click is for it (numbered path points stay draggable while adding points)
         am = getattr(w, "ann_mouse", None)
         if am is not None and am.press(self, f, mods):  # arrows and text boxes (3.5) are on top
             self.drag = dict(name="ann", mode="ann"); return True
@@ -328,7 +332,7 @@ class OverlayDrag(QtC.QObject):
             if p is None or i >= len(p.get("waypoints") or []):
                 return
             d["moved"] = True
-            wp = p["waypoints"][i]; ren = w.st.ren; info = ren._path3d or {}
+            wp = p["waypoints"][i]; ren = w.st.ren; info = ren.shown_path3d or {}
             F = np.asarray(wp.get("focal") or wp.get("point") or wp.get("pos"), float)
             raw = info.get("raw") or []
             P = np.asarray(wp["pos"], float) if wp.get("pos") is not None else (np.asarray(raw[i], float) if i < len(raw) else F)
@@ -410,7 +414,7 @@ class OverlayDrag(QtC.QObject):
         on_h = name is not None and self.on_handle(name, f)
         if name != self.hover_name:
             self.hover_name = name; self.win.prev.update()
-        if self.win.pick_mode:
+        if self.win.clicks.mode is not None:  # it keeps its cross
             return
         self.win.prev.setCursor(QtC.Qt.SizeFDiagCursor if on_h else QtC.Qt.SizeAllCursor if name else QtC.Qt.ArrowCursor)
 
@@ -512,6 +516,7 @@ class VoxelRow(QtW.QWidget):
         h.addWidget(QtW.QLabel("<b>Voxel size</b>"))
         self.spin = QtW.QDoubleSpinBox(); self.spin.setRange(0.0, 1000.0); self.spin.setDecimals(3); self.spin.setSuffix(" nm")
         self.spin.setSpecialValueText("unknown"); self.spin.setToolTip("Size of one voxel in nanometres; used by the scale bar")
+        self.spin.setKeyboardTracking(False)  # the value counts after Enter or leaving the box, not at every key
         self.spin.valueChanged.connect(self.changed); h.addWidget(self.spin)
         self.reset_btn = QtW.QPushButton("Use the file's value"); self.reset_btn.clicked.connect(self.reset); h.addWidget(self.reset_btn)
         h.addStretch(1)

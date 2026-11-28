@@ -97,7 +97,7 @@ class AnnotationMouse:
             tp = self.tip_at(a)
             if tp is None:
                 return
-            (tx, ty) = tp; W, H = ren.size
+            (tx, ty) = tp; W, H = ren.shown_size
             dx, dy = (f[0] - tx) * W, (f[1] - ty) * H
             a["tail"]["angle"] = round(math.degrees(math.atan2(-dy, dx)) % 360, 1)
             a["tail"]["length"] = round(max(0.02, min(0.6, math.hypot(dx, dy) / H)), 4)
@@ -160,7 +160,7 @@ def pick_anchor(win, f):
         return None
     hit = None
     try:
-        hit = win.st.pick(win.spec_for(), {"frame": win.frame, "x": f[0], "y": f[1]})
+        hit = win.st.pick_at(win.spec_for(), f[0], f[1])
     except Exception:
         pass
     found = bool(hit and hit.get("found"))
@@ -292,16 +292,19 @@ def item_menu(win, aid, gpos, pointer=None):
     exec_menu(m, gpos)
 
 
-def commit(win):
-    win.editor.commit(); win.schedule(0)
+def commit(win, select=None):
+    win.editor.commit(select=select); win.schedule(0)
     if hasattr(win, "ann_panel"):
         win.ann_panel.rebuild()
 
 
 def change(win, aid, fn):
+    """A change of one item: one undo step and a redraw; its row is filled again (never rebuilt while it is used)."""
     a = an.find(win.spec, aid)
     if a is not None:
-        fn(a); commit(win)
+        fn(a); win.editor.record(); win.schedule(0)
+        if hasattr(win, "ann_panel"):
+            win.ann_panel.refill(aid)
 
 
 def delete(win, aid):
@@ -359,13 +362,24 @@ def set_box(win, aid, box, x=None, y=None):
     a["pos"] = dict(x=float(box[0] if x is None else x), y=float(box[1] if y is None else y), anchor="top-left")
 
 
+class LabelEditor(QtW.QLineEdit):
+    """The line for a label over the preview: Esc drops what was typed and closes it, and no key reaches the preview
+    while it is open (arrow keys would move the view, Esc would end a click mode)."""
+    cancelled = False
+
+    def keyPressEvent(self, e):
+        if e.key() == QtC.Qt.Key_Escape:
+            self.cancelled = True; self.hide(); self.editingFinished.emit(); e.accept(); return
+        super().keyPressEvent(e); e.accept()
+
+
 def edit_label(win, aid):
     """A line to type in, over the preview at the item (Enter keeps it, Esc cancels)."""
     a = an.find(win.spec, aid)
     if a is None:
         return
     cur = (a.get("label") or {}).get("text", "") if a["kind"] == "arrow" else a.get("text", "")
-    le = QtW.QLineEdit(win.prev); le.setText(cur); le.setPlaceholderText("type the label"); le.setMinimumWidth(200)
+    le = LabelEditor(win.prev); le.setText(cur); le.setPlaceholderText("type the label"); le.setMinimumWidth(200)
     od = win.prev.overlay; r = od.rects().get(f"anntail:{aid}") or od.rects().get(f"ann:{aid}") if od is not None else None
     pt = win.prev.to_widget(r[0][0], r[0][1]).toPoint() if r and win.prev.image_px() else QtC.QPoint(40, 40)
     le.move(max(4, min(pt.x(), win.prev.width() - 210)), max(4, min(pt.y(), win.prev.height() - 30))); le.show(); le.setFocus(); le.selectAll()
@@ -373,7 +387,7 @@ def edit_label(win, aid):
 
     def done():
         b = an.find(win.spec, aid) if win.spec else None
-        if b is not None and le.isVisible():
+        if b is not None and le.isVisible() and not le.cancelled:
             if b["kind"] == "arrow":
                 b.setdefault("label", {})["text"] = le.text()
             else:
@@ -383,39 +397,54 @@ def edit_label(win, aid):
     le.returnPressed.connect(done); le.editingFinished.connect(done)
 
 
+def part_on_screen(win):
+    """Where a new arrow or text goes: (ok, part id or None for all parts). The part at the playhead, the one on screen (a
+    transition counts to the part it leads into); not ok on a card, which draws no arrows or text."""
+    from .storyboard import part_at_frame
+    plan = win.timeline.canvas.plan
+    part = win.parts_panel.part(part_at_frame(plan, win.frame)) if plan is not None and 0 <= win.frame < len(plan.frames) else None
+    if part is not None and part["type"] == "card":
+        win.say("A card shows no arrows or text. Move the playhead to another part first.", "err"); return False, None
+    return True, (part["id"] if part else None)
+
+
 def add_arrow_at(win, f):
-    """A new arrow whose tip is the 3D point under f; label: the structure's name; shown during the selected part."""
+    """A new arrow whose tip is the 3D point under f; label: the structure's name; shown during the part on screen."""
+    ok, pid = part_on_screen(win)
+    if not ok:
+        return None
     ren = win.st.ren
     p = ren.pick_point(*f) if ren is not None else None
     if p is None:
         win.say("Nothing there. Click on a structure or on the slice.", "err"); return None
     hit = None
     try:
-        hit = win.st.pick(win.spec_for(), {"frame": win.frame, "x": f[0], "y": f[1]})
+        hit = win.st.pick_at(win.spec_for(), f[0], f[1])
     except Exception:
         pass
     found = bool(hit and hit.get("found"))
-    pid = win.selected_part if win.selected_part else None
     a = an.new_arrow(p, hit["class"] if found else None, hit.get("component") if found else None,
                      hit.get("name", "") if found else "", parts=[pid] if pid else "all")
-    win.spec.setdefault("annotations", []).append(a); commit(win)
+    win.spec.setdefault("annotations", []).append(a); commit(win, select=pid)  # its part is selected: it is in the list
     QtC.QTimer.singleShot(0, lambda: edit_label(win, a["id"]))
     win.say("Arrow added. Type its label, drag its tail to turn it, or right-click it for more.", "ok")
     return a
 
 
 def add_text_at(win, f):
-    pid = win.selected_part if win.selected_part else None
+    ok, pid = part_on_screen(win)
+    if not ok:
+        return None
     a = an.new_text("Text", x=f[0] if f else 0.7, y=f[1] if f else 0.2, parts=[pid] if pid else "all")
-    win.spec.setdefault("annotations", []).append(a); commit(win)
+    win.spec.setdefault("annotations", []).append(a); commit(win, select=pid)
     QtC.QTimer.singleShot(0, lambda: edit_label(win, a["id"]))
     return a
 
 
 def start_add_pointer(win, aid):
     """Click things in the preview: the arrow or text box points at each of them too; a click on empty space ends."""
-    win.pick_btn.setChecked(False); win.end_picks(); win.arrow_pick = aid; win.prev.setCursor(QtC.Qt.CrossCursor)
-    win.say("Click each thing it should also point at. Click on empty space when done.")
+    from .gui_clicks import MorePointers
+    win.clicks.start(MorePointers(aid))
 
 
 def add_pointer_at(win, aid, f):
@@ -426,7 +455,7 @@ def add_pointer_at(win, aid, f):
         return False
     hit = None
     try:
-        hit = win.st.pick(win.spec_for(), {"frame": win.frame, "x": f[0], "y": f[1]})
+        hit = win.st.pick_at(win.spec_for(), f[0], f[1])
     except Exception:
         pass
     found = bool(hit and hit.get("found"))
@@ -437,8 +466,8 @@ def add_pointer_at(win, aid, f):
 
 
 def start_add_arrow(win):
-    win.pick_btn.setChecked(False); win.end_picks(); win.arrow_pick = True; win.prev.setCursor(QtC.Qt.CrossCursor)
-    win.say("Click the spot the arrow should point to.")
+    from .gui_clicks import NewArrow
+    win.clicks.start(NewArrow())
 
 
 def preview_menu(win):
@@ -474,31 +503,70 @@ class AnnotationPanel(QtC.QObject):
         self.note = QtW.QLabel(""); self.note.setVisible(False)  # (3.5: the help text is the group's tooltip)
 
     def rebuild(self):
-        from .gui_data import clear_layout
-        clear_layout(self.rows); w = self.win
-        if w.spec is None:
-            return
-        pid = w.selected_part
-        for a in an.items(w.spec):
-            if self.only_part.isChecked() and pid and not an.shown_in(a, pid):
-                continue
-            self.rows.addWidget(self._row(a))
+        """Rows are made or removed only when the listed items change; otherwise each row is filled again."""
+        w = self.win; pid = w.selected_part
+        items = [] if w.spec is None else [a for a in an.items(w.spec)
+                                           if not (self.only_part.isChecked() and pid and not an.shown_in(a, pid))]
+        old = {}
+        while self.rows.count():
+            r = self.rows.takeAt(0).widget()
+            if r is not None:
+                old[r.aid] = r
+        for a in items:
+            r = old.pop(a["id"], None)
+            if r is None or r.arrow != (a["kind"] == "arrow"):
+                r = AnnotationRow(self, a)
+            self.rows.addWidget(r); r.fill(a)
+        for r in old.values():
+            r.setParent(None); r.deleteLater()
 
-    def _row(self, a):
-        """One item: [shown] [arrow / text] [label] [shape or box] [colour] [x], and under it when it shows and what it
-        points at (3.5: the common choices are in the row; the rest stays in the ⋯ menu)."""
-        w = self.win; aid = a["id"]; arrow = a["kind"] == "arrow"
-        row = QtW.QFrame(); row.setFrameShape(QtW.QFrame.StyledPanel)
-        v = QtW.QVBoxLayout(row); v.setContentsMargins(4, 3, 4, 3); v.setSpacing(2)
+    def refill(self, aid):
+        a = an.find(self.win.spec, aid) if self.win.spec is not None else None
+        for i in range(self.rows.count()):
+            r = self.rows.itemAt(i).widget()
+            if r is not None and r.aid == aid and a is not None:
+                r.fill(a)
+
+    def delete_clicked(self):
+        """Delete after a click on an arrow's or text's bar on the timeline: that one goes (one undo step), the parts stay."""
+        c = self.win.timeline.canvas; aid, c.selected_ann = c.selected_ann, None
+        if aid is not None:
+            delete(self.win, aid); self.win.say("Removed the arrow or text. Undo brings it back.")
+
+    def at_playhead(self, aid, which):
+        w = self.win; plan = w.timeline.canvas.plan; a = an.find(w.spec, aid)
+        if plan is None or a is None:
+            return
+        f = plan.frames[w.frame]; pid = f.get("part")
+        if pid is None:
+            return
+        t = f.get("tp") or 0.0  # the clock of the movie (in a transition, a card or after the flight back: the start)
+        if not an.shown_in(a, pid):
+            a["show"]["parts"] = [pid]
+        a["show"][which] = round(t, 2); commit(w)
+
+
+class AnnotationRow(QtW.QFrame):
+    """One item of the list: [shown] [arrow / text] [label] [shape or box] [colour] [x], and under it when it shows and
+    what it points at (3.5: the common choices are in the row; the rest stays in the ⋯ menu). Built once; `fill` puts
+    an item's values in (a label being typed is left alone)."""
+
+    def __init__(self, panel, a):
+        super().__init__(); self.setFrameShape(QtW.QFrame.StyledPanel)
+        w = panel.win; self.win = w; self.aid = aid = a["id"]; self.arrow = arrow = a["kind"] == "arrow"
+        v = QtW.QVBoxLayout(self); v.setContentsMargins(4, 3, 4, 3); v.setSpacing(2)
         h = QtW.QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); v.addLayout(h)
-        vis = QtW.QCheckBox(); vis.setChecked(a.get("visible", True)); vis.setToolTip("Show or hide this item")
+        self.vis = vis = QtW.QCheckBox(); vis.setToolTip("Show or hide this item")
         vis.toggled.connect(lambda on: change(w, aid, lambda b: b.__setitem__("visible", bool(on))))
         kind = QtW.QLabel("→" if arrow else "T"); kind.setToolTip("An arrow" if arrow else "A text box")
-        txt = QtW.QLineEdit((a.get("label") or {}).get("text", "") if arrow else a.get("text", ""))
-        txt.setToolTip("The label of the arrow, or the text"); txt.setMinimumWidth(80)
+        self.txt = txt = QtW.QLineEdit(); txt.setToolTip("The label of the arrow, or the text"); txt.setMinimumWidth(80)
         txt.setPlaceholderText("label" if arrow else "text")
 
         def set_text():
+            if not txt.isModified():
+                return
+            txt.setModified(False)
+
             def fn(b, t=txt.text()):
                 if b["kind"] == "arrow":
                     b.setdefault("label", {})["text"] = t
@@ -506,24 +574,17 @@ class AnnotationPanel(QtC.QObject):
                     b["text"] = t
             change(w, aid, fn)
         txt.editingFinished.connect(set_text)
-        st = a.get("style") or {}
 
-        def combo(items, cur, key, tip):
+        def combo(items, key, tip):
             cb = QtW.QComboBox(); cb.setSizeAdjustPolicy(QtW.QComboBox.AdjustToMinimumContentsLengthWithIcon); cb.setMinimumContentsLength(5)
             for t, d in items:
                 cb.addItem(t, d)
-            cb.setCurrentIndex(max(0, cb.findData(cur))); cb.setToolTip(tip)
+            cb.setToolTip(tip)
             cb.activated.connect(lambda j: change(w, aid, lambda b: b.setdefault("style", {}).__setitem__(key, cb.itemData(j))))
             return cb
-        look = combo(an.SHAPES, st.get("shape", "arrow"), "shape", "Shape of the arrow") if arrow else \
-            combo(an.BOXES, st.get("box", "dark"), "box", "Box behind the text")
-        col = combo(COLOURS, st.get("color", "auto"), "color", "Colour")
-        if st.get("color", "auto") not in [v for _, v in COLOURS]:  # chosen from the colour wheel
-            col.addItem("own colour", st["color"]); col.setCurrentIndex(col.count() - 1)
-        wheel = QtW.QToolButton(); wheel.setFixedSize(26, 22)
-        shown = st.get("fill") if not arrow and st.get("box") == "fill" else (st.get("color") if st.get("color", "auto") != "auto" else None)
-        wheel.setStyleSheet(f"background:{shown}; border:1px solid palette(mid); border-radius:3px" if shown else "")
-        wheel.setText("" if shown else "🎨")
+        self.look = combo(an.SHAPES, "shape", "Shape of the arrow") if arrow else combo(an.BOXES, "box", "Box behind the text")
+        self.col = combo(COLOURS, "color", "Colour")
+        self.wheel = wheel = QtW.QToolButton(); wheel.setFixedSize(26, 22)
         if arrow:
             wheel.setToolTip("Choose the colour of the arrow from a colour wheel")
             wheel.clicked.connect(lambda: pick_colour(w, aid, "color", "Colour of the arrow"))
@@ -531,48 +592,58 @@ class AnnotationPanel(QtC.QObject):
             wheel.setToolTip("Fill the box with a colour from a colour wheel (the text turns black or white, whichever reads)")
             wheel.clicked.connect(lambda: pick_colour(w, aid, "fill", "Colour of the box"))
         dele = QtW.QToolButton(); dele.setText("✕"); dele.setToolTip("Delete this item"); dele.clicked.connect(lambda: delete(w, aid))
-        for x in (vis, kind, txt, look, col, wheel, dele):
+        for x in (vis, kind, txt, self.look, self.col, wheel, dele):
             h.addWidget(x)
         h.setStretch(2, 1)
         h2 = QtW.QHBoxLayout(); h2.setContentsMargins(22, 0, 0, 0); v.addLayout(h2)
-        sh = a.get("show") or {}
-        stt = QtW.QDoubleSpinBox(); stt.setRange(-0.1, 600); stt.setDecimals(1); stt.setSingleStep(0.5); stt.setSpecialValueText("start")
-        stt.setPrefix("from "); stt.setSuffix(" s"); stt.setValue(-0.1 if sh.get("start") is None else float(sh["start"]))
-        stt.setToolTip("When it appears, in seconds from the start of the part ('start': from the beginning)")
-        en = QtW.QDoubleSpinBox(); en.setRange(-0.1, 600); en.setDecimals(1); en.setSingleStep(0.5); en.setSpecialValueText("end")
-        en.setPrefix("to "); en.setSuffix(" s"); en.setValue(-0.1 if sh.get("end") is None else float(sh["end"]))
-        en.setToolTip("When it disappears ('end': at the end of the part)")
-        stt.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("start", None if x < 0 else float(x))))
-        en.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__("end", None if x < 0 else float(x))))
+
+        def secs(prefix, special, tip, key):
+            sp = QtW.QDoubleSpinBox(); sp.setRange(-0.1, 600); sp.setDecimals(1); sp.setSingleStep(0.5); sp.setSpecialValueText(special)
+            sp.setPrefix(prefix); sp.setSuffix(" s"); sp.setToolTip(tip); sp.setKeyboardTracking(False)  # (the number counts after Enter)
+            sp.valueChanged.connect(lambda x: change(w, aid, lambda b: b["show"].__setitem__(key, None if x < 0 else float(x))))
+            return sp
+        self.stt = secs("from ", "start", "When it appears, in seconds from the start of the part ('start': from the beginning)", "start")
+        self.en = secs("to ", "end", "When it disappears ('end': at the end of the part)", "end")
         here = QtW.QToolButton(); here.setText("⏵"); here.setToolTip("Start here: it appears at the playhead")
-        here.clicked.connect(lambda: self.at_playhead(aid, "start"))
+        here.clicked.connect(lambda: panel.at_playhead(aid, "start"))
         there = QtW.QToolButton(); there.setText("⏹"); there.setToolTip("End here: it disappears at the playhead")
-        there.clicked.connect(lambda: self.at_playhead(aid, "end"))
-        n = len(an.pointers(a))
-        more = QtW.QToolButton(); more.setText(f"+ point ({n + (1 if arrow else 0)})" if n else "+ point")
+        there.clicked.connect(lambda: panel.at_playhead(aid, "end"))
+        self.more = more = QtW.QToolButton()
         more.setToolTip("Point at more things with this one label: click each of them in the preview (one line to each, as in "
                         "figure callouts). Right-click a pointer's end to remove it.")
         more.clicked.connect(lambda: start_add_pointer(w, aid))
         menu = QtW.QToolButton(); menu.setText("⋯"); menu.setToolTip("Edit, duplicate, copy to another part, align, same look for all ...")
         menu.clicked.connect(lambda: item_menu(w, aid, menu.mapToGlobal(QtC.QPoint(0, menu.height()))))
-        for x in (stt, en, here, there, more, menu):
+        for x in (self.stt, self.en, here, there, more, menu):
             h2.addWidget(x)
         h2.addStretch(1)
-        return row
 
-    def at_playhead(self, aid, which):
-        w = self.win; plan = w.timeline.canvas.plan; a = an.find(w.spec, aid)
-        if plan is None or a is None:
-            return
-        f = plan.frames[w.frame]; pid = f.get("part")
-        from .storyboard import main_range
-        rng = main_range(plan, pid) if pid else None
-        if rng is None:
-            return
-        t = max(0.0, (w.frame - rng[0]) / plan.fps)
-        if not an.shown_in(a, pid):
-            a["show"]["parts"] = [pid]
-        a["show"][which] = round(t, 2); commit(w)
+    def fill(self, a):
+        arrow = self.arrow; st = a.get("style") or {}; sh = a.get("show") or {}
+        for x in (self.vis, self.txt, self.look, self.col, self.stt, self.en):
+            x.blockSignals(True)
+        try:
+            self.vis.setChecked(a.get("visible", True))
+            if not (self.txt.hasFocus() and self.txt.isModified()):  # (being typed: left alone)
+                self.txt.setText((a.get("label") or {}).get("text", "") if arrow else a.get("text", "")); self.txt.setModified(False)
+            self.look.setCurrentIndex(max(0, self.look.findData(st.get("shape", "arrow") if arrow else st.get("box", "dark"))))
+            own = self.col.findText("own colour")
+            if own >= 0:
+                self.col.removeItem(own)
+            if st.get("color", "auto") not in [v for _, v in COLOURS]:  # chosen from the colour wheel
+                self.col.addItem("own colour", st["color"]); self.col.setCurrentIndex(self.col.count() - 1)
+            else:
+                self.col.setCurrentIndex(max(0, self.col.findData(st.get("color", "auto"))))
+            for sp, key in ((self.stt, "start"), (self.en, "end")):
+                if not sp.hasFocus():
+                    sp.setValue(-0.1 if sh.get(key) is None else float(sh[key]))
+        finally:
+            for x in (self.vis, self.txt, self.look, self.col, self.stt, self.en):
+                x.blockSignals(False)
+        shown = st.get("fill") if not arrow and st.get("box") == "fill" else (st.get("color") if st.get("color", "auto") != "auto" else None)
+        self.wheel.setStyleSheet(f"background:{shown}; border:1px solid palette(mid); border-radius:3px" if shown else "")
+        self.wheel.setText("" if shown else "🎨")
+        n = len(an.pointers(a)); self.more.setText(f"+ point ({n + (1 if arrow else 0)})" if n else "+ point")
 
 
 def paint_selection(p, prev, win):

@@ -54,7 +54,8 @@ def build_gui(args):
     from .gui_project import ProjectManager, log_exception, setup_crash_log, start_hang_watch
     from .encode import read_partial
     from .gui_overlays import OverlayControls, OverlayDrag, OverlayToolbar, VoxelRow
-    from .look import look_settings, AA_MOVIE, ensure as ensure_look
+    from .gui_clicks import ClickModes, CloseupObject, NewCloseup
+    from .look import look_settings, AA_MOVIE, aa_mode, ensure as ensure_look
     from .gui_look import LookControls, style_rows
     from .gui_export import ExportControls
     from .gui_render import movie_steps, start_surfaces, surfaces_wanted
@@ -71,18 +72,15 @@ def build_gui(args):
             self.st = Studio(headless=args.headless, outdir=outdir)
             self.spec = self.info = None; self.frame, self.total, self.cur_shot, self.cur_type = 0, 1, 0, None; self.req = None
             self.selected_part = None  # id of the part selected on the timeline
-            self.pick_for = None       # (part id, structure key) while picking the object of a close-up
-            self.multi_pick = None     # part id while clicking objects for a close-up of several objects
-            self.waypoint_pick = None  # part id while clicking points for a camera path
-            self.region_pick = None    # (part id or None for a new close-up, insert after) while drawing a frame
-            self.path_pick = None      # part id while clicking the object a camera path follows
             self._path_worker = None
-            self.busy = False; self.gen = self.job = None; self.pick_mode = False; self.worker = None; self._drag0 = None
+            self.busy = False; self.gen = self.job = None; self.worker = None; self._drag0 = None
             self._thr_reset = 0; self.last_movie = None
             self._struct_open = set()  # structures whose settings are open in the Structures tab
             self._param_pending = {}; self._soften_cb = {}; self._surf_worker = None
             self._surf_failed = {}  # structure key -> (the settings (a cache key) whose surface could not be made, why)
-            self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True); self.resize(1480, 940)
+            self.setWindowTitle("TomoReveal"); self.setAcceptDrops(True)
+            free = QtW.QApplication.primaryScreen().availableGeometry()  # never larger than the screen's free area
+            self.resize(min(1480, free.width()), min(940, free.height()))
             self.prev_timer = QtC.QTimer(self); self.prev_timer.setSingleShot(True); self.prev_timer.timeout.connect(self.do_preview)
             self.thr_timer = QtC.QTimer(self); self.thr_timer.setSingleShot(True); self.thr_timer.setInterval(400)
             self.thr_timer.timeout.connect(self._thr_settled)
@@ -95,10 +93,9 @@ def build_gui(args):
             QtC.QTimer.singleShot(500, self._test_real_shadows)
             # playback in the preview (real time: frames are skipped when drawing is slower than the frame rate)
             self.play_btn = QtW.QPushButton("Play"); self.play_btn.setToolTip("Play the movie in the preview from the playhead (Space)")
-            self.play_btn.clicked.connect(self.toggle_play); self.timeline.buttons.insertWidget(self.timeline.buttons.count() - 1, self.play_btn)
+            self.play_btn.clicked.connect(self.toggle_play); self.timeline.buttons.addWidget(self.play_btn)
             self.play_timer = QtC.QTimer(self); self.play_timer.setInterval(5); self.play_timer.timeout.connect(self._play_step)
             self.playing = None  # dict(t0, f0, spec, frames, size, drawn) while playing
-            self.timeline.canvas.frame_changed.connect(lambda _f: self.stop_play())  # any click on the timeline stops it
             self.timeline.part_selected.connect(lambda _p: self.stop_play())
             self._sync_theme()
             hints = QtW.QApplication.instance().styleHints()
@@ -291,7 +288,7 @@ def build_gui(args):
             self.overlay_controls = OverlayControls(self, lay)
             from .gui_annotations import AnnotationMouse, AnnotationPanel, preview_menu
             self.ann_panel = AnnotationPanel(self, lay); self.ann_mouse = AnnotationMouse(self)
-            self.arrow_pick = False; self.label_editor = None; self.preview_menu_extras = [preview_menu(self)]
+            self.label_editor = None; self.preview_menu_extras = [preview_menu(self)]
             self.look_controls = LookControls(self, lay)
             self.legend_cb, self.slabel_cb = self.overlay_controls.cb["legend"], self.overlay_controls.cb["slice_label"]
             from .gui_presets import PresetsPanel
@@ -315,11 +312,12 @@ def build_gui(args):
             self.prev.overlay = OverlayDrag(self)
             self.prev.clicked.connect(self.on_click); self.prev.dragged.connect(self.on_drag)
             self.prev.released.connect(self.on_release); self.prev.wheel.connect(self.on_wheel)
-            self.prev.boxed.connect(self.on_boxed)
+            self.clicks = ClickModes(self); self.prev.boxed.connect(self.clicks.boxed)  # the click mode in the preview, if any
+            self.clicks.follow(self.pick_btn, lambda m: isinstance(m, (NewCloseup, CloseupObject)))
             from .gui_navigate import Navigator
             from .gui_paths import PointPanel
             self.nav = Navigator(self); self.prev.nav = self.nav
-            self.path_point = None; self.path_edit_paused = None; self.point_panel = PointPanel(self)
+            self._path_sel = None; self.path_edit_paused = None; self.point_panel = PointPanel(self)
             rl.addWidget(self.prev, 1)
             self.timeline = Timeline(); rl.addWidget(self.timeline)
             self.timeline.frame_changed.connect(self.on_scrub); self.timeline.released.connect(lambda: self.schedule(0))
@@ -417,6 +415,7 @@ def build_gui(args):
                 self.prev.set_note("")
             if last is not None:  # leave the preview on the frame it stopped at, at full quality
                 self.req = {"frame": last}; self.schedule(0)
+            self.presets.resume()
 
         def _play_step(self):
             p = self.playing
@@ -430,13 +429,11 @@ def build_gui(args):
             step = p.get("step", 1)
             f = min(p["f0"] + (f - p["f0"]) // step * step, last) if not end else last
             if f != p["last"]:
-                t0 = time.monotonic(); self.st.ren.surface_async = True
+                t0 = time.monotonic()
                 try:
-                    img = self.st.ren.draw(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
+                    img = self.st.ren.show(p["frames"][f], p["spec"], p["size"], aa=look_settings(p["spec"])["aa"]["preview"])
                 except Exception as exc:
                     traceback.print_exc(); self.stop_play(); self.say(f"Playback stopped: {exc}", "err"); return
-                finally:
-                    self.st.ren.surface_async = False
                 self._make_part_surfaces()
                 dt = time.monotonic() - t0
                 p["avg"] = dt if p.get("avg") is None else 0.7 * p["avg"] + 0.3 * dt
@@ -527,10 +524,15 @@ def build_gui(args):
                 w.setEnabled(not flag)  # nothing may use Studio or the renderer while the worker replaces them
             self.data.set_busy(flag, msg or "")
             if flag:
-                self.stop_play(); self.pick_btn.setChecked(False)
+                self.stop_play(); self.clicks.end(); self.export.stop()  # it starts again after a change
                 QtW.QApplication.setOverrideCursor(QtC.Qt.BusyCursor); self.say(msg)
             else:
-                QtW.QApplication.restoreOverrideCursor()
+                QtW.QApplication.restoreOverrideCursor(); self.presets.resume()
+
+        def mouse_down(self):
+            """A drag in the preview (moving around, or an overlay item, an arrow or a path point)."""
+            od = self.prev.overlay
+            return self.nav.drag is not None or (od is not None and od.drag is not None)
 
         # ---------- loading ----------
         def dragEnterEvent(self, e):
@@ -661,11 +663,12 @@ def build_gui(args):
         def unload(self):
             """Leave the current work (whoever calls this has asked): end everything that would go on using its settings
             or its renderer, then empty the window."""
-            self.stop_play(); self.end_picks(); self.pick_btn.setChecked(False); self.editor.pending_after = None
+            self.stop_play(); self.clicks.end()
             self.point_panel.close_panel()
             le, self.label_editor = self.label_editor, None
             if le is not None:
                 le.hide(); le.deleteLater()
+            self.nav.forget()
             for t in (self.thr_timer, self.param_timer, self.prev_timer, self.editor.hist_timer, self.nav.anim):
                 t.stop()
             self._thr_reset = 0; self._param_pending = {}; self.nav._anim = None
@@ -879,8 +882,8 @@ def build_gui(args):
             st = sp["style"]
             self._setv(self.invert_cb, st.get("invert", False)); self._setv(self.allop_s, 100 * float(st.get("structures_opacity", 1.0)))
             self.overlay_controls.sync(); self.toolbar.sync(); self.voxel_row.sync(); self.look_controls.sync(); self.export.sync()
-            self.ann_panel.rebuild()
-            self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(look_settings(sp)["aa"]["movie"])))
+            self.ann_panel.rebuild(); self.clicks.check()  # (a part or arrow of the click mode may be gone)
+            self.aa_movie.setCurrentIndex(max(0, self.aa_movie.findData(aa_mode(look_settings(sp)["aa"]["movie"]))))
             self.fps_cb.setCurrentIndex(max(0, self.fps_cb.findData(int(sp.get("output", {}).get("fps", 30)))))
             self.blur_cb.blockSignals(True); self.blur_cb.setChecked(bool(sp.get("output", {}).get("motion_blur", False))); self.blur_cb.blockSignals(False)
             self.apply_help()
@@ -987,7 +990,7 @@ def build_gui(args):
             c = dict(self.spec.get("clip") or {a: [0, dims[a] - 1] for a in "xyz"}); c[ax] = [int(lo), int(hi)]
             c["fit"] = self.clipfit_cb.isChecked()
             self.spec["clip"] = None if all(c[a] == [0, dims[a] - 1] for a in "xyz") else c
-            if self._in_closeup() and self.req is None:
+            if self._main_view_hidden() and self.req is None:
                 self.req = self._main_req()
             self.schedule(40)
 
@@ -1073,8 +1076,11 @@ def build_gui(args):
                 return {"at": {"part": rv["id"], "u": 0.999}}
             return {"t": 0.5}
 
-        def _in_closeup(self):
-            return self.spec is not None and self.cur_type == "focus"
+        def _main_view_hidden(self):
+            """The main view is not on screen: a close-up, a camera path, a card, or a part with its own view (and a hold
+            after one of them). Changing it then shows it (the overview)."""
+            p = self.view_source()
+            return self.spec is not None and (self.cur_type == "focus" or p is not None and (p["type"] in ("focus", "path", "card") or bool(p.get("view"))))
 
         def set_view(self, tilt=None, az=None, zoom=None, quick=False):
             if not self.spec:
@@ -1087,7 +1093,7 @@ def build_gui(args):
             if zoom is not None:
                 v["zoom"] = float(zoom)
             self._setv(self.tilt_s, v["tilt"]); self._setv(self.az_s, v["az"]); self._setv(self.zoom_s, v["zoom"] * 100)
-            if self._in_closeup() and self.req is None:
+            if self._main_view_hidden() and self.req is None:
                 self.req = self._main_req()  # the main view is not visible during a close-up: jump to the overview
             if quick:
                 self.do_preview(quick=True)
@@ -1118,8 +1124,7 @@ def build_gui(args):
             w, h = self.st._psize(spec); size = (w * 2 // 3, h * 2 // 3) if quick else (w, h)
             self.st.ren.preview_part = self.selected_part
             try:
-                self.st.ren.surface_async = True
-                img = self.st.ren.draw(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
+                img = self.st.ren.show(frames[i], spec, size, aa=look_settings(spec)["aa"]["preview"], preview=True)
             except Exception as exc:
                 traceback.print_exc(); soft = software_rendering_available()  # OSMesa hard-crashes where it is missing
                 if not self.st.headless and soft:
@@ -1127,9 +1132,6 @@ def build_gui(args):
                     self.say("Graphics problem: switched to software rendering (slower).", "err")
                     return self.do_preview(quick)
                 self.say(f"Preview failed: {exc}" + ("" if soft else " (software rendering is not available on this computer)"), "err"); return
-            finally:
-                if self.st.ren is not None:
-                    self.st.ren.surface_async = False
             self._make_part_surfaces()
             self.frame, self.total, self.cur_shot, self.cur_type = i, len(frames), frames[i]["shot"], frames[i].get("type")
             self.prev.set_image(to_qimage(img))
@@ -1144,7 +1146,7 @@ def build_gui(args):
             cur_note = self.prev.note.text()
             if note or cur_note.startswith(("Changing the view of part", "Editing the camera path")):
                 self.prev.set_note(note)  # other notes (the first-time hint, skipped frames) stay
-            if self.path_point and self.point_panel.isVisible():
+            if self.point_panel.isVisible():  # (it hides when its point is gone)
                 self.point_panel.refresh(); self.point_panel.place()
             empty = not any(p.get("on", True) for p in self.spec["shots"])
             self.go_btn.setEnabled(not empty)
@@ -1195,7 +1197,7 @@ def build_gui(args):
 
         def select_part(self, pid):
             """A block clicked on the timeline: its line opens in the Movie tab."""
-            self.end_picks(keep=pid)  # clicks in the preview must never go on adding to a part that is not selected
+            self.clicks.end_for(pid)  # clicks in the preview must never go on adding to a part that is not selected
             if self.path_point and self.path_point[0] != pid:
                 self.point_panel.close_panel()
             if self.path_edit_paused != pid:
@@ -1210,16 +1212,25 @@ def build_gui(args):
                 return None
             return p
 
-        def select_path_point(self, pid, i):
-            self.path_point = (pid, i)
-            if self.parts_panel.open_id != pid:
+        @property
+        def path_point(self):
+            """(part id, number) of the selected point of a camera path, found by the point itself; None when it is gone."""
+            pid, wp = self._path_sel or (None, None); p = self.parts_panel.part(pid) if pid and self.spec else None
+            i = next((i for i, w in enumerate(p.get("waypoints") or []) if w is wp), None) if p else None
+            return None if i is None else (pid, i)
+
+        def select_path_point(self, pid, i, show=True):
+            p = self.parts_panel.part(pid); self._path_sel = (pid, p["waypoints"][i]) if p else None
+            if show and self.parts_panel.open_id != pid:
                 self.parts_panel.open(pid)
-            self.point_panel.show_for(pid, i); self.prev.update()
+            if show:
+                self.point_panel.show_for()
+            self.prev.update()
 
         def point_frame(self, pid, i):
             """The frame where the camera of a path is at point i."""
             plan = self.timeline.canvas.plan; ren = self.st.ren
-            marks = (ren._path3d or {}).get("marks") if ren is not None else None
+            marks = (ren.shown_path3d or {}).get("marks") if ren is not None else None
             if plan is None or not marks or i >= len(marks):
                 return None
             target = np.asarray(marks[i][1], float)
@@ -1236,21 +1247,6 @@ def build_gui(args):
             self.editor.changed(); j = self.point_frame(pid, i)
             self.req = {"frame": j} if j is not None else {"frame": self.frame}; self.do_preview(quick=True)
 
-        def end_picks(self, keep=None):
-            """End every way of clicking in the preview for a part (objects of a close-up, points of a path, the object a
-            path follows), except for the part `keep`. Only one of them is ever active (3.5 fix: clicks for a new
-            close-up were added to an earlier close-up whose object picking was still on)."""
-            if self.multi_pick is not None and self.multi_pick != keep:
-                self.end_multi_pick()
-            if self.waypoint_pick is not None and self.waypoint_pick != keep:
-                self.end_waypoint_pick()
-            if self.path_pick is not None and self.path_pick != keep:
-                self.path_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
-            if self.region_pick is not None and (self.region_pick[0] is None or self.region_pick[0] != keep):
-                self.end_region_pick()
-            if getattr(self, "arrow_pick", False):
-                self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor)
-
         def set_annotation_time(self, aid, pid, start, end):
             """An arrow's or text box's bar moved on the timeline: one undo step."""
             from .annotations import find
@@ -1259,7 +1255,7 @@ def build_gui(args):
                 return
             if (a.get("show") or {}).get("parts", "all") == "all" and len([p for p in self.spec["shots"] if p.get("on", True)]) > 1:
                 a["show"]["parts"] = [pid]  # its timing is now for this part
-            a["show"]["start"] = round(float(start), 2); a["show"]["end"] = round(float(end), 2)
+            a["show"].update(start=float(start), end=float(end))  # (rounded by the timeline; what was not dragged is kept as it is)
             self.editor.commit(); self.ann_panel.rebuild()
 
         def set_transition(self, pid, key, value):
@@ -1277,199 +1273,55 @@ def build_gui(args):
             """Double-click on a block: show the part's settings in the Movie tab."""
             self.tabs.setCurrentIndex(self.TAB_MOVIE); self.select_part(pid)
 
-        def start_object_pick(self, pid, key):
-            """'Pick an object in the preview...' of a close-up: the next click on that structure sets the object."""
-            self.pick_for = (pid, key); self.pick_btn.setChecked(True)
-            self.editor.pending_after = None
-            name = self.spec["classes"].get(key, {}).get("name", "structure")
-            self.say(f"Click one {name} object in the preview.")
-
-        def on_scrub(self, v):
-            self.req = {"frame": int(v)}; self.schedule(40)
-
         def set_pick(self, on):
-            if on:
-                self.end_picks()
-            self.pick_mode = bool(on); self.prev.setCursor(QtC.Qt.CrossCursor if on else QtC.Qt.ArrowCursor)
-            if not on:
-                self.pick_for = None
-            if on and self.spec and self.editor.pending_after is None:
-                self.editor.pending_after = self.editor.anchor()  # the close-up goes where the playhead was
-            if on and self.spec:
-                self.req = self._main_req(); self.schedule(0)
-                self.say("Click the structure you want a close-up of.")
-
-        def start_multi_pick(self, pid):
-            """'+ Click objects in the preview' of a close-up: each click adds or removes one object."""
-            if self.pick_mode:
-                self.pick_btn.setChecked(False)
-            self.end_picks(keep=pid)
-            self.multi_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
-            self.req = self._main_req(); self.schedule(0)
-            self.say("Click objects to add them to the close-up; click one again to take it out; Shift-click adds the whole "
-                     "structure. Press Esc when done.")
-
-        def end_multi_pick(self):
-            if self.multi_pick is None:
-                return
-            pid = self.multi_pick; self.multi_pick = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
-            if self.parts_panel.open_id == pid:
-                self.parts_panel.fill_details(pid)
-            self.req = {"at": {"part": pid, "u": 0.5}}; self.schedule(0); self.say("")
-
-        def start_region_pick(self, pid=None, after=None):
-            """Draw a frame in the preview: the close-up `pid` (or a new close-up after `after`) frames what is inside."""
-            self.pick_btn.setChecked(False); self.end_picks()
-            self.region_pick = (pid, after if pid is None else None)
-            self.prev.box_mode = True; self.prev.setCursor(QtC.Qt.CrossCursor)
-            self.say("Draw a frame around what the close-up should show: press the mouse button and drag. Esc cancels.")
-
-        def end_region_pick(self):
-            self.region_pick = None; self.prev.box_mode = False; self.prev._box = None; self.prev.setCursor(QtC.Qt.ArrowCursor)
-
-        def on_boxed(self, fx0, fy0, fx1, fy1):
-            if self.region_pick is None or self.st.ren is None or self.gen is not None:
-                self.end_region_pick(); return
-            pid, after = self.region_pick; self.end_region_pick()
-            plan, i = self.st.plan_frame(self.spec_for(), {"frame": self.frame})
-            self.st.ren.draw(plan.frames[i], self.spec_for(), self.st.ren.size, annotate=False)  # the frame that was drawn
-            box = self.st.ren.region_box(fx0, fy0, fx1, fy1)
-            if box is None:
-                self.say("There is nothing inside that frame. Draw it around structures or the slice.", "err"); return
-            region = dict(lo=[round(float(v), 2) for v in box[0]], hi=[round(float(v), 2) for v in box[1]])
-            if pid is None:
-                from .storyboard import make_target, new_part
-                part = new_part("focus", target=make_target([]), others=dict(colour="keep", opacity=1.0), region=region,
-                                motion="wiggle", caption="")
-                self.editor.insert(part, after)
-                self.say("Added a close-up of the frame you drew.", "ok")
-            else:
-                part = self.parts_panel.part(pid)
-                if part is None:
-                    return
-                part["region"] = region; self.editor.commit(select=pid, show=pid)
-                self.say("The close-up now shows the frame you drew.", "ok")
-
-        def start_waypoint_pick(self, pid):
-            self.pick_btn.setChecked(False); self.end_picks(keep=pid); self.waypoint_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
-            self.say("Click a structure or the slice to add a point. Press Esc when done.")
-
-        def end_waypoint_pick(self):
-            pid, self.waypoint_pick = self.waypoint_pick, None; self.prev.setCursor(QtC.Qt.ArrowCursor)
-            if pid and self.parts_panel.open_id == pid:
-                self.parts_panel.fill_details(pid)
-
-        def start_path_pick(self, pid):
-            self.pick_btn.setChecked(False); self.end_picks(keep=pid); self.path_pick = pid; self.prev.setCursor(QtC.Qt.CrossCursor)
-            self.req = self._main_req(); self.schedule(0)
-            self.say("Click the object the camera should follow.")
+            """'+ Click a structure in the preview': a new close-up of what is clicked, where the playhead is."""
+            self.clicks.start(NewCloseup(self.editor.anchor())) if on and self.spec else self.clicks.end()
 
         def keyPressEvent(self, e):
-            if e.key() == QtC.Qt.Key_Escape and self.editing_path() is not None and not (self.multi_pick or self.pick_mode or self.waypoint_pick
-                                                                                         or self.path_pick or self.region_pick):
-                self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
+            if e.key() == QtC.Qt.Key_Escape and self.clicks.escape():  # Esc ends exactly the click mode that is on
                 return
-            if e.key() == QtC.Qt.Key_Escape and (self.multi_pick or self.pick_mode or self.waypoint_pick or self.path_pick or self.region_pick or self.arrow_pick):
-                self.end_multi_pick(); self.end_waypoint_pick(); self.path_pick = None; self.end_region_pick(); self.arrow_pick = False; self.pick_btn.setChecked(False)
+            if e.key() == QtC.Qt.Key_Escape and self.editing_path() is not None:
+                self.path_edit_paused = self.selected_part; self.point_panel.close_panel(); self.prev.set_note(""); self.say("Done editing the path.")
                 return
             super().keyPressEvent(e)
 
-        def _multi_click(self, fx, fy):
-            from .storyboard import target_items
-            try:
-                p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy})
-            except Exception as exc:
-                self.say(f"Could not pick: {exc}", "err"); return
-            if not p.get("found"):
-                self.say("Nothing there. Click directly on a coloured structure.", "err"); return
-            part = self.parts_panel.part(self.multi_pick)
-            if part is None:
-                self.end_multi_pick(); return
-            whole = bool(QtW.QApplication.keyboardModifiers() & QtC.Qt.ShiftModifier) or p.get("component") is None
-            it = (p["class"], None if whole else int(p["component"]))
-            items = target_items(part.get("target"))
-            items = [x for x in items if x != it] if it in items else items + [it]
-            self.parts_panel.set_items(self.multi_pick, items)
-            self.req = self._main_req(); self.schedule(0)
-            self.say(f"{len(items)} in focus. Click more, or press Esc when done.", "ok")
-
         def on_click(self, fx, fy):
-            if self.busy:  # the worker is replacing the data and the renderer
+            if self.busy or self.clicks.click(fx, fy):  # (busy: the worker is replacing the data and the renderer)
                 return
-            if self.waypoint_pick and self.gen is None:
-                pt = self.st.ren.pick_point(fx, fy) if self.st.ren is not None else None
-                part = self.parts_panel.part(self.waypoint_pick)
-                if pt is None or part is None:
-                    self.say("Nothing there. Click on a structure or on the slice.", "err"); return
-                ws = list(part.get("waypoints") or []); ws.append(dict(point=[float(v) for v in pt], pause=0.0))
-                part["waypoints"] = ws; self.editor.commit(select=self.waypoint_pick)
-                self.say(f"Point {len(ws)} added. Click more, or press Esc when done.", "ok"); return
-            if self.path_pick and self.st.has_segmentation and self.gen is None:
-                p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy}); part = self.parts_panel.part(self.path_pick)
-                if not p.get("found") or part is None:
-                    self.say("Nothing there. Click directly on a coloured structure.", "err"); return
-                part["source"] = dict(kind="follow", items=[{"structure": p["class"], "component": p.get("component")}])
-                pid, self.path_pick = self.path_pick, None; self.prev.setCursor(QtC.Qt.ArrowCursor)
-                self.editor.commit(select=pid, show=pid); self.say("The camera now follows that object.", "ok"); return
-            if self.multi_pick and self.st.has_segmentation and self.gen is None:
-                return self._multi_click(fx, fy)
-            if isinstance(self.arrow_pick, str) and self.gen is None:  # "Point at more things": until a click on empty space
-                from .gui_annotations import add_pointer_at
-                if not add_pointer_at(self, self.arrow_pick, (fx, fy)):
-                    self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); self.say("Done.", "ok")
-                return
-            if self.arrow_pick and self.gen is None:  # "+ Add arrow": this click is where it points
-                from .gui_annotations import add_arrow_at
-                self.arrow_pick = False; self.prev.setCursor(QtC.Qt.ArrowCursor); add_arrow_at(self, (fx, fy)); return
-            ep = self.editing_path() if not (self.pick_mode or self.region_pick) and self.gen is None else None
+            ep = self.editing_path() if self.gen is None else None
             if ep is not None and self.st.ren is not None:  # path editor: a click adds a point after the selected one
                 pt = self.st.ren.pick_point(fx, fy)
                 if pt is None:
                     self.say("Click on a structure or on the slice to add a point.", "err"); return
                 ws = list(ep.get("waypoints") or []); at = (self.path_point[1] + 1) if self.path_point and self.path_point[0] == ep["id"] else len(ws)
                 ws.insert(at, dict(point=[float(v) for v in pt], pause=0.0)); ep["waypoints"] = ws
-                self.editor.commit(select=ep["id"]); self.path_point = (ep["id"], at)
-                self.say(f"Point {at + 1} added.", "ok"); return
-            if not self.pick_mode or not self.st.has_segmentation or self.gen is not None:
-                return
-            try:
-                p = self.st.pick(self.spec_for(), {"frame": self.frame, "x": fx, "y": fy})
-            except Exception as exc:
-                self.say(f"Could not pick: {exc}", "err"); return
-            if not p.get("found"):
-                self.say("Nothing there. Click directly on a coloured structure.", "err"); return
-            if self.pick_for:  # choosing the object of an existing close-up
-                pid, key = self.pick_for
-                if p["class"] != key or p.get("component") is None:
-                    self.say(f"That is not one {self.spec['classes'].get(key, {}).get('name', 'such')} object. Click one of them.", "err"); return
-                self.pick_for = None; self.pick_btn.setChecked(False)
-                part = self.parts_panel.part(pid)
-                if part is not None:
-                    part["target"] = {"class": key, "component": p["component"]}
-                    self.editor.commit(select=pid); self.parts_panel.fill_details(pid)
-                    self.say(f"The close-up now shows one object ({p['voxels']:,} voxels).", "ok")
-                return
-            self.pick_btn.setChecked(False)
-            extra = f" (one object, {p['voxels']:,} voxels)" if p.get("component") is not None else ""
-            after, self.editor.pending_after = self.editor.pending_after, None
-            self.add_focus({"class": p["class"], "component": p["component"]} if p.get("component") is not None else {"class": p["class"]},
-                           p["name"], after)
-            self.say(f"Added a close-up of {p['name']}{extra}.", "ok")
+                self.editor.commit(select=ep["id"]); self.select_path_point(ep["id"], at, show=False)
+                self.say(f"Point {at + 1} added.", "ok")
+
+        def on_scrub(self, v):
+            self.stop_play()  # any click or key on the timeline stops playback, first: then the frame it points at counts
+            self.nav.finish()  # a glide ends at its end view, on the view it started on
+            self.req = {"frame": int(v)}; self.schedule(40)
+
+        def view_source(self):
+            """The part whose camera the preview shows at the playhead (a transition counts to the part it leads into; a
+            hold without a view of its own: the part whose camera it keeps), or None."""
+            plan = self.timeline.canvas.plan if hasattr(self, "timeline") else None
+            if not (self.spec and plan) or not (0 <= self.frame < len(plan.frames)):
+                return None
+            on = [p for p in self.spec["shots"] if p.get("on", True)]; part = self.parts_panel.part(plan.frames[self.frame].get("part"))
+            while part is not None and part["type"] == "hold" and not part.get("view") and part in on:
+                i = on.index(part); part = on[i - 1] if i > 0 else None
+            return part
 
         def view_part(self):
-            """The selected "own view" part when the playhead is inside it: dragging and scrolling change its view."""
-            pid = self.selected_part; plan = self.timeline.canvas.plan
-            if not (pid and self.spec and plan) or not (0 <= self.frame < len(plan.frames)) or plan.frames[self.frame].get("part") != pid:
-                return None
-            part = self.parts_panel.part(pid)
+            """The part whose own view is on screen, selected or not (6-D1): dragging, the wheel and keys change it."""
+            part = self.view_source()
             return part if part and part["type"] in ("overview", "slide", "hold") and part.get("view") and not part.get("locked") else None
 
         def locked_part(self, say=True):
             """The part at the playhead when its view is locked (3.5): moving around in the preview leaves it alone."""
-            plan = self.timeline.canvas.plan if hasattr(self, "timeline") else None
-            if not (self.spec and plan) or not (0 <= self.frame < len(plan.frames)):
-                return None
-            pid = plan.frames[self.frame].get("part"); part = self.parts_panel.part(pid) if pid else None
+            part = self.view_source()
             if part is None or not part.get("locked"):
                 return None
             if say:
@@ -1487,12 +1339,13 @@ def build_gui(args):
                 self.schedule()
 
         def on_drag(self, dx, dy):
-            if self.pick_mode or not self.spec or self.gen is not None or self.busy or self.locked_part():
+            if isinstance(self.clicks.mode, (NewCloseup, CloseupObject)) or not self.spec or self.gen is not None or self.busy or self.locked_part():
                 return
-            part = self.view_part()
-            if self._drag0 is None:
-                self._drag0 = dict(part["view"] if part else self.spec["view"])
-            v0 = self._drag0
+            if self._drag0 is None:  # the view it changes is taken when it starts
+                part = self.view_part(); self._drag0 = (part["id"] if part else None, dict(part["view"] if part else self.spec["view"]))
+            pid, v0 = self._drag0; part = self.parts_panel.part(pid) if pid else None
+            if pid and part is None:
+                return
             tilt, az = min(85.0, max(0.0, v0["tilt"] + dy * 0.25)), ((v0["az"] - dx * 0.35 + 180.0) % 360.0) - 180.0
             if part:
                 self.set_part_view(part, quick=True, tilt=tilt, az=az)
@@ -1516,6 +1369,7 @@ def build_gui(args):
                 self.folder_le.setText(d)
 
         def make_movie(self):
+            self.project.take_typing()
             if not self.st.can_show or self.gen is not None or self.busy:
                 return
             if not any(p.get("on", True) for p in self.spec["shots"]):
@@ -1576,9 +1430,10 @@ def build_gui(args):
                 w.setEnabled(not on)
             self.go_btn.setVisible(not on); self.cancel_btn.setVisible(on); self.progress.setVisible(on)
             if on:
-                self.progress.setValue(0)
+                self.progress.setValue(0); self.clicks.end()
             else:
                 self.export.sync()  # the size and codec of ProRes files can't be chosen
+                self.presets.resume()
 
         def _render_step(self):
             try:

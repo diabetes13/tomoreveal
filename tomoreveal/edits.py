@@ -49,14 +49,18 @@ def set_part(spec, part_id, **fields):
 
 
 def split_part(spec, ds, part_id, frame):
-    """Split a slide or a hold at a frame of its main phase into two parts."""
+    """Split a slide or a hold at a frame of its main phase into two parts, joined at that frame. Its arrows and text
+    go on in the second half (see _split_annotations)."""
     i = _index(spec, part_id); p = spec["shots"][i]
     if p.get("type") not in ("slide", "hold"):
         raise UserError("This kind of part cannot be split.")
     plan = build_plan(spec, ds); rng = main_range(plan, part_id)
     if rng is None or not (rng[0] < frame < rng[0] + rng[1]):
         raise UserError("Put the playhead inside the part (not at its very start or end) to split it.")
-    start, count = rng; f = (frame - start) / count; secs = float(p.get("seconds", 5))
+    start, count = rng; secs = float(p.get("seconds", 5))
+    sg = next(sg for sg in plan.segments if sg["part"] == part_id and sg["phase"] == "main")
+    n = max(1, round(plan.fps * max(0.1, secs)))  # all its frames: transitions may overlap its start (skip) or end
+    f = (frame - start + sg.get("skip", 0)) / n
     first, second = copy.deepcopy(p), copy.deepcopy(p)
     second["id"] = new_id()
     first["seconds"] = secs * f; second["seconds"] = secs * (1 - f)
@@ -69,7 +73,39 @@ def split_part(spec, ds, part_id, frame):
         if second.get("structures") in ("none", "above", "all"):
             second["structures"] = "keep"
     spec["shots"][i:i + 1] = [first, second]
+    _split_annotations(spec, part_id, second["id"], plan.frames[frame].get("tp"))
     return spec
+
+
+def _split_annotations(spec, pid, new, T):
+    """The arrows and text of a part split at T seconds into it (its clock "tp"): what shows in the second half gets a
+    copy there (it is moved, if it shows nowhere else), its times earlier by T. A start before the join becomes negative,
+    so that a fade or growth simply goes on. Items in all parts keep "all" when they have no times; with times, their
+    list of parts is written out (the times now belong to these parts)."""
+    from . import annotations as an
+    if T is None:
+        return
+    ids = [p.get("id") for p in spec["shots"] if p.get("id") != new]
+    its = {id(a) for a in an.items(spec)}; out = []
+    for a in spec.get("annotations") or []:
+        out.append(a)
+        if id(a) not in its or not an.shown_in(a, pid):
+            continue
+        sh = a.setdefault("show", {}); s0, s1 = an.show_times(a)
+        if sh.get("parts", "all") == "all":
+            if sh.get("start") is None and sh.get("end") is None:
+                continue
+            sh["parts"] = list(ids)
+        if s1 is not None and s1 < T:  # only in the first half
+            continue
+        b = copy.deepcopy(a); b["id"] = new_id()
+        b["show"].update(parts=[new], start=s0 - T, end=None if s1 is None else s1 - T)
+        if s0 >= T:  # only in the second half
+            sh["parts"] = [q for q in sh["parts"] if q != pid]
+            if not sh["parts"]:
+                b["id"] = a["id"]; out[-1] = b; continue
+        out.append(b)
+    spec["annotations"] = out
 
 
 def whole_structure(spec, key):

@@ -1,6 +1,8 @@
 """The look of a frame after VTK has drawn it (3.5): soft shadows baked into the surface colours, see-through
 membranes, outlines and depth fade from the depth buffer and a flat-colour pass, the vignette and the background blur.
 Mixed into Renderer, which provides pl, ds, vtk, shape, size, img, cplanes, actors, comp_actors and the other actors."""
+import contextlib
+
 import numpy as np
 
 from .common import hex2rgb
@@ -18,7 +20,8 @@ class PictureLooks:
         """Soft shadows baked into the vertex colours (the colour each actor has now, times the shadow factor)."""
         from .look import SHADOW_DARKEST, BakedShadows
         on = L35["shadow"] != "none"
-        acts = [(kk, act, self.mesh_of(kk)) for kk, act in self.actors.items()]
+        acts = [(kk, act, act._shown_mesh if getattr(act, "_rest", False) else self.mesh_of(kk)) for kk, act in self.actors.items()]
+        acts += [(kk, act, act._shown_mesh) for (kk, _), act in self.comp_actors.items() if act is not None]  # objects in focus
         if not on:
             for _, act, _ in acts:
                 if act.mapper.GetScalarVisibility():
@@ -26,7 +29,7 @@ class PictureLooks:
             return
         if not hasattr(self, "_ao"):
             self._ao = BakedShadows()
-        shown = [kk for kk, act, _ in acts if act.GetVisibility()]
+        shown = sorted({kk for kk, act, _ in acts if act.GetVisibility()})  # an object in focus counts its structure
         self._ao.prepare(self.ds, shown, L35["reach"])  # hidden structures cast no shadows
         dark = SHADOW_DARKEST[L35["shadow"]]
         for kk, act, mesh in acts:
@@ -67,10 +70,42 @@ class PictureLooks:
         depth = (P - pos) @ d
         return np.where(inside, depth, np.inf)
 
+    @contextlib.contextmanager
+    def _flat_pass(self):
+        """Plain drawing for the passes that are read, not shown: no multisampling and no FXAA (both blend colours at
+        the edges, so the colour that names a structure would be lost there), and none of the render passes (SSAA,
+        SSAO, shadows: SSAA draws into a buffer of its own and leaves the window's depth buffer as it was). All is put
+        back afterwards."""
+        rw, ren = self.pl.ren_win, self.pl.renderer
+        samples, fxaa, passes = rw.GetMultiSamples(), ren.GetUseFXAA(), ren.GetPass()
+        rw.SetMultiSamples(0); ren.SetUseFXAA(False); ren.SetPass(None)
+        try:
+            yield
+        finally:
+            ren.SetPass(passes); ren.SetUseFXAA(fxaa); rw.SetMultiSamples(samples)
+
+    def scene_depth(self):
+        """Depth buffer (0..1, 1 where nothing is; rows from the top) of the frame just drawn, read when first asked
+        for and kept for that frame; None for a card. The outline pass draws over the window's depth buffer, and with a
+        render pass (Best, SSAO, shadows) VTK never writes the scene's depth into it: then the scene is drawn once more,
+        plainly, which gives the depth of "Off" exactly."""
+        if not getattr(self, "_depth_ok", False):
+            return None
+        if self._depth is None:
+            from vtkmodules.util.numpy_support import vtk_to_numpy
+            W, H = self.size; redraw = self.pl.renderer.GetPass() is not None
+            with self._flat_pass():
+                if redraw:
+                    self.pl.render()
+                arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+            self._depth = vtk_to_numpy(arr).reshape(H, W)[::-1].copy()
+        return self._depth
+
     def _id_pass(self, size):
         """Draw every shown structure in a flat colour of its own, opaque, without the slice: (RGB image, depth buffer
         (rows from the top), {id colour: structure id}). For outlines between touching structures and of see-through ones."""
         from vtkmodules.util.numpy_support import vtk_to_numpy
+        self.scene_depth()  # kept before this pass draws over it
         saved = []; W, H = size; ids = {}; self._id_actors = {}
         objs = [(kk, a) for kk, a in self.actors.items() if a.GetVisibility()] + \
                [(k[0], a) for k, a in self.comp_actors.items() if a is not None and a.GetVisibility()]
@@ -88,14 +123,14 @@ class PictureLooks:
             pr.SetAmbient(1.0); pr.SetDiffuse(0.0); pr.SetSpecular(0.0); pr.SetFrontfaceCulling(False)
         peel = self.peeling; self._set_peeling(False)
         self.pl.set_background((0, 0, 0)); self.bg = None  # set again by the next frame
-        # Plain drawing for this pass: without the shadow, SSAO and blur passes. Real shadows with these unlit flat
-        # colours gave "Could not set shader program" errors on NVIDIA (see shadows.unlit_to_ambient), and SSAO would
-        # darken the colours that name each structure.
-        ren = self.pl.renderer; passes = ren.GetPass(); ren.SetPass(None)
+        # Plain drawing for this pass (_flat_pass): real shadows with these unlit flat colours gave "Could not set shader
+        # program" errors on NVIDIA (see shadows.unlit_to_ambient), SSAO would darken the colours that name each
+        # structure, and smoothing would blend them at the edges.
         try:
-            self.pl.render(); img = self.pl.screenshot(None)
-            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-            zb = vtk_to_numpy(arr).reshape(H, W)[::-1].copy()
+            with self._flat_pass():
+                self.pl.render(); img = self.pl.screenshot(None)
+                arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
+                zb = vtk_to_numpy(arr).reshape(H, W)[::-1].copy()
         finally:
             for kind, a, v in saved:
                 if kind == "vis":
@@ -104,14 +139,12 @@ class PictureLooks:
                     pr = a.GetProperty(); col, lit, op, sv, amb, dif, spc, cull, rep = v
                     pr.SetColor(*col); pr.SetLighting(lit); pr.SetOpacity(op); a.mapper.SetScalarVisibility(sv)
                     pr.SetAmbient(amb); pr.SetDiffuse(dif); pr.SetSpecular(spc); pr.SetFrontfaceCulling(cull); pr.SetRepresentation(rep)
-            ren.SetPass(passes)
             self._set_peeling(peel)
         self._last_id = (img[..., :3], zb)
         return img[..., :3], zb, ids
 
     def _outlines_and_fade(self, img, s, spec, size, L35, transparent):
         from scipy import ndimage
-        from vtkmodules.util.numpy_support import vtk_to_numpy
         from .look import FADE_AMOUNT, OUTLINE_PX
         W, H = size; out = img.astype(np.float32)
         cam = self.pl.renderer.GetActiveCamera(); n, f = cam.GetClippingRange(); ortho = cam.GetParallelProjection()
@@ -123,8 +156,7 @@ class PictureLooks:
             return 2.0 * n * f / np.maximum(1e-9, f + n - zn * (f - n))
         bgc = np.array(hex2rgb(spec.get("style", {}).get("bg", "#000000"))) * 255
         if L35["depth_fade"] != "off":  # far things fade towards the background (towards white over the slice)
-            arr = self.vtk.vtkFloatArray(); self.pl.ren_win.GetZbufferData(0, 0, W - 1, H - 1, arr)
-            zb = vtk_to_numpy(arr).reshape(H, W)[::-1]; fg = zb < 0.99999; lin = linear(zb)
+            zb = self.scene_depth(); fg = zb < 0.99999; lin = linear(zb)
             amount = FADE_AMOUNT[L35["depth_fade"]]
 
             def fade_of(lin, fg):

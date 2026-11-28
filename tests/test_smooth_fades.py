@@ -1,6 +1,7 @@
 """Splitting a part and fading the tomogram in the second half: no pulse at the join, an option to fade over the whole
 part, and the background blur of close-ups keeps the objects in focus sharp."""
 import numpy as np
+import pytest
 
 import tomoreveal as tr
 from tomoreveal import edits, look
@@ -75,3 +76,51 @@ def test_flat_colour_pass_restores_the_render_passes(studio):
     assert before is not None  # SSAO of the Soft lighting
     ren._id_pass((160, 90))
     assert ren.pl.renderer.GetPass() is before
+
+
+def test_a_tomogram_fade_starts_with_an_overlapping_transition(studio):
+    """The fade noted its first frame before the overlap took frames back: it started as many frames late."""
+    ds = studio.ds; spec = tr.default_spec(ds)
+    a = sb.new_part("overview", seconds=2, tomogram=sb.tomogram_setting("shown"))
+    b = sb.new_part("overview", seconds=2, view=dict(tilt=70.0, az=60.0, zoom=1.2), transition=2.0, transition_in=dict(overlap_prev=1.0),
+                    tomogram=sb.tomogram_setting("hidden", fade=1.0))
+    spec["shots"] = [a, b]
+    s = [f["slice"] for f in sb.build_plan(spec, ds).frames if f["part"] == b["id"]]
+    assert 0 < 1.0 - s[0] < 0.05 and s[29] == 0.0 and s[28] > 0.0  # from the first frame of the flight, over 1 s
+    assert all(y <= x for x, y in zip(s, s[1:]))
+
+
+def test_a_card_keeps_its_fade_when_the_next_part_overlaps_it(studio):
+    ds = studio.ds; spec = tr.default_spec(ds)
+    k = sb.new_part("card", seconds=2)
+    b = sb.new_part("overview", seconds=2, view=dict(tilt=70.0, az=60.0, zoom=1.2), transition_in=dict(overlap_prev=0.5))
+    spec["shots"] = [sb.new_part("overview", seconds=1), k, b]
+    cards = [f for f in sb.build_plan(spec, ds).frames if f.get("card") == k["id"]]
+    assert len(cards) == 60 and cards[-1]["card_fade"] < 0.1  # it fades out completely, then the flight begins
+
+
+def test_an_overlapped_close_up_after_a_slide_without_structures_shows_them(studio):
+    """The close-up switched the structures on, then took back the slide's frames and with them the slide's state."""
+    ds = studio.ds; spec = tr.default_spec(ds)
+    a = sb.new_part("slide_up", seconds=2, pause_after=0)
+    b = sb.new_part("focus", target=sb.make_target([(ds.key_of(2), 1)]), seconds=2, transition_in=dict(overlap_prev=1.0))
+    spec["shots"] = [a, b]
+    mine = [f for f in sb.build_plan(spec, ds).frames if f["part"] == b["id"]]
+    assert mine and all(f["reveal"] and f["cut"] == "all" for f in mine)
+
+
+def arrival(ds, nxt, overlap):
+    spec = tr.default_spec(ds)
+    a = sb.new_part("slide", seconds=2, pause_after=0, **{"from": "first", "to": "last"})
+    b = nxt(); b["transition_in"] = dict(b.get("transition_in") or {}, overlap_prev=overlap)
+    spec["shots"] = [a, b]
+    return next(f["k"] for f in sb.build_plan(spec, ds).frames if f["part"] == b["id"] and f["phase"] == "main")
+
+
+@pytest.mark.parametrize("nxt", [
+    lambda: sb.new_part("overview", seconds=1, view=dict(tilt=70.0, az=60.0, zoom=1.2)),
+    lambda: sb.new_part("hold", seconds=1, view=dict(tilt=20.0, az=30.0, zoom=1.0)),
+    lambda: sb.new_part("overview", seconds=1, transition_in=dict(kind="dissolve")),
+    lambda: sb.new_part("slide", seconds=1, **{"from": "current", "to": "first"})], ids=["overview", "hold", "dissolve", "current"])
+def test_an_overlap_arrives_at_the_slice_it_would_without(studio, nxt):
+    assert arrival(studio.ds, nxt, 0.5) == arrival(studio.ds, nxt, 0.0)

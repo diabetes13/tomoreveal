@@ -478,8 +478,7 @@ class Studio:
         axes = tuple(a for a in "xyz" if a in (axes or ()))
         if axes == self.flip:
             return self.info()
-        self.flip = axes
-        self._drop_renderer()
+        self.flip = axes  # the renderer is made again on the window's thread (_update marks it stale), never here
         log("flipping the volume and building 3D surfaces ...")
         return self._update(log, make_renderer)
 
@@ -570,16 +569,21 @@ class Studio:
         if not self.can_show:
             raise UserError("load a tomogram or a segmentation first")
         frames, marks, i = self._frame(spec, req)
-        img = self.ren.draw(frames[i], spec, self._psize(spec), aa=False)
+        img = self.ren.draw(frames[i], spec, self._psize(spec), aa="fxaa")  # no smoothing setting here: Fast
         buf = io.BytesIO(); Image.fromarray(img[..., :3]).save(buf, "JPEG", quality=88)
         fps = int(spec.get("output", {}).get("fps", 30))
         return dict(img="data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode(), frame=i, total=len(frames),
                     seconds=round(len(frames) / fps, 1), marks=marks)
 
     def pick(self, spec, req):
+        """The structure under req's x, y in the frame req names, which is drawn first (the browser)."""
         frames, _, i = self._frame(spec, req)
         self.ren.draw(frames[i], spec, self._psize(spec), aa=False, annotate=False)
-        hit = self.ren.pick(float(req["x"]), float(req["y"]))
+        return self.pick_at(spec, req["x"], req["y"])
+
+    def pick_at(self, spec, x, y):
+        """The structure under x, y (0..1 from the top left) of the picture on screen (Renderer.show), drawn nothing."""
+        hit = self.ren.pick(float(x), float(y))
         if hit is None:
             return dict(found=False)
         k, pos = hit

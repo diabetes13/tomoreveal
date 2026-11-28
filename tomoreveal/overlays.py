@@ -106,10 +106,11 @@ def nice_lengths(lo, hi):
 
 
 def px_per_voxel(pose, frame_h, fov, ortho):
-    """Pixels per voxel at the camera's focal point (the centre of what is looked at)."""
+    """Pixels per voxel at the camera's focal point (the centre of what is looked at). fov: the Look's; a point of a
+    camera path may have its own (pose["fov"])."""
     if ortho:
         return frame_h / (2.0 * pose["scale"])
-    return frame_h / (2.0 * pose["dist"] * math.tan(math.radians(fov) / 2.0))
+    return frame_h / (2.0 * pose["dist"] * math.tan(math.radians(float(pose.get("fov", fov))) / 2.0))
 
 
 def auto_length(px_per_nm, frame_w):
@@ -147,7 +148,10 @@ def add_bar_lengths(frames, spec, ds, w, h, fov, ortho):
         if pid not in per_part:
             pose = first.get(pid, f["pose"])
             per_part[pid] = auto_length(px_per_voxel(pose, h, fov, ortho) * 10.0 / vox, w) if pid in first or last is None else last
-        f["bar_nm"] = last = per_part[pid]
+        last = per_part[pid]
+    from .frame_passes import each_state
+    for f in each_state(frames):  # (also the frames a dissolve blends away)
+        f["bar_nm"] = per_part[f.get("part")]
 
 
 # ---------------------------------------------------------------------------------------------------------------

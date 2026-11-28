@@ -131,3 +131,72 @@ def test_backgrounds(studio):
     assert img[2, 160].sum() < img[177, 160].sum() and img[177, 160].min() >= 250  # light grey at the top, white at the bottom
     lk.set_look(spec, background="black")
     assert studio.ren.draw(f, spec, (320, 180), annotate=False)[2, 160].max() == 0
+
+
+INSIDE = [dict(pos=[100.0, 100.0, 20.0], focal=[128.0, 160.0, 24.0]), dict(pos=[150.0, 200.0, 22.0], focal=[128.0, 160.0, 24.0])]
+
+
+def fade_span(f):
+    """(where the fade starts, where it ends) of a frame's depth range, as the renderer uses it."""
+    near, far = f["dr"]
+    return np.array([near + 0.4 * (far - near), far])
+
+
+def every_kind_of_flight(ds):
+    spec = tr.default_spec(ds); lk.apply_look(spec, "soft")
+    vt = sb.make_target([(ds.key_of(2), 1)])
+    spec["shots"] = [sb.new_part("overview", motion="rock", seconds=2), sb.new_part("focus", target=vt, seconds=2),
+                     sb.new_part("overview", seconds=2, view=dict(tilt=60.0, az=40.0, zoom=1.3)),
+                     sb.new_part("hold", seconds=1, view=dict(tilt=20.0, az=-30.0, zoom=0.8)),
+                     sb.new_part("path", seconds=3, source=dict(kind="points", items=[]), waypoints=INSIDE),
+                     sb.new_part("focus", target=sb.make_target([(ds.key_of(3), None)]), seconds=2,
+                                 transition_in=dict(overlap_prev=0.5, overlap_next=0.5))]
+    return spec
+
+
+def test_depth_fade_glides_through_every_flight(studio):
+    """A flight's frames had the range of the part it flies to from its first frame (a jump), and the end of the movie
+    kept the close-up's range."""
+    ds = studio.ds; spec = every_kind_of_flight(ds)
+    frames = sb.build_plan(spec, ds).frames
+    assert all(f.get("dr") for f in frames)
+    i, runs = 0, 0
+    while i < len(frames):
+        if frames[i]["phase"] != "transition":
+            i += 1; continue
+        j = i
+        while j + 1 < len(frames) and frames[j + 1]["phase"] == "transition":
+            j += 1
+        seq = np.array([fade_span(f) for f in frames[max(0, i - 1):j + 2]])
+        steps = np.abs(np.diff(seq, axis=0)).max(1)
+        if steps.sum() > 0:
+            runs += 1
+            assert steps.max() <= 3 * steps.mean(), (frames[i]["part"], steps.max() / steps.mean())
+        i = j + 1
+    assert runs >= 6  # in, out, into a hold, into the path, into the last close-up, back
+    first = next(f for f in frames if f["phase"] == "main")
+    assert frames[-1]["dr"] == first["dr"]  # back at the overview: the overview's range
+
+
+def test_depth_range_jumps_only_at_a_cut_a_blend_or_a_card(studio):
+    ds = studio.ds; spec = every_kind_of_flight(ds)
+    spec["shots"][2]["transition_in"] = dict(kind="cut"); spec["shots"][3]["transition_in"] = dict(kind="dissolve")
+    spec["shots"].insert(4, sb.new_part("card", seconds=1))
+    frames = sb.build_plan(spec, ds).frames
+    kinds = {p["id"]: (p.get("transition_in") or {}).get("kind", "flight") for p in spec["shots"]}
+    for i in range(1, len(frames)):
+        a, b = frames[i - 1], frames[i]
+        if any(f["phase"] == "transition" and not f.get("blend") for f in (a, b)) or a["dr"] == b["dr"]:
+            continue
+        assert b.get("blend") or b.get("card") or a.get("card") or (b["part"] != a["part"] and kinds.get(b["part"]) == "cut"), i
+
+
+def test_a_still_pause_with_depth_fade_and_an_arrow_is_drawn_once(studio):
+    from tomoreveal import annotations as an
+    ds = studio.ds; spec = tr.default_spec(ds); lk.apply_look(spec, "soft")
+    p = sb.new_part("slide", seconds=1, pause_after=1.0)
+    a = an.new_arrow([128.0, 160.0, 20.0]); a["show"].update(appear="pop", end=10.0)
+    spec["shots"] = [p]; spec["annotations"] = [a]
+    pause = [f for f in sb.build_plan(spec, ds).frames if f["phase"] == "pause" and f["part"] == p["id"]]
+    assert len(pause) == 30 and pause[0].get("dr") and pause[0].get("ann")
+    assert len({sb.state_key(f) for f in pause}) == 1

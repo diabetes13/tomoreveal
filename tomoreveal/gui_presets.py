@@ -139,10 +139,23 @@ class PresetsPanel(QtC.QObject):
         key = (json.dumps(w.spec.get("classes"), sort_keys=True, default=str), w.frame, tuple(sorted(saved_presets())))
         if key == self._key and not force:
             return
-        self._key = key; self._todo = list(self.cards); self.timer.start()
+        self._key = key; self._todo = list(self.cards); self.resume()
+
+    def resume(self):
+        """Go on with the pictures that are left, unless files are read, a movie is made or the preview plays (the
+        window calls this when each of those ends)."""
+        w = self.win
+        if self._todo and not w.busy and w.gen is None and not w.playing:
+            self.timer.start()
 
     def _draw_next(self):
         w = self.win
+        if w.busy or w.gen is not None or w.playing:
+            self.timer.stop(); return  # the rest waits for resume()
+        held = w.mouse_down()  # a drag: this picture waits (not on a 0 ms timer, which would keep a core busy)
+        self.timer.setInterval(50 if held else 0)
+        if held:
+            return
         if not self._todo or w.spec is None or w.st.ren is None:
             self.timer.stop(); return
         which = self._todo.pop(0); b = self.cards.get(which)
@@ -158,7 +171,7 @@ class PresetsPanel(QtC.QObject):
             apply_preset(sp, p)
         try:
             plan, i = w.st.plan_frame(sp, {"t": w.frame / max(1, w.total - 1)})
-            img = w.st.ren.draw(plan.frames[i], sp, THUMB, annotate=False)
+            img = w.st.ren.draw(plan.frames[i], sp, THUMB, aa="fxaa", annotate=False)  # no smoothing setting here: Fast
         except Exception:  # a picture is a nicety: never stop the window for it
             return
         import numpy as np
@@ -166,4 +179,4 @@ class PresetsPanel(QtC.QObject):
         q = QtG.QImage(a.tobytes(), wd, h, 3 * wd, QtG.QImage.Format_RGB888).copy()
         b.setIcon(QtG.QIcon(QtG.QPixmap.fromImage(q)))
         if not self._todo:
-            self.timer.stop(); w.schedule(0)  # the renderer drew other sizes: draw the preview again
+            self.timer.stop()

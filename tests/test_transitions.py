@@ -161,3 +161,64 @@ def test_drag_the_end_of_a_transition_on_the_timeline(tmp_path, demo, needs_3d):
         assert not errs, errs
     finally:
         sys.excepthook = old; win.close()
+
+
+@pytest.mark.parametrize("structures", ["above", "keep"])
+def test_an_overlap_into_a_slide_gives_a_plan(studio, structures):
+    """A slide's next frames have no camera pose of their own: build_plan stopped with KeyError('pose'), so neither the
+    preview nor the movie could be made."""
+    ds = studio.ds; spec = tr.default_spec(ds)
+    a = sb.new_part("overview", motion="none", seconds=1, view=dict(tilt=10.0, az=0.0, zoom=1.0))
+    b = sb.new_part("slide", structures=structures, seconds=2, pause_before=0, transition=1.0)
+    b["transition_in"] = dict(overlap_next=0.5)
+    spec["shots"] = [a, b]
+    plan = sb.build_plan(spec, ds)
+    t = [f for f in plan.frames if f["part"] == b["id"] and f["phase"] == "transition"]
+    m = [f for f in plan.frames if f["part"] == b["id"] and f["phase"] == "main"]
+    assert len(t) == 30 and len(m) == 60 - 15  # the slide started half a second early, during the flight
+    fr = framer(spec, ds); pos = np.array([campos(f["pose"], fr) for f in t + m])
+    assert np.allclose(pos[-1], pos[len(t)])  # the camera stays where the flight ended
+    ks = [f["k"] for f in t + m]
+    assert all(y >= x for x, y in zip(ks, ks[1:])) and ks[len(t) - 1] > ks[0]  # the slide already moves in the flight
+
+
+def leaving_a_dressed_part(ds, via, overlap):
+    """A still part with a look of its own, an arrow and the depth fade, left by a dissolve or a fade through black."""
+    from tomoreveal import annotations as an
+    from tomoreveal import look as lk
+    spec = tr.default_spec(ds); lk.apply_look(spec, "soft")
+    a = sb.new_part("overview", motion="none", seconds=2, look=dict(outline="thick", shadow="none"))
+    b = sb.new_part("overview", motion="none", seconds=2, view=dict(tilt=70.0, az=90.0, zoom=1.5))
+    b["transition_in"] = dict(kind=via, overlap_prev=overlap)
+    spec["shots"] = [a, b]; spec["annotations"] = [an.new_arrow([128.0, 160.0, 20.0], parts=[a["id"]])]
+    frames = sb.build_plan(spec, ds).frames
+    i = next(i for i, f in enumerate(frames) if f.get("blend"))
+    return spec, frames[i - 1], frames[i]
+
+
+@pytest.mark.parametrize("via,overlap", [("dissolve", 0.0), ("dissolve", 0.5), ("black", 0.0), ("black", 0.5)])
+def test_a_dissolve_starts_from_the_picture_that_was_shown(studio, via, overlap):
+    """The picture blended away was a copy made before the part's look, its arrows, the depth range and the caption
+    fades were added: they vanished on the first frame of the dissolve."""
+    spec, last, first = leaving_a_dressed_part(studio.ds, via, overlap)
+    src = first["blend"]["src"]
+    assert last["part"] == src["part"] and last.get("ann") and last.get("lk") and last.get("dr")
+    assert sb.state_key(dict(src, blend=None)) == sb.state_key(last)
+    at0 = dict(first, blend=dict(first["blend"], q=0.0))
+    a = studio.ren.draw(at0, spec, (320, 180)).astype(int); b = studio.ren.draw(last, spec, (320, 180)).astype(int)
+    assert np.abs(a - b).max() <= 2
+
+
+@pytest.mark.parametrize("via", ["dissolve", "black", "white"])
+def test_a_card_that_dissolves_into_a_dissolve_draws(studio, via):
+    """The dissolve source is the card's own frame, which dissolves into the frame that blends it: drawn without end."""
+    ds = studio.ds; spec = tr.default_spec(ds)
+    k = sb.new_part("card", seconds=1, transition_to_next="dissolve")
+    b = sb.new_part("overview", motion="none", seconds=1); b["transition_in"] = dict(kind=via)
+    spec["shots"] = [sb.new_part("overview", motion="none", seconds=1), k, b]
+    frames = sb.build_plan(spec, ds).frames
+    assert any(f.get("dissolve") and f.get("dissolve_to") is not None and f["dissolve_to"].get("blend") for f in frames)
+    for f in frames:
+        if f.get("card") or f.get("blend"):
+            sb.state_key(f)
+            studio.ren.draw(f, spec, (160, 90))

@@ -134,14 +134,15 @@ def test_add_arrows_and_text_in_the_window(window, monkeypatch):
     from PySide6 import QtCore
     from tomoreveal import gui_annotations as ga
     app, win, errs = window
-    ga.start_add_arrow(win); assert win.arrow_pick
+    from tomoreveal import gui_clicks as clk
+    ga.start_add_arrow(win); assert isinstance(win.clicks.mode, clk.NewArrow)
     f = next((fx, 0.55) for fx in np.linspace(0.3, 0.7, 17) if win.st.ren.pick_point(fx, 0.55) is not None)
     p = win.st.ren.pick_point(*f)
     win.on_click(*f)
     for _ in range(10):
         app.processEvents()
     a = an.items(win.spec)[-1]
-    assert np.linalg.norm(np.asarray(a["anchor"]["xyz"]) - p) <= 1.0 and not win.arrow_pick
+    assert np.linalg.norm(np.asarray(a["anchor"]["xyz"]) - p) <= 1.0 and win.clicks.mode is None
     if win.label_editor is not None:
         win.label_editor.setText("here"); win.label_editor.returnPressed.emit()
     assert a["label"]["text"] == "here"
@@ -200,4 +201,191 @@ def test_clicks_beside_an_arrow_do_not_fail(window):
         win.prev.overlay.hover((fx, fy))
     for _ in range(5):
         app.processEvents()
+    assert not errs, errs
+
+
+def paused_slide(ds):
+    """A slide with pauses before and after it, then a close-up (and the flight back)."""
+    spec = tr.default_spec(ds)
+    s = sb.new_part("slide", seconds=2, pause_before=1.5, pause_after=1.5)
+    spec["shots"] = [s, sb.new_part("focus", target=sb.make_target([(ds.key_of(2), 1)]), seconds=1)]
+    return spec, s
+
+
+def test_an_arrow_without_an_end_time_shows_to_the_end_of_its_part(studio):
+    """Its end was the length of the main phase, counted from the start of the pause before it: it vanished 1.5 s early
+    and was never in the pause after."""
+    ds = studio.ds; spec, s = paused_slide(ds)
+    a = an.new_arrow([128.0, 160.0, 20.0], parts=[s["id"]]); a["show"]["appear"] = "pop"
+    b = an.new_arrow([100.0, 100.0, 20.0]); b["show"].update(start=1.0, end=2.0)
+    c = an.new_arrow([60.0, 60.0, 20.0]); c["show"]["end"] = 100.0
+    spec["annotations"] = [a, b, c]
+    frames = sb.build_plan(spec, ds).frames
+    mine = [f for f in frames if f["part"] == s["id"] and f["phase"] in ("main", "pause")]
+    assert len(mine) == 150 and all(a["id"] in f.get("ann", {}) for f in mine)
+    assert all(1.0 <= f["tp"] <= 2.0 for f in frames if b["id"] in f.get("ann", {}))  # explicit times: as before
+    back = max(i for i, f in enumerate(frames) if f["phase"] == "transition")
+    assert frames[back + 1:] and not any(f.get("ann") for f in frames[back + 1:])  # nothing after the flight back
+
+
+def arrow_in_a_closeup(ds, target, others, look=None, **classes):
+    """An arrow on vesicle 1 seen in the middle of a close-up of `target`."""
+    from tomoreveal import look as lk
+    spec = tr.default_spec(ds)
+    if look:
+        lk.apply_look(spec, look)
+    for key, kw in classes.items():
+        spec["classes"][ds.key_of(int(key[1:]))].update(kw)
+    a = an.new_arrow(vesicle_centre(ds), ds.key_of(2), 1, "v")
+    part = sb.new_part("focus", target=sb.make_target(target), others=others, motion="none", seconds=1)
+    spec["shots"] = [part]; spec["annotations"] = [a]
+    f = [g for g in sb.build_plan(spec, ds).frames if g["part"] == part["id"] and g["phase"] == "main"][-1]
+    assert f["e"] == 1.0
+    return a, spec, f
+
+
+@pytest.mark.parametrize("case", ["hidden in this close-up", "opacity 0", "all at opacity 0", "another object, others hidden"])
+def test_an_arrow_goes_with_what_the_close_up_hides(studio, case):
+    """It stayed, pointing at nothing: the close-up's per-structure settings, opacity 0 and the other objects of its own
+    structure were not asked."""
+    ds = studio.ds; ves, mem = ds.key_of(2), ds.key_of(1)
+    if case == "hidden in this close-up":
+        a, spec, f = arrow_in_a_closeup(ds, [(mem, None)], dict(colour="grey", opacity=1.0, each={ves: "hide"}))
+    elif case == "opacity 0":
+        a, spec, f = arrow_in_a_closeup(ds, [(mem, None)], dict(colour="grey", opacity=1.0), c2=dict(opacity=0.0))
+    elif case == "all at opacity 0":
+        a, spec, f = arrow_in_a_closeup(ds, [(mem, None)], dict(colour="grey", opacity=1.0)); spec["style"]["structures_opacity"] = 0.0
+    else:
+        a, spec, f = arrow_in_a_closeup(ds, [(ves, 2)], dict(colour="grey", opacity=0.0))
+    assert an._visible_here(a, f, spec, ds, an.anchor_xyz(a)) == 0.0
+    studio.ren.draw(f, spec, (320, 180)); assert f"ann:{a['id']}" not in studio.ren.last_rects
+
+
+@pytest.mark.parametrize("case", ["glass in this close-up", "glass look", "x-ray look", "its own object in focus"])
+def test_an_arrow_stays_where_the_close_up_only_changes_the_look(studio, case):
+    """Glass and X-ray draw structures at 30 % or less: that is the look, not hiding (the arrow would be dimmed)."""
+    ds = studio.ds; ves, mem = ds.key_of(2), ds.key_of(1)
+    if case == "glass in this close-up":
+        a, spec, f = arrow_in_a_closeup(ds, [(mem, None)], dict(colour="grey", opacity=1.0, each={ves: "glass"}))
+    elif case == "its own object in focus":
+        a, spec, f = arrow_in_a_closeup(ds, [(ves, 1)], dict(colour="grey", opacity=0.0))
+    else:
+        a, spec, f = arrow_in_a_closeup(ds, [(mem, None)], dict(colour="grey", opacity=1.0), look="glass" if "glass" in case else "xray",
+                                        c2=dict(membrane=True) if "glass" in case else {})
+    assert an._visible_here(a, f, spec, ds, an.anchor_xyz(a)) == 1.0
+
+
+def test_frames_to_the_picture_edge_are_counted_quickly():
+    """The off-screen fade measured each frame against every frame off the picture: a frames x frames table (1.7 GB and
+    11 s for every preview of a long movie)."""
+    import time
+    rng = np.random.default_rng(5)
+    for n in (1, 7, 2000):
+        for p in (0.02, 0.5, 0.98):
+            on = rng.random(n) > p
+            off = np.nonzero(~on)[0]
+            if not len(off):
+                continue
+            want = np.min(np.abs(np.arange(n)[:, None] - off[None, :]), axis=1)  # (as it was counted)
+            assert np.array_equal(an.frames_from_off(on), want)
+    on = np.ones(20000, bool); on[[5, 9000, 19999]] = False
+    t = time.perf_counter(); d = an.frames_from_off(on); t = time.perf_counter() - t
+    assert d[0] == 5 and d[9001] == 1 and d[19998] == 1 and t < 0.1, t
+
+
+def test_a_new_arrow_or_text_goes_into_the_part_on_screen(window):
+    """Not into the selected part: the playhead is in part 2, part 1 is selected. On a card nothing is added."""
+    from tomoreveal import gui_annotations as ga
+    from tomoreveal import storyboard as sb
+    app, win, errs = window
+    s1, s2, card = sb.new_part("slide", seconds=3), sb.new_part("slide", seconds=3), sb.new_part("card", seconds=3)
+    win.spec["shots"] = [s1, s2, card]; win.spec["annotations"] = []; win.editor.commit(select=s1["id"])
+    win.prev_timer.stop(); win.do_preview(); app.processEvents()
+    win.ann_panel.only_part.setChecked(True)
+    def go(pid, u=0.5):
+        win.req = {"at": {"part": pid, "u": u}}; win.prev_timer.stop(); win.do_preview(); app.processEvents()
+    go(s2["id"]); win.selected_part = s1["id"]
+    f = next((fx, 0.55) for fx in np.linspace(0.3, 0.7, 17) if win.st.ren.pick_point(fx, 0.55) is not None)
+    a = ga.add_arrow_at(win, f); t = ga.add_text_at(win, None)
+    assert a["show"]["parts"] == [s2["id"]] and t["show"]["parts"] == [s2["id"]] and win.selected_part == s2["id"]
+    if win.label_editor is not None:
+        win.label_editor.setText("x"); win.label_editor.returnPressed.emit()
+    go(s2["id"])
+    assert {a["id"], t["id"]} <= set(win.timeline.canvas.plan.frames[win.frame].get("ann", {}))  # seen in this frame
+    assert win.ann_panel.rows.count() == 2  # and in the list of the selected part
+    go(card["id"]); n = len(win.spec["annotations"])
+    assert ga.add_arrow_at(win, f) is None and ga.add_text_at(win, None) is None
+    assert len(win.spec["annotations"]) == n and "card" in win.msg_lbl.text().lower()
+    assert not errs, errs
+
+
+def test_typing_in_the_list_of_arrows_is_not_interrupted(window):
+    """G-45: every change rebuilt all rows inside the signal of one of them: digits, focus and the next click were lost."""
+    from PySide6 import QtCore, QtTest, QtWidgets
+    from tomoreveal import storyboard as sb
+    app, win, errs = window
+    s = sb.new_part("slide", seconds=20); win.spec["shots"] = [s]
+    a = an.new_arrow([128.0, 160.0, 20.0], parts=[s["id"]]); win.spec["annotations"] = [a]; win.editor.commit(select=s["id"])
+    win.tabs.setCurrentIndex(win.TAB_LOOK); win.show(); win.activateWindow(); win.windowHandle().requestActivate()
+    for _ in range(200):
+        app.processEvents()
+        if win.isActiveWindow():
+            break
+    else:
+        pytest.skip("the window could not be made active here")
+    win.prev_timer.stop(); win.do_preview(); app.processEvents()
+    row = win.ann_panel.rows.itemAt(0).widget()
+    to = [sp for sp in row.findChildren(QtWidgets.QDoubleSpinBox) if sp.prefix() == "to "][0]
+    label = row.findChildren(QtWidgets.QLineEdit)[0]; vis = row.findChildren(QtWidgets.QCheckBox)[0]
+    win.ann_panel.group.body.parentWidget().setVisible(True)
+    to.setFocus(); to.selectAll(); QtTest.QTest.keyClicks(to, "12.5"); QtTest.QTest.keyClick(to, QtCore.Qt.Key_Return)
+    for _ in range(5):
+        app.processEvents()
+    assert an.find(win.spec, a["id"])["show"]["end"] == pytest.approx(12.5)
+    assert win.ann_panel.rows.itemAt(0).widget() is row and to.hasFocus() and to.isVisibleTo(win)
+    # type a label, then click "shown" with one click on the window: both happen
+    label.setFocus(); label.selectAll(); QtTest.QTest.keyClicks(label, "here")
+    win.ensurePolished(); vis.window().raise_()
+    at = vis.mapTo(win, vis.rect().center())
+    QtTest.QTest.mouseClick(win.windowHandle(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+    for _ in range(10):
+        app.processEvents()
+    b = an.find(win.spec, a["id"])
+    assert b["label"]["text"] == "here" and b.get("visible", True) is False
+    assert win.ann_panel.rows.itemAt(0).widget() is row  # the same widgets, filled again
+    assert not errs, errs
+
+
+def test_esc_in_the_label_editor_cancels(window):
+    """G-55: Esc did not close the label editor; the next click elsewhere kept the text, and keys reached the preview."""
+    from PySide6 import QtCore, QtTest
+    from tomoreveal import gui_annotations as ga
+    from tomoreveal import gui_clicks as clk
+    app, win, errs = window
+    a = an.new_arrow([128.0, 160.0, 20.0]); a["label"]["text"] = "old"; win.spec["annotations"] = [a]; win.editor.commit()
+    win.prev_timer.stop(); win.do_preview(); app.processEvents()
+    win.show(); win.activateWindow(); win.windowHandle().requestActivate()
+    for _ in range(200):
+        app.processEvents()
+        if win.isActiveWindow():
+            break
+    else:
+        pytest.skip("the window could not be made active here")
+    win.clicks.start(clk.NewArrow()); n = len(win.editor.history.states); view = dict(win.spec["view"])
+    ga.edit_label(win, a["id"]); le = win.label_editor; app.processEvents()
+    QtTest.QTest.keyClicks(le, "new"); QtTest.QTest.keyClick(le, QtCore.Qt.Key_Up)
+    QtTest.QTest.keyClick(le, QtCore.Qt.Key_Escape)
+    for _ in range(5):
+        app.processEvents()
+    from shiboken6 import isValid
+    assert win.label_editor is None and not (isValid(le) and le.isVisible())
+    win.name_le.setFocus(); app.processEvents()
+    assert an.find(win.spec, a["id"])["label"]["text"] == "old" and len(win.editor.history.states) == n
+    assert isinstance(win.clicks.mode, clk.NewArrow)  # Esc was the editor's
+    assert win.spec["view"] == view  # Up did not move the view
+    # Enter and clicking elsewhere keep what was typed
+    ga.edit_label(win, a["id"]); le = win.label_editor; QtTest.QTest.keyClicks(le, "kept"); QtTest.QTest.keyClick(le, QtCore.Qt.Key_Return)
+    assert an.find(win.spec, a["id"])["label"]["text"] == "kept"
+    ga.edit_label(win, a["id"]); le = win.label_editor; QtTest.QTest.keyClicks(le, "again"); win.name_le.setFocus(); app.processEvents()
+    assert an.find(win.spec, a["id"])["label"]["text"] == "again"
     assert not errs, errs

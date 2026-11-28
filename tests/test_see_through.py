@@ -93,7 +93,7 @@ def test_a_30_percent_sphere_is_drawn(needs_3d):
         assert ren.pl.ren_win.GetMultiSamples() == 0
         spec["classes"][ds.key_of(1)]["opacity"] = 1.0
         ren.draw(tr.build_timeline(spec, ds)[0][0], spec, (160, 160))
-        assert not ren.peeling and ren.pl.ren_win.GetMultiSamples() == ms0  # back as the anti-aliasing wants
+        assert not ren.peeling and ren.pl.ren_win.GetMultiSamples() == ms0 == 0  # no mode uses multisampling
     finally:
         ren.close()
     del pv

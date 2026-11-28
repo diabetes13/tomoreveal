@@ -104,6 +104,8 @@ def test_anti_aliasing_modes(studio):
     edges = np.abs(np.diff(imgs["off"].sum(2), axis=1)) > 120  # sharp edges in the picture without anti-aliasing
     d = np.abs(imgs["ssaa"] - imgs["off"]).sum(2)[:, 1:]
     assert d[edges].mean() > 3 * max(0.5, d[~edges].mean())  # Best differs from Off mostly at edges
+    assert np.abs(imgs["msaa"] - imgs["ssaa"]).max() <= 2  # Multisample (older projects) is drawn as Best
+    assert [d for _, d in lk.AA_MOVIE] == ["off", "fxaa", "ssaa"] and lk.aa_mode("msaa") == "ssaa"
 
 
 def test_surface_styles(studio):

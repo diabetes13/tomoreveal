@@ -77,12 +77,12 @@ def test_point_at_more_things_in_the_window(window):
     a = ga.add_arrow_at(win, f); pump(app)
     if win.label_editor is not None:
         win.label_editor.hide()
-    ga.start_add_pointer(win, a["id"]); assert win.arrow_pick == a["id"]
+    ga.start_add_pointer(win, a["id"]); assert win.clicks.mode.arrow == a["id"]
     g = next((fx, 0.5) for fx in np.linspace(0.7, 0.3, 17) if win.st.ren.pick_point(fx, 0.5) is not None)
     win.on_click(*g); pump(app)
-    assert len(an.pointers(an.find(win.spec, a["id"]))) == 1 and win.arrow_pick == a["id"]
+    assert len(an.pointers(an.find(win.spec, a["id"]))) == 1 and win.clicks.mode.arrow == a["id"]
     win.on_click(0.001, 0.001); pump(app)  # empty space: done
-    assert win.arrow_pick is False
+    assert win.clicks.mode is None
     win.ann_panel.rebuild(); win.ann_panel.rebuild(); pump(app)  # twice: rows are replaced cleanly
     assert win.ann_panel.rows.count() >= 1
     assert not errs

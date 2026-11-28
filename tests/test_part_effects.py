@@ -1,6 +1,7 @@
 """3.5: effects (soft shadows, outlines, depth fade, membranes, slice shadows) in some parts only, blended at the
 change; structures drawn without soft shadows or outline."""
 import numpy as np
+import pytest
 
 import tomoreveal as tr
 from tomoreveal import look as lk
@@ -57,3 +58,15 @@ def test_structure_without_shadow_or_outline(studio):
     after = ren.draw(f, spec, (320, 180)).astype(int)
     assert not ren.actors[mem].mapper.GetScalarVisibility()
     assert np.abs(before - after).mean() > 0.5
+
+
+@pytest.mark.parametrize("own", [dict(depth_fade="medium"), dict(style="soft")])
+def test_depth_fade_in_one_part_only_is_steady(studio, own):
+    """With depth fade only in a part's own look, no depth range was made: the fade followed whatever was in the
+    picture, so it pumped as the camera turned."""
+    ds = studio.ds; spec = tr.default_spec(ds)  # Classic: no depth fade in the Look tab
+    a = sb.new_part("overview", seconds=1)
+    b = sb.new_part("overview", motion="spin", seconds=2, look=own)
+    spec["shots"] = [a, b]
+    main = [f for f in sb.build_plan(spec, ds).frames if f["part"] == b["id"] and f["phase"] == "main"]
+    assert main[0].get("dr") and len({f["dr"] for f in main}) == 1

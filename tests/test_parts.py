@@ -195,3 +195,65 @@ def test_names(st):
     f = tr.focus_shot({"class": st.ds.key_of(2), "component": 1}, "x")
     assert sb.part_name(f, d, st.ds) == "Close-up: one object of vesicles"
     assert sb.part_name(sb.new_part("slide", **{"from": 3, "to": "last"}, structures="above")) == "Slide: slice 4 → last (structures above)"
+
+
+def split_scene(ds):
+    """A slide with a pause before it between two overviews, and arrows and text with all kinds of times (5-D4)."""
+    from tomoreveal import annotations as an
+    s = sb.new_part("slide", seconds=8, pause_before=1.0)
+    spec = spec_with(ds, [sb.new_part("overview", seconds=2), s, sb.new_part("overview", seconds=2)])
+    def arrow(name, parts=None, **show):
+        a = an.new_arrow([128.0, 160.0, 20.0], label=name, parts=[s["id"]] if parts is None else parts)
+        a["show"].update(show); return a
+    t = an.new_text("all, with times"); t["show"].update(start=1.0, end=9.0)
+    spec["annotations"] = [arrow("0-10", start=0.0, end=10.0), arrow("2-end", start=2.0), arrow("6-8", start=6.0, end=8.0),
+                           arrow("no times"), t, arrow("grows", start=4.9, appear="grow"), arrow("fading in", start=4.8, fade=0.4),
+                           arrow("0-3", start=0.0, end=3.0), arrow("all, no times", parts="all")]
+    return spec, s
+
+
+def shown(spec, frames):
+    """Per frame: {name of the arrow or text: [opacity, grown, angle]} (a copy has the name of what it was copied from)."""
+    name = {a["id"]: a.get("text") or a["label"]["text"] for a in spec["annotations"]}
+    return [{name[k]: v for k, v in f.get("ann", {}).items()} for f in frames]
+
+
+def test_split_keeps_the_arrows_and_text_of_both_halves(st):
+    """The second half got a new id that no arrow or text named: they all vanished there."""
+    ds = st.ds; spec, s = split_scene(ds)
+    plan = sb.build_plan(spec, ds); before = shown(spec, plan.frames)
+    j = min(i for i, f in enumerate(plan.frames) if f["part"] == s["id"] and f.get("tp") is not None and f["tp"] >= 5.0 - 1e-6)
+    edits.split_part(spec, ds, s["id"], j)
+    second = spec["shots"][2]["id"]
+    plan2 = sb.build_plan(spec, ds); after = shown(spec, plan2.frames)
+    assert len(plan2.frames) == len(plan.frames) and sb.main_range(plan2, second)[0] == j
+    for i, (x, y) in enumerate(zip(before, after)):
+        if plan2.frames[i]["part"] == second:
+            x.pop("all, no times", None); y.pop("all, no times", None)  # (in every part: it fades in again in the new one)
+        assert x.keys() == y.keys(), (i, x, y)
+        assert all(np.allclose([v for v in x[k] if v is not None], [v for v in y[k] if v is not None], atol=0.002) for k in x), (i, x, y)
+    assert any("grows" in x and x["grows"][1] < 1 for x in after[j:j + 5])  # the growth goes on across the join
+    by = {a.get("text") or a["label"]["text"]: a for a in spec["annotations"] if a["show"].get("parts") != [second]}
+    assert (by["0-3"]["show"]["start"], by["0-3"]["show"]["end"], by["0-3"]["show"]["parts"]) == (0.0, 3.0, [s["id"]])  # first half only: as it was
+    assert "6-8" not in by  # only in the second half: moved there
+    assert by["all, with times"]["show"]["parts"] == [p["id"] for p in spec["shots"] if p["id"] != second]
+    assert by["all, no times"]["show"]["parts"] == "all"
+
+
+@pytest.mark.parametrize("case", ["overlapped start", "overlapped end"])
+def test_split_joins_at_the_playhead_in_an_overlapped_part(st, case):
+    """The split counted the part's frames without the ones a transition overlaps: the join came later than the playhead."""
+    ds = st.ds
+    if case == "overlapped start":
+        p = sb.new_part("slide", seconds=6, transition=2.0, transition_in=dict(overlap_next=1.0))
+        spec = spec_with(ds, [sb.new_part("overview", seconds=2), p])
+    else:
+        p = sb.new_part("hold", seconds=6)
+        spec = spec_with(ds, [sb.new_part("overview", seconds=2), p,
+                              sb.new_part("overview", seconds=2, transition=2.0, transition_in=dict(overlap_prev=1.5))])
+    plan = sb.build_plan(spec, ds); start, count = sb.main_range(plan, p["id"])
+    assert count < 180  # (the transition overlaps the part)
+    j = start + count // 2
+    edits.split_part(spec, ds, p["id"], j)
+    plan2 = sb.build_plan(spec, ds)
+    assert sb.main_range(plan2, spec["shots"][2]["id"])[0] == j and len(plan2.frames) == len(plan.frames)

@@ -17,6 +17,37 @@ def lerp_pose(a, b, u, d_az=None, fov=None):
     return out
 
 
+def camera_axes(fr, p):
+    """The camera's orientation as a rotation matrix (columns: right, up, back = centre -> camera), roll included."""
+    import numpy as np
+    if p.get("pos") is not None:
+        back = np.asarray(p["pos"], float) - np.asarray(p["c"], float); up = np.asarray(p["up"], float)
+    else:
+        back, up = (np.asarray(v, float) for v in fr.axes(p["tilt"], p["az"]))
+    back = back / (np.linalg.norm(back) or 1.0); up = up - back * float(up @ back); up = up / (np.linalg.norm(up) or 1.0)
+    return np.column_stack([np.cross(up, back), up, back])
+
+
+def lerp_camera(fr, a, b, u, d_az=None, a_end=None, b_start=None):
+    """Camera between a and b, a fraction u of the way. Where no pose has a camera position of its own, exactly
+    lerp_pose. Otherwise (a spin around X or Y, a camera path, the wiggle) the orientation turns the shorter way from
+    a_end (where the part we leave ends) to b_start (where the next one starts), with the motion of both parts since
+    (a after a_end, b after b_start) added; the camera is at the blended distance from the blended focus. Blending tilt
+    and azimuth instead flips such cameras (spins can turn half a circle during an overlap)."""
+    a_end = a if a_end is None else a_end; b_start = b if b_start is None else b_start
+    out = lerp_pose(a, b, u, d_az, fov=fr.fov)
+    if all(p.get("pos") is None for p in (a, b, a_end, b_start)):
+        return out
+    from scipy.spatial.transform import Rotation, Slerp
+    from .paths import tilt_az
+    R0, R1 = camera_axes(fr, a_end), camera_axes(fr, b_start)
+    turn = Slerp([0.0, 1.0], Rotation.from_matrix([R0, R1]))([min(1.0, max(0.0, float(u)))]).as_matrix()[0]
+    R = (camera_axes(fr, b) @ R1.T) @ (camera_axes(fr, a) @ R0.T) @ turn
+    t, az = tilt_az(R[:, 2], fr.u)
+    out.update(tilt=float(t), az=float(az), pos=out["c"] + out["dist"] * R[:, 2], up=R[:, 1])
+    return out
+
+
 def smooth01(u):
     u = min(1.0, max(0.0, u))
     return u * u * (3 - 2 * u)
